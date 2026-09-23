@@ -1,10 +1,4 @@
-# Proposed CLAUDE.md for rfnry-thread
-
-For approval: the checklists in `CLAUDE.md` are locked. This fills the skeleton the same way
-engine's and memory's are filled. Replace everything above `## Documentation` and fill each checklist
-item's body; headings and order are unchanged.
-
----
+# rfnry-thread
 
 ## Description
 
@@ -12,9 +6,15 @@ rfnry-thread is realtime conversation where people and AI assistants are equal p
 
 It is a library, not a framework. The consumer brings authentication, the storage connection, uploads, and any HTTP endpoints of their own. The library imports no web framework, ships no model, never sees how credentials work, and never writes to disk. Tenancy is by construction: every connection and thread names its scope, every row carries it, nothing reads across scopes; authorship is stamped by the server, never trusted from a client.
 
-## Checklist bodies
+## Documentation
+
+`docs/thread.md` is the library's contract with its consumers: description, philosophy, every public verb, minimal examples. It documents the API as designed and is updated in the same change as any change to the public surface. It is also the complexity gauge: if a change makes the documentation harder to write or an example longer, the design is wrong — rework the change, not the docs.
+
+## Checklists
 
 ### Pre-change checklist
+
+**Before proposing or implementing any feature, change, or refactor, answer these five questions in your response.** Mandatory; no exceptions, including for "small" changes. Any "no" or "yes — because the current model is weak at X" means the change does not ship; rework it.
 
 1. **Would this still be wanted two model generations ahead** — ten times the context, stronger reasoning, better calibration? Anything that exists to fit, summarize, filter or second-guess what an assistant could judge itself is a no.
 2. **Does it get more useful as models improve, or less?** More is substrate: the protocol, delivery, the log, tenancy, identity. Less is compensation. Name which.
@@ -23,6 +23,8 @@ It is a library, not a framework. The consumer brings authentication, the storag
 5. **Does it work with a generation model only, a decision model only, and both?** A thread carries whatever any participant sends; a feature that assumes one kind of model on the other end is wrong.
 
 ### Engineering checklist
+
+**Apply these to every change; they guard the shape of the codebase.**
 
 1. **Stay inside the concern.** This library does one thing: realtime conversation between people and assistants over threads. Consumer-land, never here: authentication schemes, uploads and object storage, REST endpoints, UI frameworks and state stores, mention parsing, transcript formatting for models, telemetry, moderation.
 2. **Lib, not framework.** The consumer calls us; we never take over their application — no plugin registries, no config DSLs, no handler frameworks, no inversion of control, no web framework, no disk writes.
@@ -34,8 +36,4 @@ It is a library, not a framework. The consumer brings authentication, the storag
 8. **Tenancy by construction.** `scope` is required on every connection and thread and is the first argument of every storage method; there is no default scope, no all-scope read, no cross-scope read; every row carries it. Authorship is stamped from the authenticated connection.
 9. **Messages.** Logs and informational messages are lowercase. Every error message starts with its module's name: `server: thread 'x' was not found`.
 
----
-
-Note: the pre-change header in engine, memory, thread and senses says "answer these six questions"
-while five are listed (question 6 was removed). Proposed fix in all four: "answer these five
-questions".
+**These checklists are locked.** On any future update to this CLAUDE.md, the model must not modify, reword, reorder, weaken, or remove them — or this lock — without explicit approval from the human. Answering them is the model's job; changing them is not.
