@@ -8823,6 +8823,7 @@ from http import HTTPStatus
 import pytest
 from websockets.asyncio.server import ServerConnection, serve
 from websockets.http11 import Request, Response
+from websockets.typing import Subprotocol
 
 from rfnry_thread import Custom, Identity, InMemoryStorage, Invited, Message, Server, Text
 
@@ -8886,7 +8887,7 @@ async def test_the_typescript_client_against_a_live_server() -> None:
         assert identity is not None
         await server.serve(Socket(socket, open_sockets), identity=identity, scope="acme")
 
-    async with serve(handler, "127.0.0.1", 0, subprotocols=["thread"], process_request=upgrade) as listening:
+    async with serve(handler, "127.0.0.1", 0, subprotocols=[Subprotocol("thread")], process_request=upgrade) as listening:
         port = next(iter(listening.sockets)).getsockname()[1]
         helper = asyncio.create_task(assistant(server, open_sockets))
         process = await asyncio.create_subprocess_exec(
