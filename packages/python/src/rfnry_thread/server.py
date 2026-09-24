@@ -26,6 +26,7 @@ from rfnry_thread.protocol import (
     encode,
     failure,
 )
+from rfnry_thread.state import REFRESH
 from rfnry_thread.storage import Stop, Storage
 from rfnry_thread.verbs import Authorize, Verbs
 
@@ -284,6 +285,31 @@ class Server:
             await verbs.signal(session, payload)
             return {}
         raise InputError(f"server: unknown method {method!r}")
+
+    async def start(self) -> None:
+        if self._stop is not None:
+            return
+        self._stop = await self._storage.listen(
+            self._hub.on_event, self._hub.on_signal, self._hub.announce
+        )
+        self._hub.linked = True
+        self._refresher = asyncio.get_running_loop().create_task(self._refresh())
+
+    async def stop(self) -> None:
+        if self._refresher is not None:
+            self._refresher.cancel()
+            with contextlib.suppress(asyncio.CancelledError):
+                await self._refresher
+            self._refresher = None
+        if self._stop is not None:
+            await self._stop()
+            self._stop = None
+        self._hub.linked = False
+
+    async def _refresh(self) -> None:
+        while True:
+            await asyncio.sleep(REFRESH)
+            await self._hub.announce()
 
     async def create_thread(
         self, scope: str, thread_id: str | None = None, metadata: dict[str, Any] | None = None
