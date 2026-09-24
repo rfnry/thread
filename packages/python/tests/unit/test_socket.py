@@ -1,0 +1,257 @@
+import asyncio
+import contextlib
+from collections.abc import AsyncIterator
+from http import HTTPStatus
+
+import pytest
+from websockets.asyncio.server import ServerConnection, serve
+from websockets.http11 import Request, Response
+
+from rfnry_thread import client as client_module
+from rfnry_thread.client import Client, Item
+from rfnry_thread.errors import ForbiddenError, TransportError
+from rfnry_thread.inmemory import InMemoryStorage
+from rfnry_thread.models import Identity, Joined, Message, Text
+from rfnry_thread.server import Server
+
+from .factories import BRUNO
+from .test_client import drain
+
+ANA_HEADERS = {"Authorization": "Bearer ana"}
+
+
+def who(request: Request | None) -> Identity | None:
+    token = (
+        ""
+        if request is None
+        else request.headers.get("Authorization", "").removeprefix("Bearer ").strip()
+    )
+    return Identity(role="user", id=token, name=token.title()) if token else None
+
+
+class Live:
+    def __init__(self, server: Server) -> None:
+        self.server = server
+        self.open: list[Served] = []
+        self.paused = False
+        self.drop_ack = False
+        self.url = ""
+
+    async def drop(self) -> None:
+        for served in self.open:
+            await served.socket.close()
+        self.open.clear()
+
+
+class Served:
+    def __init__(self, socket: ServerConnection, live: Live) -> None:
+        self.socket = socket
+        self.live = live
+
+    async def receive_text(self) -> str:
+        data = await self.socket.recv()
+        return data if isinstance(data, str) else data.decode()
+
+    async def send_text(self, data: str) -> None:
+        if self.live.drop_ack and data.startswith('{"type":"response"') and '"event":' in data:
+            self.live.drop_ack = False
+            await self.socket.close()
+            return
+        await self.socket.send(data)
+
+    async def close(self, code: int = 1000, reason: str | None = None) -> None:
+        await self.socket.close(code, reason or "")
+
+
+@contextlib.asynccontextmanager
+async def running(server: Server) -> AsyncIterator[Live]:
+    live = Live(server)
+
+    def upgrade(socket: ServerConnection, request: Request) -> Response | None:
+        if live.paused:
+            return socket.respond(HTTPStatus.SERVICE_UNAVAILABLE, "paused\n")
+        if who(request) is None:
+            return socket.respond(HTTPStatus.UNAUTHORIZED, "who are you?\n")
+        return None
+
+    async def handler(socket: ServerConnection) -> None:
+        identity = who(socket.request)
+        assert identity is not None
+        served = Served(socket, live)
+        live.open.append(served)
+        await server.serve(served, identity=identity, scope="acme")
+
+    async with serve(handler, "127.0.0.1", 0, process_request=upgrade) as listening:
+        live.url = f"ws://127.0.0.1:{next(iter(listening.sockets)).getsockname()[1]}"
+        yield live
+
+
+@pytest.fixture(autouse=True)
+def fast(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(client_module, "RECONNECT", 0.01)
+    monkeypatch.setattr(client_module, "BACKOFF", 0.01)
+
+
+@pytest.fixture
+async def live(server: Server) -> AsyncIterator[Live]:
+    async with running(server) as live:
+        yield live
+
+
+def first_text(message: Message) -> str:
+    part = message.content[0]
+    assert isinstance(part, Text)
+    return part.text
+
+
+async def until_joined(client: Client, timeout: float = 3.0) -> list[Item]:
+    items: list[Item] = []
+
+    async def collect() -> None:
+        async for item in client.events():
+            items.append(item)
+            if isinstance(item, Joined):
+                return
+
+    await asyncio.wait_for(collect(), timeout)
+    return items
+
+
+async def room(live: Live) -> tuple[Client, Client]:
+    ana = await Client.connect(live.url, headers=ANA_HEADERS)
+    bruno = await live.server.connect(BRUNO, scope="acme")
+    await ana.create_thread(thread_id="t1")
+    await ana.add_member("t1", BRUNO)
+    await ana.join("t1")
+    await drain(ana)
+    return ana, bruno
+
+
+async def read_to_the_end(client: Client) -> None:
+    async for _ in client.events():
+        pass
+
+
+async def test_a_socket_client_is_the_same_client(live: Live) -> None:
+    ana = await Client.connect(live.url, headers=ANA_HEADERS)
+    assert (ana.identity.id, ana.scope) == ("ana", "acme")
+    await ana.create_thread(thread_id="t1")
+    await ana.send("t1", "hello")
+    assert [e.kind for e in await ana.history("t1")] == ["member_added", "message"]
+    await ana.close()
+
+
+async def test_a_refused_upgrade_and_an_unreachable_server_raise(live: Live) -> None:
+    with pytest.raises(
+        ForbiddenError, match="^websocket: the server refused the connection with http 401$"
+    ):
+        await Client.connect(live.url)
+    with pytest.raises(TransportError, match="^client: could not connect"):
+        await Client.connect("ws://127.0.0.1:1", headers=ANA_HEADERS)
+
+
+async def test_a_dropped_socket_resumes_every_joined_thread_in_order_once(live: Live) -> None:
+    calls: list[int] = []
+
+    async def headers() -> dict[str, str]:
+        calls.append(1)
+        return ANA_HEADERS
+
+    ana = await Client.connect(live.url, headers=headers)
+    bruno = await live.server.connect(BRUNO, scope="acme")
+    await ana.create_thread(thread_id="t1")
+    await ana.add_member("t1", BRUNO)
+    await ana.join("t1")
+    await drain(ana)
+    live.paused = True
+    await live.drop()
+    for n in range(5):
+        await bruno.send("t1", f"m{n}")
+    live.paused = False
+    items = await until_joined(ana)
+    assert [first_text(i) for i in items if isinstance(i, Message)] == [f"m{n}" for n in range(5)]
+    assert isinstance(items[-1], Joined) and items[-1].truncated is False
+    assert len(calls) >= 2
+    await bruno.send("t1", "live")
+    after = [i for i in await drain(ana) if isinstance(i, Message)]
+    assert [first_text(m) for m in after] == ["live"]
+
+
+async def test_a_resume_beyond_the_replay_limit_says_truncated(storage: InMemoryStorage) -> None:
+    async with running(Server(storage, replay_limit=3)) as live:
+        ana, bruno = await room(live)
+        live.paused = True
+        await live.drop()
+        for n in range(5):
+            await bruno.send("t1", f"m{n}")
+        live.paused = False
+        items = await until_joined(ana)
+        assert [first_text(i) for i in items if isinstance(i, Message)] == ["m2", "m3", "m4"]
+        assert isinstance(items[-1], Joined) and items[-1].truncated is True
+
+
+async def test_a_write_whose_ack_was_lost_is_stored_exactly_once(live: Live) -> None:
+    ana, _ = await room(live)
+    live.drop_ack = True
+    message = await asyncio.wait_for(ana.send("t1", "exactly once"), 5.0)
+    stored = [e for e in await ana.history("t1") if isinstance(e, Message)]
+    assert [e.id for e in stored] == [message.id]
+
+
+async def test_a_write_made_while_disconnected_is_delivered_after_reconnect(live: Live) -> None:
+    ana, bruno = await room(live)
+    live.paused = True
+    await live.drop()
+    pending = asyncio.create_task(ana.send("t1", "sent offline"))
+    await asyncio.sleep(0.1)
+    assert not pending.done()
+    live.paused = False
+    message = await asyncio.wait_for(pending, 5.0)
+    assert [e.id for e in await bruno.history("t1") if isinstance(e, Message)] == [message.id]
+
+
+async def test_a_write_not_acknowledged_within_the_deadline_fails(
+    live: Live, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    ana, _ = await room(live)
+    monkeypatch.setattr(client_module, "DEADLINE", 0.3)
+    live.paused = True
+    await live.drop()
+    with pytest.raises(
+        TransportError,
+        match=r"^client: event '\w+' for thread 't1' was not acknowledged within 0.3s$",
+    ):
+        await ana.send("t1", "lost")
+
+
+async def test_an_upgrade_refused_on_reconnect_ends_the_stream_with_the_error(live: Live) -> None:
+    answers = iter([ANA_HEADERS, {}])
+
+    async def headers() -> dict[str, str]:
+        return next(answers, {})
+
+    ana = await Client.connect(live.url, headers=headers)
+    await live.drop()
+    with pytest.raises(
+        ForbiddenError, match="^websocket: the server refused the connection with http 401$"
+    ):
+        await asyncio.wait_for(read_to_the_end(ana), 3.0)
+
+
+async def test_a_headers_function_that_raises_on_reconnect_ends_the_stream_with_the_error(
+    live: Live,
+) -> None:
+    calls: list[int] = []
+
+    async def headers() -> dict[str, str]:
+        calls.append(1)
+        if len(calls) > 1:
+            raise RuntimeError("session expired")
+        return ANA_HEADERS
+
+    ana = await Client.connect(live.url, headers=headers)
+    await live.drop()
+    with pytest.raises(
+        ForbiddenError, match="^client: the headers function raised: session expired$"
+    ):
+        await asyncio.wait_for(read_to_the_end(ana), 3.0)

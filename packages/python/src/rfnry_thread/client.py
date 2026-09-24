@@ -51,8 +51,10 @@ from rfnry_thread.protocol import (
     decode,
     encode,
 )
+from rfnry_thread.websocket import open_socket
 
 Dial = Callable[[], Awaitable[Connection]]
+HeadersSource = dict[str, str] | Callable[[], Awaitable[dict[str, str]]]
 Item = Event | Signal | Joined
 
 HANDSHAKE = 10.0
@@ -75,6 +77,17 @@ def _expect[E](event: Event, kind: type[E]) -> E:
     if not isinstance(event, kind):
         raise ThreadException(f"client: the server answered with a {event.kind}")
     return event
+
+
+async def _headers(source: HeadersSource | None) -> dict[str, str] | None:
+    if source is None or isinstance(source, dict):
+        return source
+    try:
+        return await source()
+    except ThreadException:
+        raise
+    except Exception as exc:
+        raise ForbiddenError(f"client: the headers function raised: {exc}") from exc
 
 
 def _own(item: Item, identity: Identity) -> bool:
@@ -176,6 +189,13 @@ class Client:
         self._reconnector: asyncio.Task[None] | None = None
         self._closed = False
         self._failure: ThreadException | None = None
+
+    @classmethod
+    async def connect(cls, url: str, *, headers: HeadersSource | None = None) -> Client:
+        async def dial() -> Connection:
+            return await open_socket(url, await _headers(headers))
+
+        return await cls._open(dial)
 
     @classmethod
     async def _open(cls, dial: Dial) -> Client:
