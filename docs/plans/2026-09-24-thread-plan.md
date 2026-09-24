@@ -3166,6 +3166,8 @@ async def test_an_unknown_method_is_an_input_error(server: Server) -> None:
 `packages/python/tests/unit/test_verbs.py`:
 
 ```python
+from typing import Any
+
 import pytest
 
 from rfnry_thread.errors import ForbiddenError, InputError, NotFoundError
@@ -3201,8 +3203,10 @@ async def test_create_is_get_or_create_and_the_creator_is_the_first_member(serve
 async def test_a_non_member_is_forbidden_everywhere_and_a_missing_thread_is_not_found(server: Server) -> None:
     await room(server)
     bruno = await Peer.open(server, BRUNO)
-    for method, extra in [("thread.get", {}), ("thread.history", {}), ("thread.join", {}), ("member.list", {}),
-                          ("thread.update", {"metadata": {}}), ("thread.delete", {}), ("thread.create", {})]:
+    calls: list[tuple[str, dict[str, Any]]] = [
+        ("thread.get", {}), ("thread.history", {}), ("thread.join", {}), ("member.list", {}),
+        ("thread.update", {"metadata": {}}), ("thread.delete", {}), ("thread.create", {})]
+    for method, extra in calls:
         with pytest.raises(ForbiddenError, match="^server: 'bruno' is not a member of thread 't1'$"):
             await bruno.call(method, thread_id="t1", **extra)
     with pytest.raises(ForbiddenError):

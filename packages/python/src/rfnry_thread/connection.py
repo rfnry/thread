@@ -1,0 +1,9 @@
+from typing import Protocol
+
+
+class Connection(Protocol):
+    async def receive_text(self) -> str: ...
+
+    async def send_text(self, data: str) -> None: ...
+
+    async def close(self, code: int = 1000, reason: str | None = None) -> None: ...
