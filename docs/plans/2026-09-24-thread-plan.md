@@ -173,6 +173,9 @@ addopts = "-m 'not postgres and not live'"
 line-length = 100
 target-version = "py312"
 
+[tool.ruff.format]
+exclude = ["src/rfnry_thread/models.py", "src/rfnry_thread/tools.py"]
+
 [tool.ruff.lint]
 select = ["E", "F", "I", "W", "B", "UP", "SIM"]
 ignore = ["E501"]
@@ -366,7 +369,7 @@ def test_parts_parse_by_their_type() -> None:
 @pytest.mark.parametrize("fields", [{}, {"data": b"x", "url": "https://x"}])
 def test_a_media_part_carries_data_or_url_not_both(fields: dict[str, object]) -> None:
     with pytest.raises(InputError, match="^models: image carries data or url, not both$"):
-        Image(media_type="image/png", **fields)
+        Image.model_validate({"media_type": "image/png", **fields})
 
 
 def test_bytes_travel_as_standard_base64() -> None:
@@ -633,12 +636,12 @@ class Tools:
         return Tools._from({n: e for n, e in self._entries.items() if n not in names})
 ```
 
-Before committing, diff the blocks by eye against the engine files: `diff <(sed -n '/^Result = /,/if n not in names})$/p' packages/python/src/rfnry_thread/tools.py) <(sed -n '/^Result = /,/if n not in names})$/p' ../engine/packages/python/src/rfnry_engine/tools/tools.py)` prints nothing. `ruff format` must not rewrite the blocks: if it does, the engine's are formatted the same way, so run the test and trust it.
+Before committing, diff the blocks by eye against the engine files: `diff <(sed -n '/^Result = /,/if n not in names})$/p' packages/python/src/rfnry_thread/tools.py) <(sed -n '/^Result = /,/if n not in names})$/p' ../engine/packages/python/src/rfnry_engine/tools/tools.py)` prints nothing. `ruff format` would rewrap the blocks (the engine never formats them), so `pyproject.toml` excludes `models.py` and `tools.py` from `ruff format`, as rfnry-senses does; `ruff check` still lints them, and code appended to those files is written formatted by hand.
 
 - [ ] **Step 4: Run the gate**
 
 Run: `cd packages/python && uv run poe format && uv run poe check && uv run poe typecheck && uv run poe test`
-Expected: PASS; `test_family.py` passes `parts` and `tools`, skips `identity` (no senses code yet).
+Expected: PASS; `test_family.py` passes `parts` and `tools`, and `identity` too once `../senses` has its `Identity` (it skips while it does not).
 
 - [ ] **Step 5: Commit**
 
