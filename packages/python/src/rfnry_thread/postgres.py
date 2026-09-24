@@ -1,0 +1,395 @@
+from __future__ import annotations
+
+import asyncio
+import contextlib
+import json
+import random
+from collections.abc import AsyncIterator, Sequence
+from contextlib import asynccontextmanager
+from typing import Any
+
+from rfnry_thread.errors import NotFoundError, StorageError, ThreadException
+from rfnry_thread.models import EVENTS, Event, Member, Thread
+from rfnry_thread.storage import OnEvent, OnResume, OnSignal, Stop
+
+EVENTS_CHANNEL = "thread_events"
+SIGNALS_CHANNEL = "thread_signals"
+NOTIFY_LIMIT = 7900
+RELISTEN = 0.5
+RELISTEN_CAP = 30.0
+_LOCK = 0x7468726561640001
+
+_DDL = [
+    """
+    CREATE TABLE IF NOT EXISTS thread_threads (
+        scope TEXT NOT NULL, id TEXT NOT NULL, metadata JSONB NOT NULL,
+        created_at TIMESTAMPTZ NOT NULL, last_seq BIGINT NOT NULL DEFAULT 0,
+        PRIMARY KEY (scope, id))
+    """,
+    "CREATE INDEX IF NOT EXISTS ix_thread_threads_created ON thread_threads (scope, created_at DESC, id DESC)",
+    """
+    CREATE TABLE IF NOT EXISTS thread_members (
+        scope TEXT NOT NULL, thread_id TEXT NOT NULL, identity_id TEXT NOT NULL,
+        added_at TIMESTAMPTZ NOT NULL, body JSONB NOT NULL,
+        PRIMARY KEY (scope, thread_id, identity_id),
+        FOREIGN KEY (scope, thread_id) REFERENCES thread_threads (scope, id) ON DELETE CASCADE)
+    """,
+    "CREATE INDEX IF NOT EXISTS ix_thread_members_identity ON thread_members (scope, identity_id)",
+    """
+    CREATE TABLE IF NOT EXISTS thread_events (
+        scope TEXT NOT NULL, thread_id TEXT NOT NULL, seq BIGINT NOT NULL, id TEXT NOT NULL,
+        kind TEXT NOT NULL, author_id TEXT NOT NULL, client_id TEXT NOT NULL, body JSONB NOT NULL,
+        PRIMARY KEY (scope, thread_id, seq),
+        UNIQUE (scope, thread_id, id),
+        UNIQUE (scope, thread_id, author_id, client_id),
+        FOREIGN KEY (scope, thread_id) REFERENCES thread_threads (scope, id) ON DELETE CASCADE)
+    """,
+]
+
+_THREAD = "scope, id, metadata, created_at"
+
+
+def _json(value: Any) -> Any:
+    return json.loads(value) if isinstance(value, str) else value
+
+
+def _thread(row: Any) -> Thread:
+    return Thread(
+        id=row["id"],
+        scope=row["scope"],
+        metadata=_json(row["metadata"]),
+        created_at=row["created_at"],
+    )
+
+
+def _event(body: Any) -> Event:
+    return EVENTS.validate_python(_json(body))
+
+
+def _count(status: str) -> int:
+    return int(status.rsplit(" ", 1)[-1])
+
+
+class PostgresStorage:
+    def __init__(self, pool: Any) -> None:
+        self._pool = pool
+
+    @asynccontextmanager
+    async def _guard(self, operation: str) -> AsyncIterator[None]:
+        try:
+            yield
+        except ThreadException:
+            raise
+        except Exception as exc:
+            raise StorageError(f"postgres: storage rejected {operation}: {exc}") from exc
+
+    async def initialize(self) -> None:
+        async with self._guard("initialize"), self._pool.acquire() as conn, conn.transaction():
+            await conn.execute("SELECT pg_advisory_xact_lock($1)", _LOCK)
+            for ddl in _DDL:
+                await conn.execute(ddl)
+
+    async def create_thread(self, scope: str, thread: Thread) -> tuple[Thread, bool]:
+        if thread.scope != scope:
+            raise StorageError("postgres: row scope does not match the call scope")
+        async with self._guard("create_thread"), self._pool.acquire() as conn:
+            row = await conn.fetchrow(
+                f"INSERT INTO thread_threads ({_THREAD}) VALUES ($1, $2, $3::jsonb, $4) "
+                f"ON CONFLICT (scope, id) DO NOTHING RETURNING {_THREAD}",
+                scope,
+                thread.id,
+                json.dumps(thread.metadata),
+                thread.created_at,
+            )
+            if row is not None:
+                return _thread(row), True
+            row = await conn.fetchrow(
+                f"SELECT {_THREAD} FROM thread_threads WHERE scope = $1 AND id = $2",
+                scope,
+                thread.id,
+            )
+            return _thread(row), False
+
+    async def get_thread(self, scope: str, thread_id: str) -> Thread | None:
+        async with self._guard("get_thread"), self._pool.acquire() as conn:
+            row = await conn.fetchrow(
+                f"SELECT {_THREAD} FROM thread_threads WHERE scope = $1 AND id = $2",
+                scope,
+                thread_id,
+            )
+        return None if row is None else _thread(row)
+
+    async def list_threads(
+        self, scope: str, member_id: str, before: str | None = None, limit: int = 50
+    ) -> list[Thread]:
+        async with self._guard("list_threads"), self._pool.acquire() as conn:
+            rows = await conn.fetch(
+                "SELECT t.scope, t.id, t.metadata, t.created_at FROM thread_threads t "
+                "JOIN thread_members m ON m.scope = t.scope AND m.thread_id = t.id AND m.identity_id = $2 "
+                "WHERE t.scope = $1 AND ($3::text IS NULL OR (t.created_at, t.id) < "
+                "(SELECT a.created_at, a.id FROM thread_threads a WHERE a.scope = $1 AND a.id = $3)) "
+                "ORDER BY t.created_at DESC, t.id DESC LIMIT $4",
+                scope,
+                member_id,
+                before,
+                max(limit, 0),
+            )
+        return [_thread(row) for row in rows]
+
+    async def update_thread(
+        self, scope: str, thread_id: str, metadata: dict[str, Any]
+    ) -> Thread | None:
+        async with self._guard("update_thread"), self._pool.acquire() as conn:
+            row = await conn.fetchrow(
+                f"UPDATE thread_threads SET metadata = $3::jsonb WHERE scope = $1 AND id = $2 RETURNING {_THREAD}",
+                scope,
+                thread_id,
+                json.dumps(metadata),
+            )
+        return None if row is None else _thread(row)
+
+    async def delete_thread(self, scope: str, thread_id: str) -> bool:
+        async with self._guard("delete_thread"), self._pool.acquire() as conn:
+            status = await conn.execute(
+                "DELETE FROM thread_threads WHERE scope = $1 AND id = $2", scope, thread_id
+            )
+        return _count(status) > 0
+
+    async def add_member(self, scope: str, member: Member) -> tuple[Member, bool]:
+        async with self._guard("add_member"), self._pool.acquire() as conn:
+            body = await conn.fetchval(
+                "INSERT INTO thread_members (scope, thread_id, identity_id, added_at, body) "
+                "SELECT $1, $2, $3, $4, $5::jsonb WHERE EXISTS "
+                "(SELECT 1 FROM thread_threads WHERE scope = $1 AND id = $2) "
+                "ON CONFLICT (scope, thread_id, identity_id) DO NOTHING RETURNING body",
+                scope,
+                member.thread_id,
+                member.identity.id,
+                member.added_at,
+                member.model_dump_json(),
+            )
+            if body is not None:
+                return Member.model_validate(_json(body)), True
+            existing = await conn.fetchval(
+                "SELECT body FROM thread_members WHERE scope = $1 AND thread_id = $2 AND identity_id = $3",
+                scope,
+                member.thread_id,
+                member.identity.id,
+            )
+        if existing is None:
+            raise NotFoundError(f"postgres: thread {member.thread_id!r} was not found")
+        return Member.model_validate(_json(existing)), False
+
+    async def remove_member(self, scope: str, thread_id: str, identity_id: str) -> bool:
+        async with self._guard("remove_member"), self._pool.acquire() as conn:
+            status = await conn.execute(
+                "DELETE FROM thread_members WHERE scope = $1 AND thread_id = $2 AND identity_id = $3",
+                scope,
+                thread_id,
+                identity_id,
+            )
+        return _count(status) > 0
+
+    async def list_members(self, scope: str, thread_id: str) -> list[Member]:
+        async with self._guard("list_members"), self._pool.acquire() as conn:
+            rows = await conn.fetch(
+                "SELECT body FROM thread_members WHERE scope = $1 AND thread_id = $2 ORDER BY added_at, identity_id",
+                scope,
+                thread_id,
+            )
+        return [Member.model_validate(_json(row["body"])) for row in rows]
+
+    async def is_member(self, scope: str, thread_id: str, identity_id: str) -> bool:
+        async with self._guard("is_member"), self._pool.acquire() as conn:
+            return bool(
+                await conn.fetchval(
+                    "SELECT EXISTS (SELECT 1 FROM thread_members WHERE scope = $1 AND thread_id = $2 AND identity_id = $3)",
+                    scope,
+                    thread_id,
+                    identity_id,
+                )
+            )
+
+    async def append_event(self, scope: str, event: Event) -> tuple[Event, bool]:
+        async with self._guard("append_event"), self._pool.acquire() as conn, conn.transaction():
+            last = await conn.fetchval(
+                "SELECT last_seq FROM thread_threads WHERE scope = $1 AND id = $2 FOR UPDATE",
+                scope,
+                event.thread_id,
+            )
+            if last is None:
+                raise NotFoundError(f"postgres: thread {event.thread_id!r} was not found")
+            existing = await conn.fetchval(
+                "SELECT body FROM thread_events WHERE scope = $1 AND thread_id = $2 AND author_id = $3 AND client_id = $4",
+                scope,
+                event.thread_id,
+                event.author.id,
+                event.client_id,
+            )
+            if existing is not None:
+                return _event(existing), False
+            stored = event.model_copy(update={"seq": int(last) + 1})
+            await conn.execute(
+                "INSERT INTO thread_events (scope, thread_id, seq, id, kind, author_id, client_id, body) "
+                "VALUES ($1, $2, $3, $4, $5, $6, $7, $8::jsonb)",
+                scope,
+                stored.thread_id,
+                stored.seq,
+                stored.id,
+                stored.kind,
+                stored.author.id,
+                stored.client_id,
+                stored.model_dump_json(),
+            )
+            await conn.execute(
+                "UPDATE thread_threads SET last_seq = $3 WHERE scope = $1 AND id = $2",
+                scope,
+                stored.thread_id,
+                stored.seq,
+            )
+            await conn.execute(
+                "SELECT pg_notify($1, $2)",
+                EVENTS_CHANNEL,
+                json.dumps({"s": scope, "t": stored.thread_id, "q": stored.seq}),
+            )
+        return stored, True
+
+    async def list_events(
+        self,
+        scope: str,
+        thread_id: str,
+        since: int | None = None,
+        before: int | None = None,
+        limit: int = 50,
+        kinds: Sequence[str] | None = None,
+    ) -> list[Event]:
+        if limit < 1:
+            return []
+        where = ["scope = $1", "thread_id = $2"]
+        args: list[Any] = [scope, thread_id]
+        if since is not None:
+            args.append(since)
+            where.append(f"seq > ${len(args)}")
+        if before is not None:
+            args.append(before)
+            where.append(f"seq < ${len(args)}")
+        if kinds is not None:
+            args.append(list(kinds))
+            where.append(f"kind = ANY(${len(args)}::text[])")
+        args.append(limit)
+        order = "ASC" if since is not None else "DESC"
+        async with self._guard("list_events"), self._pool.acquire() as conn:
+            rows = await conn.fetch(
+                f"SELECT body FROM thread_events WHERE {' AND '.join(where)} ORDER BY seq {order} LIMIT ${len(args)}",
+                *args,
+            )
+        events = [_event(row["body"]) for row in rows]
+        return events if since is not None else events[::-1]
+
+    async def get_event(self, scope: str, thread_id: str, event_id: str) -> Event | None:
+        async with self._guard("get_event"), self._pool.acquire() as conn:
+            body = await conn.fetchval(
+                "SELECT body FROM thread_events WHERE scope = $1 AND thread_id = $2 AND id = $3",
+                scope,
+                thread_id,
+                event_id,
+            )
+        return None if body is None else _event(body)
+
+    async def delete_scope(self, scope: str) -> int:
+        async with self._guard("delete_scope"), self._pool.acquire() as conn, conn.transaction():
+            removed = 0
+            for table in ("thread_events", "thread_members", "thread_threads"):
+                removed += _count(
+                    await conn.execute(f"DELETE FROM {table} WHERE scope = $1", scope)
+                )
+        return removed
+
+    async def verify_absent(self, scope: str) -> bool:
+        async with self._guard("verify_absent"), self._pool.acquire() as conn:
+            counts = [
+                await conn.fetchval(f"SELECT count(*) FROM {table} WHERE scope = $1", scope)
+                for table in ("thread_threads", "thread_members", "thread_events")
+            ]
+        return all(count == 0 for count in counts)
+
+    async def listen(
+        self, on_event: OnEvent, on_signal: OnSignal, on_resume: OnResume | None = None
+    ) -> Stop:
+        tasks: set[asyncio.Future[None]] = set()
+        lost = asyncio.Event()
+        held: list[Any] = [None]
+
+        def receive(_connection: Any, _pid: int, channel: str, text: str) -> None:
+            data = json.loads(text)
+            if channel == EVENTS_CHANNEL:
+                future = asyncio.ensure_future(on_event(data["s"], data["t"], int(data["q"])))
+            else:
+                future = asyncio.ensure_future(on_signal(data["s"], data["t"], data["p"]))
+            tasks.add(future)
+            future.add_done_callback(tasks.discard)
+
+        def terminated(_connection: Any) -> None:
+            lost.set()
+
+        async def attach() -> None:
+            conn = await self._pool.acquire()
+            try:
+                conn.add_termination_listener(terminated)
+                await conn.add_listener(EVENTS_CHANNEL, receive)
+                await conn.add_listener(SIGNALS_CHANNEL, receive)
+            except BaseException:
+                with contextlib.suppress(Exception):
+                    await self._pool.release(conn)
+                raise
+            held[0] = conn
+
+        async def release() -> None:
+            conn, held[0] = held[0], None
+            if conn is None:
+                return
+            with contextlib.suppress(Exception):
+                conn.remove_termination_listener(terminated)
+                await conn.remove_listener(EVENTS_CHANNEL, receive)
+                await conn.remove_listener(SIGNALS_CHANNEL, receive)
+            with contextlib.suppress(Exception):
+                await self._pool.release(conn)
+
+        async def relisten() -> None:
+            while True:
+                await lost.wait()
+                lost.clear()
+                await release()
+                attempt = 0
+                while held[0] is None:
+                    await asyncio.sleep(random.random() * min(RELISTEN_CAP, RELISTEN * 2**attempt))
+                    attempt += 1
+                    with contextlib.suppress(Exception):
+                        await attach()
+                if on_resume is not None:
+                    with contextlib.suppress(Exception):
+                        await on_resume()
+
+        async with self._guard("listen"):
+            await attach()
+        watcher = asyncio.get_running_loop().create_task(relisten())
+
+        async def stop() -> None:
+            watcher.cancel()
+            with contextlib.suppress(asyncio.CancelledError):
+                await watcher
+            await release()
+            for future in list(tasks):
+                future.cancel()
+
+        return stop
+
+    async def publish(self, scope: str, thread_id: str, payload: dict[str, Any]) -> None:
+        text = json.dumps({"s": scope, "t": thread_id, "p": payload})
+        size = len(text.encode())
+        if size > NOTIFY_LIMIT:
+            raise StorageError(
+                f"postgres: a notification is at most {NOTIFY_LIMIT} bytes; this one is {size}"
+            )
+        async with self._guard("publish"), self._pool.acquire() as conn:
+            await conn.execute("SELECT pg_notify($1, $2)", SIGNALS_CHANNEL, text)
