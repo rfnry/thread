@@ -6361,15 +6361,29 @@ Fixture discipline adapted from `../rfnry-thread/packages/client-react/tests/pro
 
 ```json
 {
-  "$schema": "https://biomejs.dev/schemas/2.5.2/schema.json",
-  "vcs": { "enabled": true, "clientKind": "git", "useIgnoreFile": true },
+  "$schema": "https://biomejs.dev/schemas/2.5.14/schema.json",
+  "vcs": { "enabled": true, "clientKind": "git", "useIgnoreFile": true, "root": "../.." },
   "files": { "includes": ["src/**/*", "tests/**/*"] },
-  "formatter": { "enabled": true, "indentStyle": "space", "indentWidth": 2, "lineEnding": "lf", "lineWidth": 100 },
+  "formatter": {
+    "enabled": true,
+    "indentStyle": "space",
+    "indentWidth": 2,
+    "lineEnding": "lf",
+    "lineWidth": 100
+  },
   "assist": { "enabled": true, "actions": { "source": { "organizeImports": "on" } } },
-  "linter": { "enabled": true, "rules": { "recommended": true, "style": { "noNonNullAssertion": "off" } } },
-  "javascript": { "formatter": { "quoteStyle": "single", "semicolons": "asNeeded", "trailingCommas": "es5" } },
+  "linter": {
+    "enabled": true,
+    "rules": { "preset": "recommended", "style": { "noNonNullAssertion": "off" } }
+  },
+  "javascript": {
+    "formatter": { "quoteStyle": "single", "semicolons": "asNeeded", "trailingCommas": "es5" }
+  },
   "overrides": [
-    { "includes": ["tests/**"], "linter": { "rules": { "suspicious": { "noExplicitAny": "off" } } } }
+    {
+      "includes": ["tests/**"],
+      "linter": { "rules": { "suspicious": { "noExplicitAny": "off" } } }
+    }
   ]
 }
 ```
