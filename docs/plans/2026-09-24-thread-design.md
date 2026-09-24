@@ -56,7 +56,7 @@ the module's file stem.
 ## 3. Tenancy
 
 `scope: str` — the same word and shape as the engine: one opaque string, required, first where a
-verb takes it. A connection belongs to one scope (returned by `authenticate`); every thread belongs
+verb takes it. A connection belongs to one scope (named by the consumer when it calls `serve`); every thread belongs
 to one scope; nothing reads across scopes. `delete_scope(scope)` and `verify_absent(scope)` exist
 for erasure, as in the engine.
 
@@ -219,11 +219,13 @@ thread row's lock in the event's transaction.
 
 One WebSocket, JSON text frames, five frame types: `request{id, method, payload}`,
 `response{id, payload}`, `error{id, error{code, message}}`, `push{name, payload}`,
-`notify{method, payload}` (fire-and-forget, e.g. `stream.delta`). A `hello{protocol, auth}` frame
-opens the connection within 10 s; it is answered by `response{id: "hello", payload: {identity,
-scope}}` or `error{id: "hello"}` and a close. Error codes map one to one onto the error classes
-(`not_found`, `input`, `forbidden`, `configuration`, `storage`, `transport`, and `internal` for the
-root). Close codes: 4000 protocol error, 4001 refused hello, 4002 hello deadline, 4003 too slow.
+`notify{method, payload}` (fire-and-forget, e.g. `stream.delta`). A `hello{protocol}` frame opens
+the session; it carries only the protocol version (authentication happened at the upgrade, §10) and
+is answered by `response{id: "hello", payload: {identity, scope}}` — who the server was told this
+connection is — or, for another protocol version, `error{id: "hello"}` and a close. There is no hello
+deadline. Error codes map one to one onto the error classes (`not_found`, `input`, `forbidden`,
+`configuration`, `storage`, `transport`, and `internal` for the root). Close codes: 4000 protocol
+error, 4001 too slow.
 Protocol version 1, pinned by golden fixtures shared by the Python and TypeScript test suites.
 
 Methods: `thread.create`, `thread.get`, `thread.list`, `thread.update`, `thread.delete`,
@@ -238,9 +240,8 @@ member changes are events already.
 ## 10. The server
 
 ```python
-server = Server(storage, authenticate=authenticate, authorize=None, max_inline_bytes=256 * 1024,
-                replay_limit=500)
-await server.serve(connection)          # Connection: receive_text(), send_text(), close()
+server = Server(storage, authorize=None, max_inline_bytes=256 * 1024, replay_limit=500)
+await server.serve(connection, identity, scope)   # Connection: receive_text(), send_text(), close()
 client = await server.connect(identity, scope)   # an in-process Client — the same class
 await server.create_thread(scope, thread_id=None, metadata=None)
 await server.add_member(scope, thread_id, identity)
@@ -249,34 +250,41 @@ await server.delete_scope(scope); await server.verify_absent(scope)
 await server.start(); await server.stop()   # LISTEN on Postgres; nothing on in-memory
 ```
 
-- **`authenticate(hello) -> (Identity, scope) | None`** — async, required, no default; `hello` is the
-  dict the client sent, and it is all `authenticate` sees: no cookies, no upgrade headers. The library
-  never sees how credentials work. A `system` identity from it (or given to `server.connect`) is a
-  `ConfigurationError`: that role is the library's.
-- **Why the hello and nothing else.** Browsers attach cookies to a cross-site WebSocket upgrade and
-  WebSockets have no CORS, so an `authenticate` that trusted cookies would accept any page the
-  person visits as that person (cross-site WebSocket hijacking). A token sent in `hello` is read by
-  the page's own script, which another site cannot do. A cookie-session app mints a short-lived
-  token from its own endpoint (protected by `SameSite`) and sends it in `hello`; `hello` as an async
-  function fetches a fresh one on every reconnect.
+- **Authentication is the consumer's, at the upgrade.** The WebSocket upgrade is an ordinary HTTP
+  request; the consumer authenticates it with its own framework (cookies, headers, tokens, over TLS),
+  accepts the socket, and calls `serve(connection, identity=, scope=)` with who it is. Refusing a
+  connection is refusing the upgrade, before `serve`. There is no `authenticate` callback, no
+  credential in `hello` and no hello deadline. The library never sees how credentials work. A
+  `system` identity given to `serve` or `server.connect` is a `ConfigurationError` (that role is the
+  library's); an empty scope is an `InputError`. Both are raised before the socket is read.
+- The library still stamps authorship from that identity (never from client frames), enforces
+  membership and scope, and runs `authorize`.
+- **Security checklist, consumer-owned (in the docs).** Use `wss://`; with cookie authentication,
+  check the upgrade's `Origin` header (browsers attach cookies to cross-site upgrades and WebSockets
+  have no CORS — cross-site WebSocket hijacking); prefer short-lived tokens (the clients' credential
+  sources may be async functions, called on every reconnect).
 - **Membership** is enforced by construction on every verb: only members read, write, signal or see
   presence.
 - **`authorize(identity, action, thread) -> bool`** — optional; default "members may do everything".
   Five actions: `create`, `read`, `send`, `manage` (members and thread metadata), `delete`.
 - `serve` works with any framework: a FastAPI/Starlette/`websockets` socket adapts in a few lines
-  (shown in the docs and examples).
+  (shown in the docs and examples), e.g. a FastAPI `@app.websocket` route with
+  `Depends(current_user)`, `await ws.accept()`, `await server.serve(ws, identity=Identity(role="user",
+  id=user.id, name=user.name), scope=user.org)`.
 
 ## 11. The clients
 
-**One client, two ways to reach it.** `Client.connect(url, hello=)` speaks the protocol over a
+**One client, two ways to reach it.** `Client.connect(url, headers=)` speaks the protocol over a
 WebSocket (the `websockets` package, a dependency of the Python package); `await
 server.connect(identity, scope)` returns the same `Client` class over an in-process pair of queues
-that runs the very same session code, frames and all, with authentication skipped. An assistant
-written once runs in-process or remote, unchanged, and every guarantee is tested once.
-`hello` is a dict or an async function returning one, called on every attempt so tokens refresh.
+that runs the very same session code, frames and all. An assistant written once runs in-process or
+remote, unchanged, and every guarantee is tested once. `headers` go with the upgrade (e.g.
+`Authorization`); they are a dict or an async function returning one, called on every attempt so
+tokens refresh. An upgrade refused with HTTP 401 or 403, or a `headers` function that raises, is a
+`ForbiddenError`; on a reconnect it stops the client and `events()` raises it.
 
 ```python
-client = await Client.connect(url, hello={"token": "..."})
+client = await Client.connect(url, headers={"Authorization": "Bearer ..."})
 thread = await client.create_thread(thread_id=None, metadata={})
 await client.get_thread(thread_id); await client.list_threads(before=None, limit=50)
 await client.update_thread(thread_id, metadata); await client.delete_thread(thread_id)
@@ -305,16 +313,22 @@ async for item in client.events():       # events and signals of joined threads,
   keeps `client_id = stream_id`.
 - An assistant does not receive its own events by default (`events(include_own=False)`); loop
   prevention is the consumer's logic, not a depth guard.
-- Reconnect: jittered backoff; every attempt re-sends `hello` (tokens can refresh); resume per §6.
+- Reconnect: jittered backoff; every attempt resolves `headers` again (tokens can refresh) and
+  re-sends `hello`; resume per §6.
 
-**TypeScript `@rfnry/thread`** — the same verbs, framework-free: `connect({url, hello})`,
+**TypeScript `@rfnry/thread`** — the same verbs, framework-free: `connect({url, protocols})`,
 `createThread`, `getThread`, `listThreads`, `updateThread`, `deleteThread`, `join`, `leave`,
 `send`, `stream(threadId)` → `{write, finish, abort}`, `step`, `working`, `idle`, `cancel`, `read`,
 `edit`, `retract`, `custom`, `history`, `present`, `addMember`, `removeMember`, `listMembers`,
 `subscribe(listener, {includeOwn}) -> unsubscribe`, `close`, `resolve(events)`; `send`/`step`
 take `{clientId}` among their options, `edit`/`retract`/`custom` a trailing `{clientId}`. Events
 and signals are the wire shapes (snake_case fields); options are camelCase. Outbox and resume as in Python. No
-React, no stores, no hooks, no runtime dependencies (the platform `WebSocket`).
+React, no stores, no hooks, no runtime dependencies (the platform `WebSocket`). Browsers cannot set
+arbitrary WebSocket headers, so the upgrade carries the session cookie or a token in `protocols`
+(the subprotocol list: a string, a list, or an async function returning either, called on every
+attempt). A `protocols` function that throws is a `ForbiddenError` and stops the client (`closed`
+resolves with it); a browser cannot see an upgrade's status, so a refused reconnect otherwise
+retries with backoff.
 
 ## 12. ThreadTools
 
@@ -362,7 +376,7 @@ fixtures shared by both suites).
 | Postgres `LISTEN/NOTIFY` for fan-out | multi-replica out of the box with the database the consumer already has; storage and `seq` carry correctness |
 | Signals replace runs, watchdog, typing and stream frames | one ephemeral mechanism; no table, no background loop; the engine records the agent's work |
 | Presence is two automatic signals | falls out of the signal cache; serves proactive assistants |
-| `authenticate` required; membership by construction; optional `authorize` with five actions | who someone is and product policy are the consumer's; authorship, tenancy and membership are guarantees |
+| Authentication at the consumer's upgrade — `serve(connection, identity, scope)`; membership by construction; optional `authorize` with five actions | who someone is and product policy are the consumer's; authorship, tenancy and membership are guarantees. Supersedes "`authenticate` required" |
 | Uploads by URL; inline media under a cap | large frames block the socket and inflate by a third |
 | One client interface, socket or in-process | "the same API for both sides" held literally |
 | `events()` stream / `subscribe()` | no registry, no dispatcher lanes, no depth guard |
@@ -373,7 +387,7 @@ fixtures shared by both suites).
 | Two push names, `event` and `signal` | the join snapshot is signals, invitations and deletion are signals, member and metadata changes are events |
 | Completeness enforced by the server per connection | a gap is filled before a push; the client never has to detect one |
 | Replicas re-announce their live state | a TTL without refresh would expire a long presence; the refresh also heals a missed `idle` and teaches a late replica |
-| `authenticate` sees the `hello` frame only — no cookies, no headers | browsers send cookies on cross-site WebSocket upgrades and WebSockets have no CORS, so cookie trust invites cross-site WebSocket hijacking; a `hello` token cannot be read by another site; cookie apps mint a short-lived token behind `SameSite` |
+| ~~`authenticate` sees the `hello` frame only~~ — superseded (§18): the upgrade is authenticated by the consumer's framework | the upgrade is an ordinary HTTP request the consumer already knows how to secure; a hello token duplicated their auth inside ours. Cross-site WebSocket hijacking is handled by the consumer's `Origin` check, in the docs' security checklist |
 | A dropped `LISTEN` reconnects with jittered backoff and republishes its own state | a replica must not go deaf for good after a database blip; events need no replay (storage and resume), signals' state does |
 | `client_id=` may be supplied by the caller | the server's dedup key made public: a scheduled or retried assistant posts exactly once without a lookup of its own |
 
@@ -383,8 +397,7 @@ Writing `docs/thread.md` against this design exposed these gaps; the text above 
 
 1. `server.connect` is async and returns the same `Client` class (in-process pipe through the same
    session code), not a look-alike.
-2. `authenticate(hello)` receives the client's `hello` dict; `hello` may be an async function so a
-   token refreshes on reconnect.
+2. ~~`authenticate(hello)` receives the client's `hello` dict~~ — superseded by §18.
 3. Pushes are `event` and `signal` only; the `state` snapshot is delivered as signals; `invited` and
    `thread.deleted` are signal kinds; the `thread.updated`/`member.*` pushes duplicated events and
    are gone.
@@ -412,8 +425,7 @@ Writing `docs/thread.md` against this design exposed these gaps; the text above 
 
 ## 17. Revisions from the owner's answers (2026-09-24)
 
-1. Authentication stays hello-token only: `authenticate(hello)` sees the `hello` frame and nothing
-   else (§10), because cookie-trusting WebSocket auth is open to cross-site WebSocket hijacking.
+1. ~~Authentication stays hello-token only~~ — superseded by §18.
 2. The test database is the `rfnry-thread-pg` container,
    `postgresql://thread:thread@127.0.0.1:55436/thread` (`RFNRY_TEST_POSTGRES_URL`); the examples
    read `RFNRY_EXAMPLES_POSTGRES_URL` from `../.env.examples`, the same URL.
@@ -421,3 +433,24 @@ Writing `docs/thread.md` against this design exposed these gaps; the text above 
    the replica's own latest-state entries; `listen` gains `on_resume` (§7).
 4. `client_id=` is an optional caller-supplied idempotency key on `send`, `step`, `edit`, `retract`
    and `custom`, in both clients (§11).
+
+## 18. Revisions from the owner's answers (2026-09-24, second round)
+
+1. Authentication moves entirely to the consumer, superseding the hello-token decision (§15, §17.1).
+   There is no `authenticate` callback, no auth in `hello`, and no hello deadline; `hello` carries
+   only the protocol version. `server.serve(connection, identity, scope)`: the consumer
+   authenticates the WebSocket upgrade with its own framework, accepts the socket and says who it
+   is. The library still stamps authorship from that identity, enforces membership and scope, and
+   runs `authorize` with the five actions (§10).
+2. Clients connect with whatever the consumer's endpoint expects: the Python client takes
+   `headers=` for the upgrade; the TypeScript client relies on cookies or a subprotocol token
+   (`protocols=`), since browsers cannot set arbitrary WebSocket headers (§11).
+3. `docs/thread.md` carries a consumer-owned security checklist: `wss://`; an `Origin` check with
+   cookie auth (cross-site WebSocket hijacking); short-lived tokens.
+4. Decisions taken while folding this in (executor, not asked): close codes are renumbered to 4000
+   protocol error and 4001 too slow (the refused-hello and deadline codes are gone; protocol 1 is
+   unreleased); `headers` and `protocols` may be async functions called on every connection attempt,
+   so short-lived tokens refresh on reconnect; a refusal the client can see — HTTP 401/403 on the
+   upgrade (Python), or a credential function that raises (both) — is a `ForbiddenError` that stops
+   a reconnecting client; `serve` validates the identity and scope before reading the socket and
+   raises instead of closing it, since a bad identity is the caller's bug, not the peer's.

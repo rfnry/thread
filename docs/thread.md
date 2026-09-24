@@ -105,7 +105,7 @@ A **signal** is ephemeral. Every signal carries `thread_id` and `sender`, stampe
 ## Getting started
 
 ```python
-server = Server(InMemoryStorage(), authenticate=authenticate)
+server = Server(InMemoryStorage())
 
 ana = await server.connect(Identity(role="user", id="ana", name="Ana"), scope="acme")
 helper = await server.connect(Identity(role="assistant", id="helper", name="Helper"), scope="acme")
@@ -125,48 +125,44 @@ A server over a storage, and two participants connected to it in the same proces
 assistant elsewhere reaches the same server over a WebSocket and gets the same `Client`
 ([Many replicas](#many-replicas) and [The TypeScript client](#the-typescript-client)).
 
-`authenticate` is yours and required: it receives what the client sent to open the connection and
-returns who that is and in which scope, or `None` to refuse. The library never sees how credentials
-work:
-
-```python
-async def authenticate(hello):
-    user = await users.by_token(hello.get("token"))
-    return (Identity(role="user", id=user.id, name=user.name), user.org) if user else None
-```
+Who a connection is, is yours to decide. Your web framework authenticates the WebSocket upgrade —
+an ordinary HTTP request, with your cookies, headers and tokens — and hands the accepted socket to
+the server with who it is and in which scope. The library never sees how credentials work.
 
 ## Core features
 
 ### Serving and connecting
 
-`server.serve(connection)` runs one WebSocket until it closes. A connection is anything with
-`receive_text()`, `send_text(text)` and `close(code, reason)`, which is what Starlette and FastAPI
-hand you:
+`server.serve(connection, identity, scope)` runs one WebSocket until it closes. You authenticate
+the upgrade with your own framework, accept it, and say who is on the other end. A connection is
+anything with `receive_text()`, `send_text(text)` and `close(code, reason)`, which is what Starlette
+and FastAPI hand you:
 
 ```python
 app = FastAPI()
-server = Server(PostgresStorage(pool), authenticate=authenticate)
+server = Server(PostgresStorage(pool))
 
 @app.websocket("/thread")
-async def thread_socket(websocket: WebSocket):
+async def thread_socket(websocket: WebSocket, user: User = Depends(current_user)):
     await websocket.accept()
-    await server.serve(websocket)
+    await server.serve(websocket, identity=Identity(role="user", id=user.id, name=user.name), scope=user.org)
 ```
 
-Any other framework adapts in the same few lines. The first frame must arrive within ten seconds
-and pass `authenticate`; otherwise the socket is closed.
+Any other framework adapts in the same few lines. Refusing a connection is refusing the upgrade,
+before `serve`. Everything the socket says afterwards is authored as that identity, in that scope.
 
 There are two ways to get a client, and they are the same class:
 
 ```python
-remote = await Client.connect("wss://app.example.com/thread", hello={"token": token})
+remote = await Client.connect("wss://app.example.com/thread", headers={"Authorization": f"Bearer {token}"})
 local = await server.connect(Identity(role="assistant", id="helper"), scope="acme")
 ```
 
-`Client.connect` speaks the protocol over a WebSocket; `hello` is a dict, or an async function
-returning one, called on every attempt so a token can refresh. `server.connect` is in-process and
-trusted — your code names the identity. Both expose `client.identity` and `client.scope` and close
-with `await client.close()`.
+`Client.connect` speaks the protocol over a WebSocket; `headers` go with the upgrade, whatever your
+endpoint expects. They are a dict, or an async function returning one, called on every attempt so a
+token can refresh. `server.connect` is in-process and trusted — your code names the identity. Both
+expose `client.identity` and `client.scope`, as the server knows them, and close with
+`await client.close()`.
 
 ### Threads and members
 
@@ -316,10 +312,11 @@ minute passes, then a `TransportError`. The server deduplicates on the thread, t
 
 From the server to a client, delivery is in order and complete per connection: a connection never
 sees `seq` 7 before `seq` 6, and never skips one. A dropped socket reconnects with jittered backoff,
-sends `hello` again, and re-joins every thread it had joined from the last `seq` it saw; the missed
+with fresh `headers`, and re-joins every thread it had joined from the last `seq` it saw; the missed
 events arrive before anything new. A re-join also arrives in `events()` as its `Joined`, and when it
-says `truncated`, redraw from the latest page. A reconnect whose `hello` is refused stops the client,
-and `events()` raises that error. Items wait in the client until you read them, so an assistant that
+says `truncated`, redraw from the latest page. A reconnect your endpoint refuses (HTTP 401 or 403 on
+the upgrade), or whose `headers` function raises, stops the client, and `events()` raises that
+error. Items wait in the client until you read them, so an assistant that
 joins and then starts reading misses nothing.
 
 A connection that cannot keep up — its outbound queue over its bound with no write finishing for
@@ -332,7 +329,7 @@ Run as many servers as you like on one Postgres database. Each one `LISTEN`s for
 delivers to its own connections:
 
 ```python
-server = Server(PostgresStorage(pool), authenticate=authenticate)
+server = Server(PostgresStorage(pool))
 await server.start()
 await server.stop()
 ```
@@ -351,7 +348,7 @@ two replicas without a database.
 
 Who someone is and what your product allows are yours; who is in the thread is the library's:
 
-- `authenticate` decides who a connection is and its scope.
+- Your endpoint decides who a connection is and its scope, and hands them to `serve`.
 - Membership is enforced on every verb: only members read, write, signal or see presence. A
   non-member gets a `ForbiddenError`.
 - `authorize(identity, action, thread)`, optional, decides the rest. The actions are `create`,
@@ -364,7 +361,7 @@ async def authorize(identity, action, thread):
         return thread.metadata.get("owner") == identity.id
     return True
 
-server = Server(storage, authenticate=authenticate, authorize=authorize)
+server = Server(storage, authorize=authorize)
 ```
 
 The server's own verbs act as the system, with no member behind them — for your REST endpoints,
@@ -376,12 +373,15 @@ await server.add_member("acme", "onboarding-bruno", Identity(role="user", id="br
 await server.delete_thread("acme", "onboarding-bruno")
 ```
 
-`authenticate` sees the `hello` frame and nothing else — no cookies, no headers. Browsers attach
-cookies to a WebSocket upgrade from any site, and WebSockets have no CORS, so a socket that trusted
-the session cookie would let any page the person visits speak as them (cross-site WebSocket
-hijacking). A token in `hello` is sent by your page's own script, which another site cannot read. An
-app with cookie sessions mints a short-lived token from its own endpoint, which `SameSite` protects,
-and sends it in `hello`; as an async function, `hello` fetches a fresh one on every reconnect.
+Securing the upgrade is yours, like the rest of authentication. A short checklist:
+
+- Serve over `wss://`, never `ws://`, outside your own machine.
+- If you authenticate with cookies, check the `Origin` header of the upgrade against your own
+  origins. Browsers attach cookies to a WebSocket upgrade from any site and WebSockets have no CORS,
+  so without the check any page the person visits could speak as them (cross-site WebSocket
+  hijacking).
+- Prefer short-lived tokens. `headers` in Python and `protocols` in TypeScript may be async
+  functions, called on every reconnect, so a fresh token goes with each attempt.
 
 ### The TypeScript client
 
@@ -393,7 +393,7 @@ import { connect, resolve } from '@rfnry/thread'
 
 const client = await connect({
   url: 'wss://app.example.com/thread',
-  hello: async () => ({ token: await session.token() }),
+  protocols: async () => ['thread', await session.token()],
 })
 const unsubscribe = client.subscribe(render, { includeOwn: true })
 const joined = await client.join(threadId, { since: 0 })
@@ -404,7 +404,10 @@ The verbs are the Python ones in camelCase — `createThread`, `getThread`, `lis
 `updateThread`, `deleteThread`, `join`, `leave`, `history`, `present`, `addMember`, `removeMember`,
 `listMembers`, `send`, `stream`, `step`, `edit`, `retract`, `read`, `custom`, `working`, `idle`,
 `cancel`, `close` — with the same outbox, reconnect and resume. Events and signals are the wire
-shapes, fields as they travel (`thread_id`, `in_reply_to`); options are camelCase. Listeners get
+shapes, fields as they travel (`thread_id`, `in_reply_to`); options are camelCase. A browser cannot
+set headers on a WebSocket, so the upgrade carries your session cookie — check its `Origin` — or a
+token in `protocols`, the subprotocol list; an endpoint that reads a token there accepts with one of
+the offered subprotocols (`await websocket.accept(subprotocol="thread")`). Listeners get
 what arrives after they subscribe, so subscribe before joining. A UI usually wants its own messages
 too, echoed from other tabs, hence `includeOwn`. Streaming:
 
@@ -416,8 +419,9 @@ await reply.finish()
 ```
 
 `finish(content)` stores other content; `abort()` abandons. `client.closed` resolves when the
-client stops for good — `null` after `close()`, or the error when a reconnect's hello was refused,
-an expired session say. Stores, hooks and rendering are your UI's.
+client stops for good — `null` after `close()`, or the error when your `protocols` function throws
+on a reconnect, an expired session say. A browser cannot see why an upgrade failed, so a refused
+reconnect otherwise keeps retrying with backoff. Stores, hooks and rendering are your UI's.
 
 ## Tools
 
@@ -467,7 +471,7 @@ rfnry-memory's tables too:
 pool = await asyncpg.create_pool(dsn)
 storage = PostgresStorage(pool)
 await storage.initialize()
-server = Server(storage, authenticate=authenticate)
+server = Server(storage)
 ```
 
 `Storage` is the protocol both implement; `scope` is the first argument of every method that reads
@@ -476,7 +480,7 @@ its thread or its scope.
 
 ## Tenancy
 
-`scope` is the tenant: `authenticate` returns it with the identity, `server.connect` takes it, and
+`scope` is the tenant: `serve` and `server.connect` take it with the identity, and
 every thread, member and event row carries it. A connection sees only its scope; the same thread id
 in two scopes names two threads. To offboard:
 
@@ -505,15 +509,15 @@ everything above.
 
 ## Errors
 
-`NotFoundError` for a thread, member or event the scope does not hold. `ForbiddenError` for a
-refused `hello`, a verb by a non-member, an `authorize` that says no, an edit or retraction of
-someone else's event, and a signal from a connection that has not joined the thread. `InputError`
-for a request the library refuses: an empty scope or id, a media part with both or neither of
-`data` and `url`, inline media over the cap, a custom payload over 64 KiB, an edit of anything but a
-message, an unknown event or signal kind, a malformed frame. `ConfigurationError` for a server that
-cannot work: no `authenticate`, a limit that is not positive, a `system` identity from
-`authenticate` or `server.connect`. `StorageError` for the database. `TransportError` for the
-socket: a write not acknowledged within its deadline, a client used after `close()`, a connection
+`NotFoundError` for a thread, member or event the scope does not hold. `ForbiddenError` for a verb
+by a non-member, an `authorize` that says no, an edit or retraction of someone else's event, a
+signal from a connection that has not joined the thread, and on a client, an upgrade refused with
+HTTP 401 or 403 or a `headers` or `protocols` function that raised. `InputError` for a request the
+library refuses: an empty scope or id, a media part with both or neither of `data` and `url`, inline
+media over the cap, a custom payload over 64 KiB, an edit of anything but a message, an unknown
+event or signal kind, a malformed frame. `ConfigurationError` for a server that cannot work: a limit
+that is not positive, a `system` identity given to `serve` or `server.connect`. `StorageError` for
+the database. `TransportError` for the socket: a write not acknowledged within its deadline, a client used after `close()`, a connection
 that cannot be opened. On a client, an error the server raised is raised again with its class and
 message.
 

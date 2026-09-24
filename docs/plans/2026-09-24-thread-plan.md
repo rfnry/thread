@@ -8,7 +8,7 @@
 
 **Tech Stack:** Python 3.12, pydantic 2, websockets (client transport), asyncpg (optional, `[postgres]`), pytest + pytest-asyncio, ruff, mypy strict, uv, hatchling, poethepoet. TypeScript 6 strict, `tsc` build (ESM only), vitest, Biome; Node ≥ 22 (global `WebSocket`).
 
-**Spec:** `docs/plans/2026-09-24-thread-design.md` (read §16, the revisions made while writing the docs, and §17, the owner's answers: hello-only auth, the test database, re-LISTEN, caller-supplied `client_id`) and the contract `docs/thread.md`. Where they differ, `docs/thread.md` wins; tell the human.
+**Spec:** `docs/plans/2026-09-24-thread-design.md` (read §16, the revisions made while writing the docs; §17, the owner's answers: the test database, re-LISTEN, caller-supplied `client_id`; and §18, which supersedes hello-token auth: the consumer authenticates the upgrade and calls `serve(connection, identity, scope)`) and the contract `docs/thread.md`. Where they differ, `docs/thread.md` wins; tell the human.
 
 ## Global Constraints
 
@@ -21,11 +21,12 @@
 - Rule 9: every error message starts with its module's file stem, then a lowercase sentence; identifiers keep their case: `server: thread 'support-ana' was not found`. Logs are lowercase; the library logs only unexpected failures inside `serve`, as warnings on the `rfnry_thread` logger.
 - Errors: root `ThreadException`; children `NotFoundError`, `InputError`, `ConfigurationError`, `ForbiddenError`, `StorageError`, `TransportError`. Wire codes `internal`, `not_found`, `input`, `configuration`, `forbidden`, `storage`, `transport`.
 - Tenancy: `scope` is required on every connection and thread, first argument of every storage method that reads or writes a row (`initialize` and `listen` are the only exceptions); no default scope, no cross-scope read; every row carries it. Authorship is stamped from the connection, never read from a client payload.
-- `Identity.role == "system"` is reserved for the library: `authenticate` or `server.connect` producing one is a `ConfigurationError`; adding one as a member is an `InputError`.
+- Authentication is the consumer's, at the WebSocket upgrade: `Server` has no `authenticate`, `hello` carries only the protocol version, and there is no hello deadline. `server.serve(connection, identity, scope)` is told who the socket is.
+- `Identity.role == "system"` is reserved for the library: `serve` or `server.connect` given one is a `ConfigurationError`; adding one as a member is an `InputError`.
 - Family blocks are copied, never imported: the parts block (`class Text` … `Content = str | list[Part]`) and the tools block (`Result = ` … `if n not in names})`) byte-identical with `../engine`; `class Identity` byte-identical with `../senses` when that checkout has it.
 - Tables `thread_threads`, `thread_members`, `thread_events`; `NOTIFY` channels `thread_events` and `thread_signals`; notify payloads ≤ 7900 bytes.
-- Limits (constants, from the spec): inline media 256 KiB per event (`Server(max_inline_bytes=)`), replay 500 (`Server(replay_limit=)`), custom payload 64 KiB, hello deadline 10 s, outbound bound 1000 frames with a 10 s stall window, outbox deadline 60 s with backoff 0.5 s doubling to 8 s, reconnect backoff full jitter 0.5 s doubling to 30 s (the client's reconnect and the Postgres re-`LISTEN` alike), state re-announcement 10 s and expiry 30 s, `Working.label` ≤ 1000 characters.
-- Close codes: 4000 protocol error, 4001 refused hello, 4002 hello deadline, 4003 too slow. Protocol version `1`.
+- Limits (constants, from the spec): inline media 256 KiB per event (`Server(max_inline_bytes=)`), replay 500 (`Server(replay_limit=)`), custom payload 64 KiB, outbound bound 1000 frames with a 10 s stall window, outbox deadline 60 s with backoff 0.5 s doubling to 8 s, reconnect backoff full jitter 0.5 s doubling to 30 s (the client's reconnect and the Postgres re-`LISTEN` alike), state re-announcement 10 s and expiry 30 s, `Working.label` ≤ 1000 characters.
+- Close codes: 4000 protocol error, 4001 too slow. Protocol version `1`.
 - Examples are standalone uv projects; keys (and `RFNRY_EXAMPLES_POSTGRES_URL`, the same database URL as the tests) come from `/home/frndvrgs/software/rfnry/.env.examples` via `uv run --env-file ../../../.env.examples main.py`, never committed; `examples/**/uv.lock` and `.env*` are git-ignored.
 - Every commit message ends with the line `Claude-Session: https://claude.ai/code/session_01GevsYJaAyM8ARLvEnXsoAB`.
 
@@ -65,9 +66,9 @@ packages/python/
     outbound.py        per-connection outbound queue: backpressure, delta merging
     state.py           latest-state cache
     hub.py             Session and Hub: per-replica fan-out, cursors, joins, presence, mirroring
-    connection.py      the Connection protocol, the hello deadline
+    connection.py      the Connection protocol
     verbs.py           the verbs: membership, authorize, validation, the log
-    server.py          Server: hello, frame loop, method table, connect/start/stop, system verbs
+    server.py          Server: serve(connection, identity, scope), hello, frame loop, method table, connect/start/stop, system verbs
     pipe.py            in-process Connection pair
     client.py          Client, Stream, outbox, reconnect, resume
     websocket.py       the WebSocket transport of Client.connect
@@ -86,8 +87,8 @@ examples/  README.md and one folder per example
 
 Old code worth mining (read-only, `../rfnry-thread`), named where a task adapts it:
 `packages/client-python/src/rfnry_thread_client/outbox.py` (per-thread FIFO + deadline + wake),
-`packages/client-python/src/rfnry_thread_client/transport/reconnect.py` (full-jitter backoff, re-hello),
-`packages/server-python/src/rfnry_thread_server/transport/session_loop.py` (hello deadline, frame loop, teardown),
+`packages/client-python/src/rfnry_thread_client/transport/reconnect.py` (full-jitter backoff, re-hello; its auth is not kept),
+`packages/server-python/src/rfnry_thread_server/transport/session_loop.py` (frame loop, teardown; its hello deadline and auth are not kept),
 `packages/server-python/src/rfnry_thread_server/transport/outbound.py` (bound + stall window),
 `packages/server-python/src/rfnry_thread_server/store/postgres/{store.py,schema.sql}` (dedup index, `ON CONFLICT`),
 `scripts/generate_fixtures.py` and `packages/client-react/tests/protocol/fixtures.test.ts` (fixture discipline),
@@ -1018,7 +1019,7 @@ Frames written fresh (six types instead of the old connection.open request); fix
 
 **Interfaces:**
 - Consumes: `InputError`, `ThreadException` (Task 1); events, signals, `Joined`, `Thread` (Task 3).
-- Produces (in `rfnry_thread.protocol`): `PROTOCOL = 1`; `HELLO = "hello"`; `CLOSE_PROTOCOL = 4000`, `CLOSE_REFUSED = 4001`, `CLOSE_DEADLINE = 4002`, `CLOSE_SLOW = 4003`; `METHODS: frozenset[str]`; frames `Hello(protocol, auth={})`, `Request(id, method, payload={})`, `Response(id, payload={})`, `Failure(code, message)`, `ErrorFrame(id, error: Failure)`, `Push(name: Literal["event", "signal"], payload)`, `Notify(method, payload={})`, each with a `type` literal; `Frame`; `encode(frame: Frame) -> str`; `decode(text: str) -> Frame` (raises `InputError("protocol: malformed frame: …")`); `failure(request_id: str, error: ThreadException) -> ErrorFrame`.
+- Produces (in `rfnry_thread.protocol`): `PROTOCOL = 1`; `HELLO = "hello"`; `CLOSE_PROTOCOL = 4000`, `CLOSE_SLOW = 4001`; `METHODS: frozenset[str]`; frames `Hello(protocol)` (the protocol version only — authentication happened at the upgrade), `Request(id, method, payload={})`, `Response(id, payload={})`, `Failure(code, message)`, `ErrorFrame(id, error: Failure)`, `Push(name: Literal["event", "signal"], payload)`, `Notify(method, payload={})`, each with a `type` literal; `Frame`; `encode(frame: Frame) -> str`; `decode(text: str) -> Frame` (raises `InputError("protocol: malformed frame: …")`); `failure(request_id: str, error: ThreadException) -> ErrorFrame`.
 
 - [ ] **Step 1: Write the failing tests**
 
@@ -1042,7 +1043,7 @@ from rfnry_thread.protocol import (
 
 
 def test_frames_round_trip_by_type() -> None:
-    for frame in [Hello(protocol=1, auth={"token": "x"}), Request(id="1", method="thread.get", payload={"thread_id": "t"}),
+    for frame in [Hello(protocol=1), Request(id="1", method="thread.get", payload={"thread_id": "t"}),
                   Notify(method="signal.send", payload={}), Push(name="event", payload={"kind": "message"})]:
         assert decode(encode(frame)) == frame
 
@@ -1138,9 +1139,9 @@ def golden() -> dict[str, Frame]:
         ThreadDeleted(thread_id="t1", sender=ANA),
     ]
     frames: dict[str, Frame] = {
-        "hello": Hello(protocol=1, auth={"token": "t0k"}),
+        "hello": Hello(protocol=1),
         "hello-response": Response(id="hello", payload={"identity": ANA.model_dump(mode="json"), "scope": "acme"}),
-        "hello-refused": ErrorFrame(id="hello", error=Failure(code="forbidden", message="server: hello was refused")),
+        "hello-wrong-protocol": ErrorFrame(id="hello", error=Failure(code="input", message="server: the first frame must be a hello for protocol 1")),
         "request-thread-join": Request(id="1", method="thread.join", payload={"thread_id": "t1", "since": 0}),
         "response-thread-join": Response(id="1", payload=Joined(thread=thread, seq=12, truncated=True).model_dump(mode="json")),
         "request-event-send": Request(id="2", method="event.send", payload={
@@ -1203,9 +1204,7 @@ from rfnry_thread.errors import InputError, ThreadException
 PROTOCOL = 1
 HELLO = "hello"
 CLOSE_PROTOCOL = 4000
-CLOSE_REFUSED = 4001
-CLOSE_DEADLINE = 4002
-CLOSE_SLOW = 4003
+CLOSE_SLOW = 4001
 METHODS = frozenset({
     "thread.create", "thread.get", "thread.list", "thread.update", "thread.delete", "thread.join",
     "thread.leave", "thread.history", "thread.present", "member.add", "member.remove", "member.list",
@@ -1216,7 +1215,6 @@ METHODS = frozenset({
 class Hello(BaseModel):
     type: Literal["hello"] = "hello"
     protocol: int
-    auth: dict[str, Any] = {}
 
 
 class Request(BaseModel):
@@ -2950,7 +2948,7 @@ Claude-Session: https://claude.ai/code/session_01GevsYJaAyM8ARLvEnXsoAB"
 
 ### Task 9: The server core — serve, hello, membership, authorize, the verbs
 
-The hello deadline, the frame loop and the teardown are adapted from `../rfnry-thread/packages/server-python/src/rfnry_thread_server/transport/session_loop.py` (`run_session`: deadline on the first frame, refuse-then-drain-then-close, in-flight request tasks cancelled on exit, a cap above which requests run inline). The verbs are written fresh: scope-first, membership on every verb, `authorize` with five actions, authorship stamped from the session.
+The frame loop and the teardown are adapted from `../rfnry-thread/packages/server-python/src/rfnry_thread_server/transport/session_loop.py` (`run_session`: refuse-then-close, in-flight request tasks cancelled on exit, a cap above which requests run inline); its authentication and hello deadline are not: the consumer authenticates the upgrade and hands `serve` the identity and scope (design §18). The verbs are written fresh: scope-first, membership on every verb, `authorize` with five actions, authorship stamped from the session.
 
 **Files:**
 - Create: `packages/python/src/rfnry_thread/connection.py`, `packages/python/src/rfnry_thread/pipe.py`, `packages/python/src/rfnry_thread/verbs.py`, `packages/python/src/rfnry_thread/server.py`
@@ -2959,11 +2957,11 @@ The hello deadline, the frame loop and the teardown are adapted from `../rfnry-t
 **Interfaces:**
 - Consumes: `Hub`, `Session` (Task 8); `Outbound` (Task 6); `Storage`, `InMemoryStorage` (Task 5); frames, `encode`, `decode`, `failure`, close codes, `HELLO`, `PROTOCOL` (Task 4); models (Task 3); errors (Task 1).
 - Produces:
-  - `rfnry_thread.connection`: `Connection` protocol — `async receive_text() -> str`, `async send_text(data: str) -> None`, `async close(code: int = 1000, reason: str | None = None) -> None`; `HELLO_DEADLINE = 10.0`.
+  - `rfnry_thread.connection`: `Connection` protocol — `async receive_text() -> str`, `async send_text(data: str) -> None`, `async close(code: int = 1000, reason: str | None = None) -> None`.
   - `rfnry_thread.pipe`: `End` (a `Connection` with `code: int | None`, the close code either side used) and `pipe() -> tuple[End, End]`.
   - `rfnry_thread.verbs`: `Authorize = Callable[[Identity, str, Thread], Awaitable[bool]]`; `CUSTOM_LIMIT = 65536`; `LABEL_LIMIT = 1000`; `PAGE_LIMIT = 500`; `Verbs(storage, hub, authorize, max_inline_bytes)` with `thread(actor, scope, thread_id, action) -> Thread`, `create_thread(actor, scope, thread_id: str | None, metadata) -> Thread`, `get_thread`, `list_threads(actor, scope, before, limit) -> list[Thread]`, `update_thread(actor, scope, thread_id, metadata) -> Thread`, `delete_thread(actor, scope, thread_id) -> None`, `add_member(actor, scope, thread_id, identity) -> Member`, `remove_member(actor, scope, thread_id, identity_id) -> None`, `list_members(actor, scope, thread_id) -> list[Member]`, `send(actor, scope, payload: dict) -> Event`, `history(actor, scope, thread_id, before, limit, kinds) -> list[Event]`, `join(session, thread_id, since) -> Joined`, `leave(session, thread_id) -> None`. (Task 10 adds `signal` and `present`.)
-  - `rfnry_thread.server`: `Authenticate = Callable[[dict[str, Any]], Awaitable[tuple[Identity, str] | None]]`; `Server(storage, *, authenticate, authorize=None, max_inline_bytes=262144, replay_limit=500)` with `async serve(connection)`, `_attach(identity, scope) -> End` (in-process, trusted; used by `connect` in Task 12 and by tests), and the system verbs `create_thread(scope, thread_id=None, metadata=None) -> Thread`, `add_member(scope, thread_id, identity) -> Member`, `delete_thread(scope, thread_id) -> None`, `delete_scope(scope) -> int`, `verify_absent(scope) -> bool`.
-  - Tests: `tests/unit/peer.py` — `Peer.open(server, identity, scope="acme")`, `Peer.hello(server, auth) -> tuple[End, dict]`, `peer.call(method, **payload) -> dict` (raises the mapped error), `peer.notify(method, **payload)`, `peer.push(kind, timeout=1.0) -> dict`, `peer.quiet(wait=0.15) -> list[dict]`, `peer.close()`; `tests/unit/conftest.py` — fixtures `storage`, `server`, and `authenticate`, `say(peer, thread_id, text, client_id=None) -> dict`.
+  - `rfnry_thread.server`: `Server(storage, *, authorize=None, max_inline_bytes=262144, replay_limit=500)` with `async serve(connection, identity, scope)` (raises `ConfigurationError` for a `system` identity and `InputError` for an empty scope before reading the socket; then expects a `hello` for protocol 1 as the first frame, answering anything else with an error frame and close 4000), `_attach(identity, scope) -> End` (in-process, trusted; used by `connect` in Task 12 and by tests), and the system verbs `create_thread(scope, thread_id=None, metadata=None) -> Thread`, `add_member(scope, thread_id, identity) -> Member`, `delete_thread(scope, thread_id) -> None`, `delete_scope(scope) -> int`, `verify_absent(scope) -> bool`.
+  - Tests: `tests/unit/peer.py` — `Peer.open(server, identity, scope="acme")`, `peer.call(method, **payload) -> dict` (raises the mapped error), `peer.notify(method, **payload)`, `peer.push(kind, timeout=1.0) -> dict`, `peer.quiet(wait=0.15) -> list[dict]`, `peer.close()`; `tests/unit/conftest.py` — fixtures `storage`, `server`, and `say(peer, thread_id, text, client_id=None) -> dict`.
 
 - [ ] **Step 1: Write the test kit**
 
@@ -2976,18 +2974,9 @@ from typing import Any
 import pytest
 
 from rfnry_thread.inmemory import InMemoryStorage
-from rfnry_thread.models import Identity
 from rfnry_thread.server import Server
 
 from .peer import Peer
-
-
-async def authenticate(hello: dict[str, Any]) -> tuple[Identity, str] | None:
-    token = hello.get("token")
-    if not isinstance(token, str):
-        return None
-    role = "assistant" if token.startswith("bot-") else "user"
-    return Identity(role=role, id=token, name=token.title()), str(hello.get("scope", "acme"))
 
 
 @pytest.fixture
@@ -2997,7 +2986,7 @@ def storage() -> InMemoryStorage:
 
 @pytest.fixture
 def server(storage: InMemoryStorage) -> Server:
-    return Server(storage, authenticate=authenticate)
+    return Server(storage)
 
 
 async def say(peer: Peer, thread_id: str, text: str, client_id: str | None = None, **extra: Any) -> dict[str, Any]:
@@ -3018,7 +3007,7 @@ from typing import Any
 
 from rfnry_thread.errors import raised
 from rfnry_thread.models import Identity
-from rfnry_thread.pipe import End, pipe
+from rfnry_thread.pipe import End
 from rfnry_thread.protocol import Hello, Notify, Request, encode
 from rfnry_thread.server import Server
 
@@ -3036,13 +3025,6 @@ class Peer:
         reply = await peer.frame()
         assert reply["type"] == "response" and reply["id"] == "hello", reply
         return peer
-
-    @classmethod
-    async def hello(cls, server: Server, auth: dict[str, Any]) -> tuple[End, dict[str, Any]]:
-        ours, theirs = pipe()
-        asyncio.get_running_loop().create_task(server.serve(theirs))
-        await ours.send_text(encode(Hello(protocol=1, auth=auth)))
-        return ours, json.loads(await asyncio.wait_for(ours.receive_text(), 1.0))
 
     async def frame(self, timeout: float = 1.0) -> dict[str, Any]:
         return dict(json.loads(await asyncio.wait_for(self.end.receive_text(), timeout)))
@@ -3094,75 +3076,68 @@ class Peer:
 
 ```python
 import asyncio
-from typing import Any
+import json
 
 import pytest
 
-from rfnry_thread import connection
 from rfnry_thread.errors import ConfigurationError, InputError
 from rfnry_thread.inmemory import InMemoryStorage
-from rfnry_thread.models import SYSTEM, Identity
+from rfnry_thread.models import SYSTEM
 from rfnry_thread.pipe import pipe
+from rfnry_thread.protocol import Hello, encode
 from rfnry_thread.server import Server
 
-from .conftest import authenticate
 from .factories import ANA
 from .peer import Peer
 
 
-def test_authenticate_is_required_and_limits_are_positive() -> None:
-    with pytest.raises(ConfigurationError, match="^server: authenticate is required"):
-        Server(InMemoryStorage(), authenticate=None)  # type: ignore[arg-type]
+def test_limits_are_positive() -> None:
     with pytest.raises(ConfigurationError, match="^server: max_inline_bytes must be positive$"):
-        Server(InMemoryStorage(), authenticate=authenticate, max_inline_bytes=0)
+        Server(InMemoryStorage(), max_inline_bytes=0)
     with pytest.raises(ConfigurationError, match="^server: replay_limit must be positive$"):
-        Server(InMemoryStorage(), authenticate=authenticate, replay_limit=0)
+        Server(InMemoryStorage(), replay_limit=0)
 
 
-async def test_a_hello_is_answered_with_who_and_where(server: Server) -> None:
-    _, reply = await Peer.hello(server, {"token": "ana", "scope": "acme"})
+async def test_a_hello_is_answered_with_who_and_where_the_consumer_said(server: Server) -> None:
+    ours, theirs = pipe()
+    task = asyncio.create_task(server.serve(theirs, identity=ANA, scope="acme"))
+    await ours.send_text(encode(Hello(protocol=1)))
+    reply = json.loads(await asyncio.wait_for(ours.receive_text(), 1.0))
     assert reply == {"type": "response", "id": "hello", "payload": {
         "identity": {"role": "user", "id": "ana", "name": "Ana", "metadata": {}}, "scope": "acme"}}
+    await ours.close()
+    await asyncio.wait_for(task, 1.0)
 
 
-async def test_a_refused_hello_gets_an_error_and_a_close(server: Server) -> None:
-    end, reply = await Peer.hello(server, {})
-    assert reply["error"] == {"code": "forbidden", "message": "server: hello was refused"}
-    await asyncio.sleep(0.05)
-    assert end.code == 4001
-
-
-async def test_authenticate_may_not_return_the_system_role(storage: InMemoryStorage) -> None:
-    async def system(hello: dict[str, Any]) -> tuple[Identity, str]:
-        return SYSTEM, "acme"
-
-    end, reply = await Peer.hello(Server(storage, authenticate=system), {})
-    assert reply["error"]["code"] == "configuration"
-    assert reply["error"]["message"].startswith("server: 'system' is the library's role")
-
-
-async def test_a_failing_authenticate_refuses_the_hello(storage: InMemoryStorage) -> None:
-    async def broken(hello: dict[str, Any]) -> None:
-        raise RuntimeError("boom")
-
-    _, reply = await Peer.hello(Server(storage, authenticate=broken), {"token": "ana"})
-    assert reply["error"] == {"code": "forbidden", "message": "server: hello was refused"}
-
-
-async def test_no_hello_within_the_deadline_closes(server: Server, monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.setattr(connection, "HELLO_DEADLINE", 0.05)
-    ours, theirs = pipe()
-    await asyncio.wait_for(server.serve(theirs), 1.0)
-    assert ours.code == 4002
+async def test_serve_refuses_the_system_role_and_an_empty_scope_before_reading(server: Server) -> None:
+    _, theirs = pipe()
+    with pytest.raises(ConfigurationError, match="^server: 'system' is the library's role"):
+        await server.serve(theirs, identity=SYSTEM, scope="acme")
+    with pytest.raises(InputError, match="^server: a scope is required$"):
+        await server.serve(theirs, identity=ANA, scope="")
+    with pytest.raises(ConfigurationError, match="^server: 'system' is the library's role"):
+        server._attach(SYSTEM, "acme")
+    with pytest.raises(InputError, match="^server: a scope is required$"):
+        server._attach(ANA, " ")
 
 
 @pytest.mark.parametrize("first", ["garbage", '{"type": "hello", "protocol": 2}', '{"type": "request", "id": "1", "method": "thread.get"}'])
 async def test_a_bad_first_frame_closes_as_a_protocol_error(server: Server, first: str) -> None:
     ours, theirs = pipe()
-    task = asyncio.create_task(server.serve(theirs))
+    task = asyncio.create_task(server.serve(theirs, identity=ANA, scope="acme"))
     await ours.send_text(first)
     await asyncio.wait_for(task, 1.0)
     assert ours.code == 4000
+
+
+async def test_a_wrong_protocol_is_told_which_one_the_server_speaks(server: Server) -> None:
+    ours, theirs = pipe()
+    task = asyncio.create_task(server.serve(theirs, identity=ANA, scope="acme"))
+    await ours.send_text('{"type": "hello", "protocol": 2}')
+    reply = json.loads(await asyncio.wait_for(ours.receive_text(), 1.0))
+    assert reply == {"type": "error", "id": "hello", "error": {
+        "code": "input", "message": "server: the first frame must be a hello for protocol 1"}}
+    await asyncio.wait_for(task, 1.0)
 
 
 async def test_a_malformed_frame_after_hello_closes(server: Server) -> None:
@@ -3176,13 +3151,6 @@ async def test_an_unknown_method_is_an_input_error(server: Server) -> None:
     peer = await Peer.open(server, ANA)
     with pytest.raises(InputError, match="^server: unknown method 'thread.shout'$"):
         await peer.call("thread.shout")
-
-
-async def test_in_process_connections_refuse_the_system_role_and_an_empty_scope(server: Server) -> None:
-    with pytest.raises(ConfigurationError, match="^server: 'system' is the library's role"):
-        server._attach(SYSTEM, "acme")
-    with pytest.raises(InputError, match="^server: a scope is required$"):
-        server._attach(ANA, "")
 ```
 
 `packages/python/tests/unit/test_verbs.py`:
@@ -3195,7 +3163,7 @@ from rfnry_thread.inmemory import InMemoryStorage
 from rfnry_thread.models import Identity, Thread
 from rfnry_thread.server import Server
 
-from .conftest import authenticate, say
+from .conftest import say
 from .factories import ANA, BRUNO, HELPER
 from .peer import Peer
 
@@ -3269,7 +3237,7 @@ async def test_authorship_is_stamped_and_a_repeat_is_answered_with_the_stored_ev
 
 
 async def test_events_are_validated_before_they_are_stored(server: Server, storage: InMemoryStorage) -> None:
-    small = Server(storage, authenticate=authenticate, max_inline_bytes=4)
+    small = Server(storage, max_inline_bytes=4)
     ana = await room(small)
     image = {"type": "image", "media_type": "image/png", "data": "AAAAAAAA"}
     with pytest.raises(InputError, match="^server: inline media is 6 bytes; the cap is 4 — upload it and send a url$"):
@@ -3323,7 +3291,7 @@ async def test_authorize_decides_each_of_the_five_actions(storage: InMemoryStora
         asked.append((identity.id, action))
         return action != "delete"
 
-    server = Server(storage, authenticate=authenticate, authorize=authorize)
+    server = Server(storage, authorize=authorize)
     ana = await room(server, BRUNO)
     await ana.call("thread.get", thread_id="t1")
     await say(ana, "t1", "hi")
@@ -3393,8 +3361,6 @@ Expected: FAIL — `No module named 'rfnry_thread.pipe'` (collection error in `p
 
 ```python
 from typing import Protocol
-
-HELLO_DEADLINE = 10.0
 
 
 class Connection(Protocol):
@@ -3668,27 +3634,18 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import logging
-from collections.abc import Awaitable, Callable
 from typing import Any
 
 from pydantic import BaseModel, ConfigDict, ValidationError
 
-from rfnry_thread import connection as connection_module
 from rfnry_thread.connection import Connection
-from rfnry_thread.errors import (
-    ConfigurationError,
-    ForbiddenError,
-    InputError,
-    ThreadException,
-)
+from rfnry_thread.errors import ConfigurationError, InputError, ThreadException
 from rfnry_thread.hub import Hub, Session
 from rfnry_thread.models import SYSTEM, Identity, Member, Thread
 from rfnry_thread.outbound import Outbound
 from rfnry_thread.pipe import End, pipe
 from rfnry_thread.protocol import (
-    CLOSE_DEADLINE,
     CLOSE_PROTOCOL,
-    CLOSE_REFUSED,
     CLOSE_SLOW,
     HELLO,
     PROTOCOL,
@@ -3704,8 +3661,6 @@ from rfnry_thread.storage import Stop, Storage
 from rfnry_thread.verbs import Authorize, Verbs
 
 log = logging.getLogger("rfnry_thread")
-
-Authenticate = Callable[[dict[str, Any]], Awaitable[tuple[Identity, str] | None]]
 
 IN_FLIGHT = 64
 
@@ -3781,8 +3736,7 @@ async def _close(connection: Connection, code: int, reason: str) -> None:
 async def _refuse(connection: Connection, error: ThreadException) -> None:
     with contextlib.suppress(Exception):
         await connection.send_text(encode(failure(HELLO, error)))
-    code = CLOSE_REFUSED if isinstance(error, ForbiddenError | ConfigurationError) else CLOSE_PROTOCOL
-    await _close(connection, code, str(error))
+    await _close(connection, CLOSE_PROTOCOL, str(error))
 
 
 class Server:
@@ -3790,68 +3744,45 @@ class Server:
         self,
         storage: Storage,
         *,
-        authenticate: Authenticate,
         authorize: Authorize | None = None,
         max_inline_bytes: int = 256 * 1024,
         replay_limit: int = 500,
     ) -> None:
-        if not callable(authenticate):
-            raise ConfigurationError("server: authenticate is required — the library never decides who a connection is")
         if max_inline_bytes < 1:
             raise ConfigurationError("server: max_inline_bytes must be positive")
         if replay_limit < 1:
             raise ConfigurationError("server: replay_limit must be positive")
         self._storage = storage
-        self._authenticate = authenticate
         self._hub = Hub(storage, replay_limit)
         self._verbs = Verbs(storage, self._hub, authorize, max_inline_bytes)
         self._tasks: set[asyncio.Task[None]] = set()
         self._stop: Stop | None = None
         self._refresher: asyncio.Task[None] | None = None
 
-    async def serve(self, connection: Connection) -> None:
-        await self._serve(connection, None)
-
-    def _attach(self, identity: Identity, scope: str) -> End:
+    async def serve(self, connection: Connection, identity: Identity, scope: str) -> None:
         _identity(identity)
         _scope(scope)
-        ours, theirs = pipe()
-        task = asyncio.get_running_loop().create_task(self._serve(theirs, (identity, scope)))
-        self._tasks.add(task)
-        task.add_done_callback(self._tasks.discard)
-        return ours
-
-    async def _serve(self, connection: Connection, trusted: tuple[Identity, str] | None) -> None:
         try:
-            text = await asyncio.wait_for(connection.receive_text(), connection_module.HELLO_DEADLINE)
-        except TimeoutError:
-            await _close(connection, CLOSE_DEADLINE, "server: no hello within the deadline")
-            return
+            text = await connection.receive_text()
         except Exception:
             return
         try:
             hello = decode(text)
             if not isinstance(hello, Hello) or hello.protocol != PROTOCOL:
                 raise InputError(f"server: the first frame must be a hello for protocol {PROTOCOL}")
-            who = trusted or await self._who(hello.auth)
-        except ThreadException as error:
+        except InputError as error:
             await _refuse(connection, error)
             return
-        if who is None:
-            await _refuse(connection, ForbiddenError("server: hello was refused"))
-            return
-        await self._run(connection, *who)
+        await self._run(connection, identity, scope)
 
-    async def _who(self, auth: dict[str, Any]) -> tuple[Identity, str] | None:
-        try:
-            result = await self._authenticate(auth)
-        except Exception as exc:
-            log.warning("server: authenticate failed: %s", exc)
-            return None
-        if result is None:
-            return None
-        identity, scope = result
-        return _identity(identity), _scope(scope)
+    def _attach(self, identity: Identity, scope: str) -> End:
+        _identity(identity)
+        _scope(scope)
+        ours, theirs = pipe()
+        task = asyncio.get_running_loop().create_task(self.serve(theirs, identity, scope))
+        self._tasks.add(task)
+        task.add_done_callback(self._tasks.discard)
+        return ours
 
     async def _run(self, connection: Connection, identity: Identity, scope: str) -> None:
         async def too_slow() -> None:
@@ -3964,9 +3895,8 @@ class Server:
 
 Notes for the implementer:
 - `_args` uses PEP 695 generics (Python 3.12). If mypy on your version rejects it, write `T = TypeVar("T", bound=_Args)` at module level instead.
-- `HELLO_DEADLINE` is read through the module (`connection_module.HELLO_DEADLINE`) so the deadline test can monkeypatch it.
+- `serve` never authenticates: the consumer's framework did, at the upgrade, and names the identity and scope. `serve` validates them before reading anything and raises (the caller's bug), then waits for the hello without a deadline — the socket is already someone the consumer accepted.
 - `test_authorize_decides_each_of_the_five_actions` expects exactly `create` (thread.create), `manage` (member.add), `read` (thread.get), `send` (event.send), `delete` (thread.delete): `_admit` during create appends through `_append`, which does not authorize.
-- The `# type: ignore[arg-type]` in `test_authenticate_is_required…` is the only way to pass `None` past mypy; keep it.
 
 - [ ] **Step 7: Run the gate**
 
@@ -4009,7 +3939,6 @@ from rfnry_thread.inmemory import InMemoryStorage
 from rfnry_thread.models import Identity, Thread
 from rfnry_thread.server import Server
 
-from .conftest import authenticate
 from .factories import ANA, BRUNO, HELPER
 from .peer import Peer
 
@@ -4144,7 +4073,7 @@ async def test_authorize_send_applies_to_signals_that_speak(storage: InMemorySto
     async def authorize(identity: Identity, action: str, thread: Thread) -> bool:
         return not (identity.id == "helper" and action == "send")
 
-    server = Server(storage, authenticate=authenticate, authorize=authorize)
+    server = Server(storage, authorize=authorize)
     _, helper = await joined(server, ANA, HELPER)
     with pytest.raises(ForbiddenError, match="^server: 'helper' may not send in thread 't1'$"):
         await helper.call("signal.send", thread_id="t1", kind="working")
@@ -4256,14 +4185,14 @@ from rfnry_thread.state import EXPIRY
 from rfnry_thread.storage import OnEvent, OnResume, OnSignal, Stop
 from until import until
 
-from .conftest import authenticate, say
+from .conftest import say
 from .factories import ANA, BRUNO, HELPER
 from .peer import Peer
 
 
 @pytest.fixture
 async def replicas(storage: InMemoryStorage) -> AsyncIterator[tuple[Server, Server]]:
-    near, far = Server(storage, authenticate=authenticate), Server(storage, authenticate=authenticate)
+    near, far = Server(storage), Server(storage)
     await near.start()
     await far.start()
     yield near, far
@@ -4329,11 +4258,11 @@ async def test_an_invitation_and_a_deletion_cross_replicas(replicas: tuple[Serve
 
 
 async def test_a_replica_learns_who_is_here_from_the_re_announcement(storage: InMemoryStorage) -> None:
-    near = Server(storage, authenticate=authenticate)
+    near = Server(storage)
     ana = await Peer.open(near, ANA)
     await ana.call("thread.create", thread_id="t1")
     await ana.call("thread.join", thread_id="t1")
-    far = Server(storage, authenticate=authenticate)
+    far = Server(storage)
     await near.start()
     await far.start()
     await near._hub.announce()
@@ -4354,11 +4283,11 @@ async def test_a_resumed_listener_republishes_this_replicas_state(storage: InMem
         return await listen(on_event, on_signal, on_resume)
 
     storage.listen = spy  # type: ignore[method-assign]
-    near = Server(storage, authenticate=authenticate)
+    near = Server(storage)
     ana = await Peer.open(near, ANA)
     await ana.call("thread.create", thread_id="t1")
     await ana.call("thread.join", thread_id="t1")
-    far = Server(storage, authenticate=authenticate)
+    far = Server(storage)
     await near.start()
     await far.start()
     assert far._hub.state.present("acme", "t1") == []
@@ -4371,7 +4300,7 @@ async def test_a_resumed_listener_republishes_this_replicas_state(storage: InMem
 
 
 async def test_stop_stops_listening_and_start_is_idempotent(storage: InMemoryStorage) -> None:
-    near, far = Server(storage, authenticate=authenticate), Server(storage, authenticate=authenticate)
+    near, far = Server(storage), Server(storage)
     await near.start()
     await near.start()
     await far.start()
@@ -4449,9 +4378,9 @@ This task builds the whole `Client` (verbs, `events()`, `Stream`, the outbox and
 **Interfaces:**
 - Consumes: `Server._attach` (Task 9); frames, `encode`, `decode`, `HELLO`, `PROTOCOL` (Task 4); models, `parts`, `EVENTS`, `SIGNALS` (Task 3); `Connection` (Task 9); errors and `raised` (Task 1).
 - Produces (in `rfnry_thread.client`):
-  - `HelloSource = dict[str, Any] | Callable[[], Awaitable[dict[str, Any]]]`; `Item = Event | Signal | Joined`
+  - `Dial = Callable[[], Awaitable[Connection]]`; `Item = Event | Signal | Joined`
   - constants `HANDSHAKE = 10.0`, `DEADLINE = 60.0`, `BACKOFF = 0.5`, `BACKOFF_CAP = 8.0`, `RECONNECT = 0.5`, `RECONNECT_CAP = 30.0`
-  - `Client` with `identity: Identity`, `scope: str`; `classmethod async _open(dial: Callable[[], Awaitable[Connection]], hello: HelloSource) -> Client`; verbs `create_thread(thread_id=None, metadata=None) -> Thread`, `get_thread(thread_id) -> Thread`, `list_threads(before=None, limit=50) -> list[Thread]`, `update_thread(thread_id, metadata) -> Thread`, `delete_thread(thread_id) -> None`, `join(thread_id, since=None) -> Joined`, `leave(thread_id) -> None`, `history(thread_id, before=None, limit=50, kinds=None) -> list[Event]`, `present(thread_id) -> list[Identity]`, `add_member(thread_id, identity) -> Member`, `remove_member(thread_id, identity) -> None`, `list_members(thread_id) -> list[Member]`, `send(thread_id, content, in_reply_to=None, triggered_by=None, client_id=None) -> Message`, `stream(thread_id, in_reply_to=None, triggered_by=None) -> Stream`, `step(thread_id, name, input=None, output=None, is_error=False, duration_ms=None, in_reply_to=None, triggered_by=None, client_id=None) -> Step`, `edit(thread_id, target, content, client_id=None) -> Edit`, `retract(thread_id, target, client_id=None) -> Retract`, `read(thread_id, up_to_seq) -> Read`, `custom(thread_id, name, payload, client_id=None) -> Custom` (a `client_id` left out is generated; one supplied is the server's dedup key, so the same one twice stores one event and returns it both times), `working(thread_id, label=None) -> None`, `idle(thread_id) -> None`, `cancel(thread_id, to) -> None`, `events(include_own=False) -> AsyncIterator[Item]`, `close() -> None`
+  - `Client` with `identity: Identity`, `scope: str` (as the server's hello response says); `classmethod async _open(dial: Dial) -> Client` (every connection attempt calls `dial` and then sends `Hello(protocol=1)`); verbs `create_thread(thread_id=None, metadata=None) -> Thread`, `get_thread(thread_id) -> Thread`, `list_threads(before=None, limit=50) -> list[Thread]`, `update_thread(thread_id, metadata) -> Thread`, `delete_thread(thread_id) -> None`, `join(thread_id, since=None) -> Joined`, `leave(thread_id) -> None`, `history(thread_id, before=None, limit=50, kinds=None) -> list[Event]`, `present(thread_id) -> list[Identity]`, `add_member(thread_id, identity) -> Member`, `remove_member(thread_id, identity) -> None`, `list_members(thread_id) -> list[Member]`, `send(thread_id, content, in_reply_to=None, triggered_by=None, client_id=None) -> Message`, `stream(thread_id, in_reply_to=None, triggered_by=None) -> Stream`, `step(thread_id, name, input=None, output=None, is_error=False, duration_ms=None, in_reply_to=None, triggered_by=None, client_id=None) -> Step`, `edit(thread_id, target, content, client_id=None) -> Edit`, `retract(thread_id, target, client_id=None) -> Retract`, `read(thread_id, up_to_seq) -> Read`, `custom(thread_id, name, payload, client_id=None) -> Custom` (a `client_id` left out is generated; one supplied is the server's dedup key, so the same one twice stores one event and returns it both times), `working(thread_id, label=None) -> None`, `idle(thread_id) -> None`, `cancel(thread_id, to) -> None`, `events(include_own=False) -> AsyncIterator[Item]`, `close() -> None`
   - `Stream` with `id: str`, `text: str`, `async write(text) -> None`, `async finish(content=None) -> Message`, async context manager
 - Produces: `Server.connect(identity: Identity, scope: str) -> Client`.
 
@@ -4739,7 +4668,6 @@ from rfnry_thread.protocol import (
     encode,
 )
 
-HelloSource = dict[str, Any] | Callable[[], Awaitable[dict[str, Any]]]
 Dial = Callable[[], Awaitable[Connection]]
 Item = Event | Signal | Joined
 
@@ -4825,9 +4753,8 @@ class Client:
     identity: Identity
     scope: str
 
-    def __init__(self, dial: Dial, hello: HelloSource) -> None:
+    def __init__(self, dial: Dial) -> None:
         self._dial = dial
-        self._hello = hello
         self._connection: Connection | None = None
         self._pending: dict[str, asyncio.Future[dict[str, Any]]] = {}
         self._ids = itertools.count(1)
@@ -4841,8 +4768,8 @@ class Client:
         self._failure: ThreadException | None = None
 
     @classmethod
-    async def _open(cls, dial: Dial, hello: HelloSource) -> Client:
-        client = cls(dial, hello)
+    async def _open(cls, dial: Dial) -> Client:
+        client = cls(dial)
         await client._establish()
         return client
 
@@ -4854,8 +4781,7 @@ class Client:
         except Exception as exc:
             raise TransportError(f"client: could not connect: {exc}") from exc
         try:
-            auth = self._hello if isinstance(self._hello, dict) else await self._hello()
-            await connection.send_text(encode(Hello(protocol=PROTOCOL, auth=auth)))
+            await connection.send_text(encode(Hello(protocol=PROTOCOL)))
             reply = decode(await asyncio.wait_for(connection.receive_text(), HANDSHAKE))
         except Exception as exc:
             with contextlib.suppress(Exception):
@@ -5164,7 +5090,8 @@ class Client:
 ```
 
 Notes for the implementer:
-- `Client.connect(url, hello=)` arrives in Task 13 with the WebSocket transport.
+- `Client.connect(url, headers=)` arrives in Task 13 with the WebSocket transport.
+- A reconnect that raises `ForbiddenError` or `ConfigurationError` stops the client for good: over a socket that is an upgrade refused with HTTP 401/403, or a `headers` function that raised (Task 13).
 - `_own` reads `sender` for signals and `author` for events.
 - `client_id=` is the one knob on a write's identity: `_send` uses it as given, or generates one. The server's dedup answers a repeat with the event stored first, so the second call returns it unchanged — even with different content (the `test_a_caller_supplied_client_id…` test pins that).
 - `Stream` is not constructed by consumers; it is public so it can be named in type hints.
@@ -5179,7 +5106,7 @@ Add to `server.py` (import `Client` from `rfnry_thread.client`):
         async def dial() -> Connection:
             return self._attach(identity, scope)
 
-        return await Client._open(dial, {})
+        return await Client._open(dial)
 ```
 
 - [ ] **Step 4: Run the gate**
@@ -5200,7 +5127,7 @@ Claude-Session: https://claude.ai/code/session_01GevsYJaAyM8ARLvEnXsoAB"
 
 ### Task 13: The socket — `Client.connect`, reconnect, resume, the outbox over a real WebSocket
 
-The backoff is adapted from `../rfnry-thread/packages/client-python/src/rfnry_thread_client/transport/reconnect.py` (full jitter, first attempt immediate, re-hello on every attempt, a refused hello ends reconnecting); the outbox from `../rfnry-thread/packages/client-python/src/rfnry_thread_client/outbox.py` (per-thread FIFO, deadline, capped exponential backoff, woken by reconnection). Both already live in `client.py` since Task 12; this task adds the transport and proves them on a real socket.
+The backoff is adapted from `../rfnry-thread/packages/client-python/src/rfnry_thread_client/transport/reconnect.py` (full jitter, first attempt immediate, fresh credentials and a hello on every attempt, a refusal ends reconnecting — here an upgrade refused with HTTP 401/403 or a `headers` function that raised); the outbox from `../rfnry-thread/packages/client-python/src/rfnry_thread_client/outbox.py` (per-thread FIFO, deadline, capped exponential backoff, woken by reconnection). Both already live in `client.py` since Task 12; this task adds the transport and proves them on a real socket.
 
 **Files:**
 - Create: `packages/python/src/rfnry_thread/websocket.py`
@@ -5209,7 +5136,7 @@ The backoff is adapted from `../rfnry-thread/packages/client-python/src/rfnry_th
 
 **Interfaces:**
 - Consumes: `Client._open`, client constants (Task 12); `Server.serve`, `Server.connect` (Tasks 9, 12).
-- Produces: `rfnry_thread.websocket.open_socket(url: str) -> Connection` (`websockets` client, frames up to 16 MiB); `Client.connect(url: str, *, hello: HelloSource | None = None) -> Client`.
+- Produces: `rfnry_thread.websocket.open_socket(url: str, headers: dict[str, str] | None = None) -> Connection` (`websockets` client, `headers` sent with the upgrade, frames up to 16 MiB; an upgrade answered 401 or 403 is `ForbiddenError("websocket: the server refused the connection with http 401")`); `HeadersSource = dict[str, str] | Callable[[], Awaitable[dict[str, str]]]` and `Client.connect(url: str, *, headers: HeadersSource | None = None) -> Client` in `rfnry_thread.client` (a `headers` function is awaited on every attempt; one that raises is `ForbiddenError("client: the headers function raised: …")`).
 
 - [ ] **Step 1: Write the failing tests**
 
@@ -5219,20 +5146,28 @@ The backoff is adapted from `../rfnry-thread/packages/client-python/src/rfnry_th
 import asyncio
 import contextlib
 from collections.abc import AsyncIterator
+from http import HTTPStatus
 
 import pytest
 from websockets.asyncio.server import ServerConnection, serve
+from websockets.http11 import Request, Response
 
 from rfnry_thread import client as client_module
 from rfnry_thread.client import Client, Item
 from rfnry_thread.errors import ForbiddenError, TransportError
 from rfnry_thread.inmemory import InMemoryStorage
-from rfnry_thread.models import Joined, Message, Text
+from rfnry_thread.models import Identity, Joined, Message, Text
 from rfnry_thread.server import Server
 
-from .conftest import authenticate
 from .factories import BRUNO
 from .test_client import drain
+
+ANA_HEADERS = {"Authorization": "Bearer ana"}
+
+
+def who(request: Request | None) -> Identity | None:
+    token = "" if request is None else request.headers.get("Authorization", "").removeprefix("Bearer ").strip()
+    return Identity(role="user", id=token, name=token.title()) if token else None
 
 
 class Live:
@@ -5273,15 +5208,21 @@ class Served:
 async def running(server: Server) -> AsyncIterator[Live]:
     live = Live(server)
 
-    async def handler(socket: ServerConnection) -> None:
+    def upgrade(socket: ServerConnection, request: Request) -> Response | None:
         if live.paused:
-            await socket.close(1013, "paused")
-            return
+            return socket.respond(HTTPStatus.SERVICE_UNAVAILABLE, "paused\n")
+        if who(request) is None:
+            return socket.respond(HTTPStatus.UNAUTHORIZED, "who are you?\n")
+        return None
+
+    async def handler(socket: ServerConnection) -> None:
+        identity = who(socket.request)
+        assert identity is not None
         served = Served(socket, live)
         live.open.append(served)
-        await server.serve(served)
+        await server.serve(served, identity=identity, scope="acme")
 
-    async with serve(handler, "127.0.0.1", 0) as listening:
+    async with serve(handler, "127.0.0.1", 0, process_request=upgrade) as listening:
         live.url = f"ws://127.0.0.1:{next(iter(listening.sockets)).getsockname()[1]}"
         yield live
 
@@ -5318,7 +5259,7 @@ async def until_joined(client: Client, timeout: float = 3.0) -> list[Item]:
 
 
 async def room(live: Live) -> tuple[Client, Client]:
-    ana = await Client.connect(live.url, hello={"token": "ana"})
+    ana = await Client.connect(live.url, headers=ANA_HEADERS)
     bruno = await live.server.connect(BRUNO, scope="acme")
     await ana.create_thread(thread_id="t1")
     await ana.add_member("t1", BRUNO)
@@ -5327,8 +5268,13 @@ async def room(live: Live) -> tuple[Client, Client]:
     return ana, bruno
 
 
+async def read_to_the_end(client: Client) -> None:
+    async for _ in client.events():
+        pass
+
+
 async def test_a_socket_client_is_the_same_client(live: Live) -> None:
-    ana = await Client.connect(live.url, hello={"token": "ana"})
+    ana = await Client.connect(live.url, headers=ANA_HEADERS)
     assert (ana.identity.id, ana.scope) == ("ana", "acme")
     await ana.create_thread(thread_id="t1")
     await ana.send("t1", "hello")
@@ -5336,21 +5282,21 @@ async def test_a_socket_client_is_the_same_client(live: Live) -> None:
     await ana.close()
 
 
-async def test_a_refused_hello_and_an_unreachable_server_raise(live: Live) -> None:
-    with pytest.raises(ForbiddenError, match="^server: hello was refused$"):
-        await Client.connect(live.url, hello={})
+async def test_a_refused_upgrade_and_an_unreachable_server_raise(live: Live) -> None:
+    with pytest.raises(ForbiddenError, match="^websocket: the server refused the connection with http 401$"):
+        await Client.connect(live.url)
     with pytest.raises(TransportError, match="^client: could not connect"):
-        await Client.connect("ws://127.0.0.1:1", hello={"token": "ana"})
+        await Client.connect("ws://127.0.0.1:1", headers=ANA_HEADERS)
 
 
 async def test_a_dropped_socket_resumes_every_joined_thread_in_order_once(live: Live) -> None:
     calls: list[int] = []
 
-    async def hello() -> dict[str, str]:
+    async def headers() -> dict[str, str]:
         calls.append(1)
-        return {"token": "ana"}
+        return ANA_HEADERS
 
-    ana = await Client.connect(live.url, hello=hello)
+    ana = await Client.connect(live.url, headers=headers)
     bruno = await live.server.connect(BRUNO, scope="acme")
     await ana.create_thread(thread_id="t1")
     await ana.add_member("t1", BRUNO)
@@ -5371,7 +5317,7 @@ async def test_a_dropped_socket_resumes_every_joined_thread_in_order_once(live: 
 
 
 async def test_a_resume_beyond_the_replay_limit_says_truncated(storage: InMemoryStorage) -> None:
-    async with running(Server(storage, authenticate=authenticate, replay_limit=3)) as live:
+    async with running(Server(storage, replay_limit=3)) as live:
         ana, bruno = await room(live)
         live.paused = True
         await live.drop()
@@ -5412,21 +5358,31 @@ async def test_a_write_not_acknowledged_within_the_deadline_fails(live: Live, mo
         await ana.send("t1", "lost")
 
 
-async def test_a_hello_refused_on_reconnect_ends_the_stream_with_the_error(live: Live) -> None:
-    answers = iter([{"token": "ana"}, {}])
+async def test_an_upgrade_refused_on_reconnect_ends_the_stream_with_the_error(live: Live) -> None:
+    answers = iter([ANA_HEADERS, {}])
 
-    async def hello() -> dict[str, str]:
+    async def headers() -> dict[str, str]:
         return next(answers, {})
 
-    ana = await Client.connect(live.url, hello=hello)
+    ana = await Client.connect(live.url, headers=headers)
     await live.drop()
+    with pytest.raises(ForbiddenError, match="^websocket: the server refused the connection with http 401$"):
+        await asyncio.wait_for(read_to_the_end(ana), 3.0)
 
-    async def read() -> None:
-        async for _ in ana.events():
-            pass
 
-    with pytest.raises(ForbiddenError, match="^server: hello was refused$"):
-        await asyncio.wait_for(read(), 3.0)
+async def test_a_headers_function_that_raises_on_reconnect_ends_the_stream_with_the_error(live: Live) -> None:
+    calls: list[int] = []
+
+    async def headers() -> dict[str, str]:
+        calls.append(1)
+        if len(calls) > 1:
+            raise RuntimeError("session expired")
+        return ANA_HEADERS
+
+    ana = await Client.connect(live.url, headers=headers)
+    await live.drop()
+    with pytest.raises(ForbiddenError, match="^client: the headers function raised: session expired$"):
+        await asyncio.wait_for(read_to_the_end(ana), 3.0)
 ```
 
 - [ ] **Step 2: Run them to verify they fail**
@@ -5442,10 +5398,13 @@ Expected: FAIL — `AttributeError: type object 'Client' has no attribute 'conne
 from __future__ import annotations
 
 from websockets.asyncio.client import ClientConnection, connect
+from websockets.exceptions import InvalidStatus
 
 from rfnry_thread.connection import Connection
+from rfnry_thread.errors import ForbiddenError
 
 MAX_FRAME = 16 * 1024 * 1024
+REFUSED = frozenset({401, 403})
 
 
 class _Socket:
@@ -5463,20 +5422,43 @@ class _Socket:
         await self._socket.close(code, reason or "")
 
 
-async def open_socket(url: str) -> Connection:
-    return _Socket(await connect(url, max_size=MAX_FRAME, open_timeout=10))
+async def open_socket(url: str, headers: dict[str, str] | None = None) -> Connection:
+    try:
+        socket = await connect(url, additional_headers=headers, max_size=MAX_FRAME, open_timeout=10)
+    except InvalidStatus as exc:
+        status = exc.response.status_code
+        if status in REFUSED:
+            raise ForbiddenError(f"websocket: the server refused the connection with http {status}") from exc
+        raise
+    return _Socket(socket)
 ```
 
-In `client.py`, add `from rfnry_thread.websocket import open_socket` to the imports and this classmethod to `Client`, above `_open`:
+In `client.py`, add `from rfnry_thread.websocket import open_socket` to the imports, `HeadersSource = dict[str, str] | Callable[[], Awaitable[dict[str, str]]]` beside `Dial`, this function at module level:
+
+```python
+async def _headers(source: HeadersSource | None) -> dict[str, str] | None:
+    if source is None or isinstance(source, dict):
+        return source
+    try:
+        return await source()
+    except ThreadException:
+        raise
+    except Exception as exc:
+        raise ForbiddenError(f"client: the headers function raised: {exc}") from exc
+```
+
+and this classmethod to `Client`, above `_open`:
 
 ```python
     @classmethod
-    async def connect(cls, url: str, *, hello: HelloSource | None = None) -> Client:
+    async def connect(cls, url: str, *, headers: HeadersSource | None = None) -> Client:
         async def dial() -> Connection:
-            return await open_socket(url)
+            return await open_socket(url, await _headers(headers))
 
-        return await cls._open(dial, hello if hello is not None else {})
+        return await cls._open(dial)
 ```
+
+The test server authenticates the upgrade the way a consumer would — `process_request` answers 401 to a request without a bearer token, and the handler hands `serve` the identity it read — so these tests exercise the whole contract of design §18 over a real socket.
 
 If a test above fails, the fix belongs in `client.py`'s `_lost`, `_reconnect`, `_rejoin` or `_deliver` (Task 12), not in the test: the tests state the delivery contract of `docs/thread.md` § Delivery and resume.
 
@@ -5490,7 +5472,7 @@ Expected: PASS. These tests exercise timing; run the file five times and expect 
 
 ```bash
 git add packages/python
-git commit -m "feat: Client.connect over a WebSocket — reconnect with jitter, resume from the cursor, writes stored exactly once
+git commit -m "feat: Client.connect over a WebSocket — headers on the upgrade, reconnect with jitter, resume from the cursor, writes stored exactly once
 
 Claude-Session: https://claude.ai/code/session_01GevsYJaAyM8ARLvEnXsoAB"
 ```
@@ -5735,7 +5717,7 @@ import pytest
 from rfnry_thread.models import Message, Text, Thread
 from rfnry_thread.postgres import PostgresStorage
 from rfnry_thread.server import Server
-from unit.conftest import authenticate, say
+from unit.conftest import say
 from unit.factories import ANA, HELPER
 from unit.peer import Peer
 from until import until
@@ -5774,8 +5756,8 @@ async def relistened(pool: Any, killed: list[int], expected: int, timeout: float
 @pytest.fixture
 async def replicas() -> AsyncIterator[tuple[Server, Server]]:
     near_pool, far_pool = await postgres_pool(), await postgres_pool()
-    near = Server(await fresh(near_pool), authenticate=authenticate)
-    far = Server(PostgresStorage(far_pool), authenticate=authenticate)
+    near = Server(await fresh(near_pool))
+    far = Server(PostgresStorage(far_pool))
     await near.start()
     await far.start()
     yield near, far
@@ -5888,13 +5870,13 @@ from datetime import UTC, datetime
 from rfnry_thread.models import Thread
 from rfnry_thread.server import Server
 from rfnry_thread.storage import Storage
-from unit.conftest import authenticate, say
+from unit.conftest import say
 from unit.factories import ANA
 from unit.peer import Peer
 
 
 async def test_nothing_of_a_is_reachable_from_b(storage: Storage) -> None:
-    server = Server(storage, authenticate=authenticate)
+    server = Server(storage)
     a = await Peer.open(server, ANA, scope="tenant-a")
     b = await Peer.open(server, ANA, scope="tenant-b")
     for peer in (a, b):
@@ -5907,7 +5889,7 @@ async def test_nothing_of_a_is_reachable_from_b(storage: Storage) -> None:
 
 
 async def test_erasure_is_provable_and_falsifiable(storage: Storage) -> None:
-    server = Server(storage, authenticate=authenticate)
+    server = Server(storage)
     await server.create_thread("tenant-a", thread_id="t1")
     await server.add_member("tenant-a", "t1", ANA)
     await server.create_thread("tenant-b", thread_id="t1")
@@ -6701,7 +6683,7 @@ export const PROTOCOL = 1
 export const HELLO = 'hello'
 
 type Payload = Record<string, unknown>
-export type Hello = { type: 'hello'; protocol: number; auth: Payload }
+export type Hello = { type: 'hello'; protocol: number }
 export type Request = { type: 'request'; id: string; method: string; payload: Payload }
 export type Response = { type: 'response'; id: string; payload: Payload }
 export type ErrorFrame = { type: 'error'; id: string; error: { code: string; message: string } }
@@ -6786,7 +6768,7 @@ Claude-Session: https://claude.ai/code/session_01GevsYJaAyM8ARLvEnXsoAB"
 
 ### Task 17: The TypeScript client — connect, reconnect, resume, outbox, subscribe, stream
 
-The outbox is adapted from `../rfnry-thread/packages/client-react/src/outbox.ts` (per-thread promise tails, deadline, capped backoff, woken on reconnect) without its telemetry and abort ids; the reconnect loop from `../rfnry-thread/packages/client-react/src/transport/reconnect.ts` (full jitter, first attempt immediate, re-hello every attempt) without its callbacks. Everything else of the old React package — stores, hooks, provider, codec, transcript, REST — is stripped. The shape mirrors the Python `Client` (Task 12) verb for verb.
+The outbox is adapted from `../rfnry-thread/packages/client-react/src/outbox.ts` (per-thread promise tails, deadline, capped backoff, woken on reconnect) without its telemetry and abort ids; the reconnect loop from `../rfnry-thread/packages/client-react/src/transport/reconnect.ts` (full jitter, first attempt immediate, fresh `protocols` and a hello every attempt) without its callbacks. A browser cannot see why an upgrade failed, so a refused reconnect looks like an unreachable server and keeps retrying; only a `protocols` function that throws stops the client (design §18). Everything else of the old React package — stores, hooks, provider, codec, transcript, REST — is stripped. The shape mirrors the Python `Client` (Task 12) verb for verb.
 
 **Files:**
 - Create: `packages/typescript/src/timing.ts`, `packages/typescript/src/outbox.ts`, `packages/typescript/src/client.ts`
@@ -6795,7 +6777,7 @@ The outbox is adapted from `../rfnry-thread/packages/client-react/src/outbox.ts`
 
 **Interfaces:**
 - Consumes: errors, types, protocol (Task 16).
-- Produces: `timing` (mutable tuning for tests: `handshakeMs`, `reconnectMs`, `reconnectCapMs`, `deadlineMs`, `backoffMs`, `backoffCapMs`); `Outbox`; `connect(options: { url: string; hello?: HelloSource }): Promise<Client>`; `Client` with `identity`, `scope`, `closed: Promise<ThreadException | null>`, `createThread(options?: { threadId?: string; metadata?: Record<string, unknown> })`, `getThread(threadId)`, `listThreads(options?: { before?: string; limit?: number })`, `updateThread(threadId, metadata)`, `deleteThread(threadId)`, `join(threadId, options?: { since?: number })`, `leave(threadId)`, `history(threadId, options?: { before?: number; limit?: number; kinds?: string[] })`, `present(threadId)`, `addMember(threadId, identity)`, `removeMember(threadId, identity)`, `listMembers(threadId)`, `send(threadId, content, options?: { inReplyTo?: string; triggeredBy?: Identity; clientId?: string })`, `stream(threadId, options?: { inReplyTo?: string; triggeredBy?: Identity })`, `step(threadId, options: { name, input?, output?, isError?, durationMs?, inReplyTo?, triggeredBy?, clientId? })`, `edit(threadId, target, content, options?: { clientId?: string })`, `retract(threadId, target, options?: { clientId?: string })`, `read(threadId, upToSeq)`, `custom(threadId, name, payload, options?: { clientId?: string })` (`clientId` as in Python: generated when left out, the dedup key when given), `working(threadId, label?)`, `idle(threadId)`, `cancel(threadId, to)`, `subscribe(listener, options?: { includeOwn?: boolean }): () => void`, `close()`; `Stream` with `id`, `text`, `write(text): void`, `finish(content?): Promise<Message>`, `abort(): Promise<void>`.
+- Produces: `timing` (mutable tuning for tests: `handshakeMs`, `reconnectMs`, `reconnectCapMs`, `deadlineMs`, `backoffMs`, `backoffCapMs`); `Outbox`; `connect(options: { url: string; protocols?: string | string[] | (() => Promise<string | string[]>) }): Promise<Client>` (the subprotocol list offered with the upgrade — browsers cannot set other headers, so a token rides here or in the session cookie; a function is awaited on every attempt and one that throws is `ForbiddenError('client: the protocols function threw: …')`, which stops a reconnecting client); `Client` with `identity`, `scope`, `closed: Promise<ThreadException | null>`, `createThread(options?: { threadId?: string; metadata?: Record<string, unknown> })`, `getThread(threadId)`, `listThreads(options?: { before?: string; limit?: number })`, `updateThread(threadId, metadata)`, `deleteThread(threadId)`, `join(threadId, options?: { since?: number })`, `leave(threadId)`, `history(threadId, options?: { before?: number; limit?: number; kinds?: string[] })`, `present(threadId)`, `addMember(threadId, identity)`, `removeMember(threadId, identity)`, `listMembers(threadId)`, `send(threadId, content, options?: { inReplyTo?: string; triggeredBy?: Identity; clientId?: string })`, `stream(threadId, options?: { inReplyTo?: string; triggeredBy?: Identity })`, `step(threadId, options: { name, input?, output?, isError?, durationMs?, inReplyTo?, triggeredBy?, clientId? })`, `edit(threadId, target, content, options?: { clientId?: string })`, `retract(threadId, target, options?: { clientId?: string })`, `read(threadId, upToSeq)`, `custom(threadId, name, payload, options?: { clientId?: string })` (`clientId` as in Python: generated when left out, the dedup key when given), `working(threadId, label?)`, `idle(threadId)`, `cancel(threadId, to)`, `subscribe(listener, options?: { includeOwn?: boolean }): () => void`, `close()`; `Stream` with `id`, `text`, `write(text): void`, `finish(content?): Promise<Message>`, `abort(): Promise<void>`.
 
 - [ ] **Step 1: Write the fake socket and the failing tests**
 
@@ -6817,9 +6799,11 @@ export class FakeSocket {
 
   constructor(
     readonly url: string,
-    readonly server: FakeServer
+    readonly server: FakeServer,
+    protocols?: string | string[]
   ) {
     server.sockets.push(this)
+    server.opened.push(protocols)
     setTimeout(() => {
       if (server.down) {
         this.readyState = 3
@@ -6854,9 +6838,9 @@ export class FakeServer {
   readonly sockets: FakeSocket[] = []
   readonly handlers = new Map<string, Handler>()
   readonly hellos: Frame[] = []
+  readonly opened: Array<string | string[] | undefined> = []
   readonly stored = new Map<string, Frame>()
   down = false
-  refuse = false
   dropAck = false
   seq = 0
   identity: Frame = { role: 'user', id: 'ana', name: 'Ana', metadata: {} }
@@ -6866,8 +6850,8 @@ export class FakeServer {
     vi.stubGlobal(
       'WebSocket',
       class extends FakeSocket {
-        constructor(url: string) {
-          super(url, server)
+        constructor(url: string, protocols?: string | string[]) {
+          super(url, server, protocols)
         }
       }
     )
@@ -6907,12 +6891,7 @@ export class FakeServer {
 
   async receive(socket: FakeSocket, frame: Frame): Promise<void> {
     if (frame.type === 'hello') {
-      this.hellos.push(frame.auth)
-      if (this.refuse) {
-        socket.deliver({ type: 'error', id: 'hello', error: { code: 'forbidden', message: 'server: hello was refused' } })
-        socket.close(4001)
-        return
-      }
+      this.hellos.push(frame)
       socket.deliver({ type: 'response', id: 'hello', payload: { identity: this.identity, scope: 'acme' } })
       return
     }
@@ -7032,7 +7011,7 @@ afterEach(() => {
 })
 
 async function joined(): Promise<{ client: Client; items: Item[] }> {
-  const client = await connect({ url: 'ws://fake', hello: { token: 'ana' } })
+  const client = await connect({ url: 'ws://fake', protocols: ['thread', 'tok'] })
   const items: Item[] = []
   client.subscribe((item) => items.push(item), { includeOwn: true })
   await client.join('t1', { since: 0 })
@@ -7040,20 +7019,27 @@ async function joined(): Promise<{ client: Client; items: Item[] }> {
 }
 
 describe('client', () => {
-  it('opens with a hello and knows who and where it is', async () => {
-    const hello = vi.fn(async () => ({ token: 'ana' }))
-    const client = await connect({ url: 'ws://fake', hello })
+  it('opens with the protocols and a hello, and knows who and where it is', async () => {
+    const protocols = vi.fn(async () => ['thread', 'tok'])
+    const client = await connect({ url: 'ws://fake', protocols })
     expect(client.identity.id).toBe('ana')
     expect(client.scope).toBe('acme')
-    expect(server.hellos).toEqual([{ token: 'ana' }])
+    expect(server.opened).toEqual([['thread', 'tok']])
+    expect(server.hellos).toEqual([{ type: 'hello', protocol: 1 }])
   })
 
-  it('raises a refused hello and an unreachable server', async () => {
-    server.refuse = true
-    await expect(connect({ url: 'ws://fake', hello: {} })).rejects.toBeInstanceOf(ForbiddenError)
-    server.refuse = false
+  it('raises an unreachable server and a protocols function that throws', async () => {
     server.down = true
     await expect(connect({ url: 'ws://fake' })).rejects.toBeInstanceOf(TransportError)
+    server.down = false
+    const failing = connect({
+      url: 'ws://fake',
+      protocols: async () => {
+        throw new Error('session expired')
+      },
+    })
+    await expect(failing).rejects.toBeInstanceOf(ForbiddenError)
+    await expect(failing).rejects.toThrow('client: the protocols function threw: session expired')
   })
 
   it('speaks the protocol verb for verb', async () => {
@@ -7126,16 +7112,17 @@ describe('client', () => {
     expect(server.sent('event.send')).toHaveLength(1)
   })
 
-  it('reconnects, says hello again, and re-joins from the cursor', async () => {
-    const hello = vi.fn(async () => ({ token: 'ana' }))
-    const client = await connect({ url: 'ws://fake', hello })
+  it('reconnects with fresh protocols, says hello again, and re-joins from the cursor', async () => {
+    const protocols = vi.fn(async () => ['thread', 'tok'])
+    const client = await connect({ url: 'ws://fake', protocols })
     const items: Item[] = []
     client.subscribe((item) => items.push(item))
     await client.join('t1', { since: 0 })
     server.push('event', message(4, 'before'))
     await vi.waitFor(() => expect(items).toHaveLength(1))
     server.drop()
-    await vi.waitFor(() => expect(hello).toHaveBeenCalledTimes(2))
+    await vi.waitFor(() => expect(protocols).toHaveBeenCalledTimes(2))
+    await vi.waitFor(() => expect(server.hellos).toHaveLength(2))
     await vi.waitFor(() => expect(items.some((item) => 'truncated' in item)).toBe(true))
     const joins = server.sent('thread.join').map((frame) => frame.payload.since)
     expect(joins).toEqual([0, 4])
@@ -7152,9 +7139,17 @@ describe('client', () => {
     expect(sent.seq).toBe(1)
   })
 
-  it('stops for good when a reconnect is refused', async () => {
-    const { client } = await joined()
-    server.refuse = true
+  it('stops for good when the protocols function throws on a reconnect', async () => {
+    let expired = false
+    const client = await connect({
+      url: 'ws://fake',
+      protocols: async () => {
+        if (expired) throw new Error('session expired')
+        return ['thread', 'tok']
+      },
+    })
+    await client.join('t1', { since: 0 })
+    expired = true
     server.drop()
     const reason = await client.closed
     expect(reason).toBeInstanceOf(ForbiddenError)
@@ -7278,8 +7273,8 @@ import type {
 } from './types.js'
 
 type Payload = Record<string, unknown>
-export type HelloSource = Payload | (() => Promise<Payload>)
-export type ConnectOptions = { url: string; hello?: HelloSource }
+export type Protocols = string | string[]
+export type ConnectOptions = { url: string; protocols?: Protocols | (() => Promise<Protocols>) }
 export type Listener = (item: Item) => void
 export type StreamOptions = { inReplyTo?: string; triggeredBy?: Identity }
 export type SendOptions = StreamOptions & { clientId?: string }
@@ -7296,11 +7291,11 @@ const parts = (content: Content): Part[] => (typeof content === 'string' ? [{ ty
 const newId = (): string => crypto.randomUUID().replaceAll('-', '')
 const sleep = (ms: number) => new Promise<void>((resolve) => setTimeout(resolve, ms))
 
-function open(url: string): Promise<WebSocket> {
+function open(url: string, protocols: Protocols | undefined): Promise<WebSocket> {
   return new Promise((resolve, reject) => {
     let socket: WebSocket
     try {
-      socket = new WebSocket(url)
+      socket = new WebSocket(url, protocols)
     } catch (error) {
       reject(new TransportError(`client: could not connect: ${String(error)}`))
       return
@@ -7310,7 +7305,7 @@ function open(url: string): Promise<WebSocket> {
   })
 }
 
-function handshake(socket: WebSocket, auth: Payload): Promise<Payload> {
+function handshake(socket: WebSocket): Promise<Payload> {
   return new Promise((resolve, reject) => {
     const timer = setTimeout(() => reject(new TransportError('client: the hello was not answered')), timing.handshakeMs)
     socket.onmessage = (message) => {
@@ -7330,7 +7325,7 @@ function handshake(socket: WebSocket, auth: Payload): Promise<Payload> {
       clearTimeout(timer)
       reject(new TransportError('client: the hello was not answered'))
     }
-    socket.send(encode({ type: 'hello', protocol: PROTOCOL, auth }))
+    socket.send(encode({ type: 'hello', protocol: PROTOCOL }))
   })
 }
 
@@ -7440,12 +7435,10 @@ export class Client {
   }
 
   async establish(): Promise<void> {
-    const { hello } = this.options
-    const auth = typeof hello === 'function' ? await hello() : (hello ?? {})
-    const socket = await open(this.options.url)
+    const socket = await open(this.options.url, await this.offered())
     let reply: Payload
     try {
-      reply = await handshake(socket, auth)
+      reply = await handshake(socket)
     } catch (error) {
       socket.close()
       throw error
@@ -7456,6 +7449,17 @@ export class Client {
     socket.onmessage = (message) => this.receive(String(message.data))
     socket.onclose = () => this.lost(socket)
     for (const wake of this.waiting.splice(0)) wake()
+  }
+
+  private async offered(): Promise<Protocols | undefined> {
+    const { protocols } = this.options
+    if (typeof protocols !== 'function') return protocols
+    try {
+      return await protocols()
+    } catch (error) {
+      const reason = error instanceof Error ? error.message : String(error)
+      throw new ForbiddenError(`client: the protocols function threw: ${reason}`)
+    }
   }
 
   private receive(text: string): void {
@@ -7746,6 +7750,7 @@ Notes for the implementer:
 - The fake socket assigns `onopen`/`onmessage`/`onclose`/`onerror` as properties, which is exactly what the client uses; do not switch the client to `addEventListener` without switching the fake.
 - `clientId` goes to `event()` as given, or `newId()` makes one; the fake's store keys on `thread_id:client_id` like the server's dedup, so "stores a caller-supplied clientId once…" sees the first stored frame come back for the repeat. A stream keeps `client_id = stream.id` and takes no `clientId`, hence `StreamOptions`.
 - In "stores a write whose ack was lost exactly once", the fake closes the socket instead of answering; the outbox retries with the same `client_id` after the reconnect and the fake's store answers with the stored event.
+- `offered()` wraps a throwing `protocols` function in a `ForbiddenError`, which `reconnect` treats like any refusal: it stops the client and settles `closed` with it.
 
 - [ ] **Step 4: Run the gate**
 
@@ -7870,17 +7875,15 @@ import pytest
 import rfnry_thread
 from rfnry_thread import Identity, InMemoryStorage, Server
 
-from .conftest import authenticate
-
 DOCS = Path(__file__).parents[4] / "docs" / "thread.md"
 BLOCKS: list[tuple[str, str]] = re.findall(r"```(\w*)\n(.*?)```", DOCS.read_text(encoding="utf-8"), re.S)
 PYTHON = [body for lang, body in BLOCKS if lang == "python"]
 
 ILLUSTRATIVE = {
     "app = FastAPI()": "needs a web framework; the examples serve a socket with websockets",
-    'remote = await Client.connect("wss://app.example.com/thread", hello={"token": token})': "needs a live socket; test_socket.py covers it",
+    'remote = await Client.connect("wss://app.example.com/thread", headers={"Authorization": f"Bearer {token}"})': "needs a live socket; test_socket.py covers it",
     "async for item in helper.events():": "reads until the stream ends; test_client.py covers the pattern",
-    "server = Server(PostgresStorage(pool), authenticate=authenticate)": "needs Postgres; the integration tier covers it",
+    "server = Server(PostgresStorage(pool))": "needs Postgres; the integration tier covers it",
     'run = await engine.run("support", scope="acme", input=message.content,': "needs rfnry-engine; examples/engine_agent_in_a_thread runs it",
     "pool = await asyncpg.create_pool(dsn)": "needs Postgres; the integration tier covers it",
 }
@@ -7890,21 +7893,12 @@ def first_line(block: str) -> str:
     return block.splitlines()[0]
 
 
-class User:
-    id, name, org = "ana", "Ana", "acme"
-
-
-class Users:
-    async def by_token(self, token: str | None) -> User | None:
-        return User() if token == "t0k" else None
-
-
 async def now(args: dict[str, Any]) -> str:
     return "2026-09-24T12:00:00Z"
 
 
 async def context() -> dict[str, Any]:
-    server = Server(InMemoryStorage(), authenticate=authenticate)
+    server = Server(InMemoryStorage())
     ana = await server.connect(Identity(role="user", id="ana", name="Ana"), scope="acme")
     helper = await server.connect(Identity(role="assistant", id="helper", name="Helper"), scope="acme")
     thread = await ana.create_thread(thread_id="support-ana")
@@ -7915,7 +7909,7 @@ async def context() -> dict[str, Any]:
     return {
         **{name: getattr(rfnry_thread, name) for name in rfnry_thread.__all__},
         "server": server, "ana": ana, "helper": helper, "thread": thread, "message": message,
-        "authenticate": authenticate, "users": Users(), "storage": InMemoryStorage(), "now": now,
+        "storage": InMemoryStorage(), "now": now,
         "wav": b"RIFF", "url": "https://files.example.com/receipt.png",
     }
 
@@ -7958,7 +7952,7 @@ import * as api from '../src/index.js'
 const docs = readFileSync(join(import.meta.dirname, '../../../docs/thread.md'), 'utf8')
 const blocks = [...docs.matchAll(/```ts\n([\s\S]*?)```/g)].map((match) => match[1] ?? '')
 const section = docs.split('### The TypeScript client')[1]?.split('\n## ')[0] ?? ''
-const NOT_VERBS = new Set(['connect', 'resolve', 'thread_id', 'in_reply_to', 'includeOwn', 'null'])
+const NOT_VERBS = new Set(['connect', 'resolve', 'thread_id', 'in_reply_to', 'includeOwn', 'null', 'protocols'])
 
 describe('docs', () => {
   it('names only verbs the client has', () => {
@@ -8083,7 +8077,7 @@ cd examples/<name>
 uv run --env-file ../../../.env.examples main.py
 ```
 
-Every Python example serves the WebSocket with the `websockets` package (already a dependency of rfnry-thread) through the same five-line adapter, because a consumer's framework is theirs:
+Every Python example serves the WebSocket with the `websockets` package (already a dependency of rfnry-thread) through the same five-line adapter, because a consumer's framework is theirs. The same package plays the consumer's part in authentication: `process_request` refuses an upgrade without a known token (HTTP 401), and the handler hands `serve` the identity it read. Examples that never open a socket have no one to authenticate and build `Server(InMemoryStorage())`:
 
 ```python
 class Socket:
@@ -8163,12 +8157,8 @@ from rfnry_thread import (
 )
 
 
-async def nobody(hello):
-    return None
-
-
 async def main() -> None:
-    server = Server(InMemoryStorage(), authenticate=nobody)
+    server = Server(InMemoryStorage())
     ana = await server.connect(Identity(role="user", id="ana", name="Ana"), scope="demo")
     helper = await server.connect(Identity(role="assistant", id="helper", name="Helper"), scope="demo")
     thread = await ana.create_thread(thread_id="refund")
@@ -8239,15 +8229,22 @@ class Socket:
         await self.socket.close(code, reason or "")
 
 
-async def authenticate(hello):
-    person = PEOPLE.get(hello.get("token"))
-    return (person, "demo") if person else None
+def who(request):
+    return PEOPLE.get(request.headers.get("Authorization", "").removeprefix("Bearer "))
+
+
+def upgrade(connection, request):
+    return None if who(request) else connection.respond(401, "who are you?\n")
 
 
 async def main() -> None:
-    server = Server(InMemoryStorage(), authenticate=authenticate)
-    async with serve(lambda socket: server.serve(Socket(socket)), "127.0.0.1", 8765):
-        ana = await Client.connect("ws://127.0.0.1:8765", hello={"token": "ana-token"})
+    server = Server(InMemoryStorage())
+
+    async def handler(socket):
+        await server.serve(Socket(socket), identity=who(socket.request), scope="demo")
+
+    async with serve(handler, "127.0.0.1", 8765, process_request=upgrade):
+        ana = await Client.connect("ws://127.0.0.1:8765", headers={"Authorization": "Bearer ana-token"})
         reminders = await server.connect(Identity(role="assistant", id="reminders", name="Reminders"), scope="demo")
 
         renewal = await reminders.create_thread(thread_id="renewal-ana-2026-10")
@@ -8317,8 +8314,13 @@ class Socket:
         await self.socket.close(code, reason or "")
 
 
-async def authenticate(hello):
-    return (Identity(role="user", id="you", name="You"), "demo") if hello.get("token") == "you" else None
+YOU = Identity(role="user", id="you", name="You")
+
+
+def upgrade(connection, request):
+    if request.headers.get("Authorization") != "Bearer you":
+        return connection.respond(401, "who are you?\n")
+    return None
 
 
 async def assistant(server, engine):
@@ -8341,7 +8343,7 @@ async def assistant(server, engine):
 
 
 async def person():
-    you = await Client.connect("ws://127.0.0.1:8766", hello={"token": "you"})
+    you = await Client.connect("ws://127.0.0.1:8766", headers={"Authorization": "Bearer you"})
     thread = await you.create_thread(thread_id="chat")
     await you.add_member(thread.id, Identity(role="assistant", id="assistant", name="Assistant"))
     await you.join(thread.id)
@@ -8363,9 +8365,13 @@ async def person():
 
 
 async def main() -> None:
-    server = Server(InMemoryStorage(), authenticate=authenticate)
+    server = Server(InMemoryStorage())
     engine = Engine("agents", generation=AnthropicProvider())
-    async with serve(lambda socket: server.serve(Socket(socket)), "127.0.0.1", 8766):
+
+    async def handler(socket):
+        await server.serve(Socket(socket), identity=YOU, scope="demo")
+
+    async with serve(handler, "127.0.0.1", 8766, process_request=upgrade):
         helper = asyncio.create_task(assistant(server, engine))
         await person()
         helper.cancel()
@@ -8409,10 +8415,6 @@ from providers import AnthropicProvider, GoogleProvider
 TURNS = 3
 
 
-async def nobody(hello):
-    return None
-
-
 async def speaker(server, engine, name, opens):
     me = await server.connect(Identity(role="assistant", id=name, name=name.title()), scope="demo")
     spoken = 0
@@ -8434,7 +8436,7 @@ async def speaker(server, engine, name, opens):
 
 
 async def main() -> None:
-    server = Server(InMemoryStorage(), authenticate=nobody)
+    server = Server(InMemoryStorage())
     claude = Engine("agents", generation=AnthropicProvider())
     gemini = Engine("agents", generation=GoogleProvider())
     skeptic = asyncio.create_task(speaker(server, gemini, "skeptic", opens=False))
@@ -8474,10 +8476,6 @@ from rfnry_thread import Identity, InMemoryStorage, Message, Server, Text, Threa
 from providers import AnthropicProvider
 
 
-async def nobody(hello):
-    return None
-
-
 def output(result):
     if isinstance(result, str):
         return [Text(text=result)]
@@ -8487,7 +8485,7 @@ def output(result):
 
 
 async def main() -> None:
-    server = Server(InMemoryStorage(), authenticate=nobody)
+    server = Server(InMemoryStorage())
     engine = Engine("agents", generation=AnthropicProvider())
     ana = await server.connect(Identity(role="user", id="ana", name="Ana"), scope="demo")
     helper = await server.connect(Identity(role="assistant", id="support", name="Support"), scope="demo")
@@ -8551,17 +8549,24 @@ class Socket:
         await self.socket.close(code, reason or "")
 
 
-async def authenticate(hello):
-    person = PEOPLE.get(hello.get("token"))
-    return (person, "demo") if person else None
+def who(request):
+    return PEOPLE.get(request.headers.get("Authorization", "").removeprefix("Bearer "))
+
+
+def upgrade(connection, request):
+    return None if who(request) else connection.respond(401, "who are you?\n")
 
 
 async def replica(pool, port):
     storage = PostgresStorage(pool)
     await storage.initialize()
-    server = Server(storage, authenticate=authenticate)
+    server = Server(storage)
     await server.start()
-    return server, await serve(lambda socket: server.serve(Socket(socket)), "127.0.0.1", port)
+
+    async def handler(socket):
+        await server.serve(Socket(socket), identity=who(socket.request), scope="demo")
+
+    return server, await serve(handler, "127.0.0.1", port, process_request=upgrade)
 
 
 async def main() -> None:
@@ -8569,8 +8574,8 @@ async def main() -> None:
     one, two = await asyncpg.create_pool(url), await asyncpg.create_pool(url)
     (first, first_socket), (second, second_socket) = await replica(one, 8771), await replica(two, 8772)
 
-    ana = await Client.connect("ws://127.0.0.1:8771", hello={"token": "ana"})
-    bruno = await Client.connect("ws://127.0.0.1:8772", hello={"token": "bruno"})
+    ana = await Client.connect("ws://127.0.0.1:8771", headers={"Authorization": "Bearer ana"})
+    bruno = await Client.connect("ws://127.0.0.1:8772", headers={"Authorization": "Bearer bruno"})
     thread = await ana.create_thread(thread_id="across")
     await ana.add_member(thread.id, bruno.identity)
     await ana.join(thread.id)
@@ -8603,7 +8608,7 @@ Needs `RFNRY_EXAMPLES_POSTGRES_URL`, which `../.env.examples` sets to the `rfnry
 
 - [ ] **Step 8: `typescript_client/`**
 
-`serve.py` (a server with an echo assistant in its own process — no model):
+`serve.py` (a server with an echo assistant in its own process — no model; the browser-shaped client offers `["thread", <token>]` as its subprotocols, the server accepts with `thread` and reads the token from the offer):
 
 ```python
 import asyncio
@@ -8626,8 +8631,15 @@ class Socket:
         await self.socket.close(code, reason or "")
 
 
-async def authenticate(hello):
-    return (Identity(role="user", id="browser", name="Browser"), "demo") if hello.get("token") == "browser" else None
+BROWSER = Identity(role="user", id="browser", name="Browser")
+
+
+def offered(request):
+    return [p.strip() for p in request.headers.get("Sec-WebSocket-Protocol", "").split(",")]
+
+
+def upgrade(connection, request):
+    return None if offered(request) == ["thread", "browser"] else connection.respond(401, "who are you?\n")
 
 
 async def echo(server):
@@ -8643,8 +8655,12 @@ async def echo(server):
 
 
 async def main() -> None:
-    server = Server(InMemoryStorage(), authenticate=authenticate)
-    async with serve(lambda socket: server.serve(Socket(socket)), "127.0.0.1", 8780):
+    server = Server(InMemoryStorage())
+
+    async def handler(socket):
+        await server.serve(Socket(socket), identity=BROWSER, scope="demo")
+
+    async with serve(handler, "127.0.0.1", 8780, subprotocols=["thread"], process_request=upgrade):
         await echo(server)
 
 
@@ -8667,7 +8683,7 @@ asyncio.run(main())
 ```js
 import { connect, resolve } from '@rfnry/thread'
 
-const client = await connect({ url: 'ws://127.0.0.1:8780', hello: async () => ({ token: 'browser' }) })
+const client = await connect({ url: 'ws://127.0.0.1:8780', protocols: async () => ['thread', 'browser'] })
 const thread = await client.createThread({ threadId: 'hello' })
 await client.addMember(thread.id, { role: 'assistant', id: 'echo', name: 'Echo' })
 const done = new Promise((finish) => {
@@ -8693,7 +8709,9 @@ Run: `cd packages/typescript && npm run build`, then `cd examples/typescript_cli
 Each folder is a standalone project: a `main.py` that reads top to bottom and a `pyproject.toml`
 that shows how few dependencies it needs. A folder that uses a model runs it through rfnry-engine
 and carries the engine's `providers.py`, byte for byte — rfnry-thread ships no model. Servers are
-served with the `websockets` package through a five-line adapter; your framework is yours.
+served with the `websockets` package through a five-line adapter, which also stands in for your
+authentication: it refuses an upgrade without a known token and hands `serve` who it is. Your
+framework and your authentication are yours.
 
 | example | what it shows |
 | --- | --- |
@@ -8774,15 +8792,28 @@ import asyncio
 import os
 from pathlib import Path
 
+from http import HTTPStatus
+
 import pytest
 from websockets.asyncio.server import ServerConnection, serve
+from websockets.http11 import Request, Response
 
 from rfnry_thread import Custom, Identity, InMemoryStorage, Invited, Message, Server, Text
-from unit.conftest import authenticate
 
 pytestmark = pytest.mark.live
 
 TYPESCRIPT = Path(__file__).parents[3] / "typescript"
+
+
+def who(request: Request | None) -> Identity | None:
+    offered = [] if request is None else [p.strip() for p in request.headers.get("Sec-WebSocket-Protocol", "").split(",")]
+    if len(offered) != 2 or offered[0] != "thread" or not offered[1]:
+        return None
+    return Identity(role="user", id=offered[1], name=offered[1].title())
+
+
+def upgrade(socket: ServerConnection, request: Request) -> Response | None:
+    return None if who(request) else socket.respond(HTTPStatus.UNAUTHORIZED, "who are you?\n")
 
 
 class Socket:
@@ -8821,13 +8852,15 @@ async def assistant(server: Server, open_sockets: list[Socket]) -> None:
 
 
 async def test_the_typescript_client_against_a_live_server() -> None:
-    server = Server(InMemoryStorage(), authenticate=authenticate)
+    server = Server(InMemoryStorage())
     open_sockets: list[Socket] = []
 
     async def handler(socket: ServerConnection) -> None:
-        await server.serve(Socket(socket, open_sockets))
+        identity = who(socket.request)
+        assert identity is not None
+        await server.serve(Socket(socket, open_sockets), identity=identity, scope="acme")
 
-    async with serve(handler, "127.0.0.1", 0) as listening:
+    async with serve(handler, "127.0.0.1", 0, subprotocols=["thread"], process_request=upgrade) as listening:
         port = next(iter(listening.sockets)).getsockname()[1]
         helper = asyncio.create_task(assistant(server, open_sockets))
         process = await asyncio.create_subprocess_exec(
@@ -8858,7 +8891,7 @@ async function until(check: () => boolean, ms = 5000): Promise<void> {
 
 describe.skipIf(!url)('a live server', () => {
   it('carries a turn with a step, a stream and its message, in order', async () => {
-    const client = await connect({ url, hello: async () => ({ token: 'ana' }) })
+    const client = await connect({ url, protocols: async () => ['thread', 'ana'] })
     const items: Item[] = []
     client.subscribe((item) => items.push(item))
     const thread = await client.createThread({ threadId: 'e2e-turn' })
@@ -8877,7 +8910,7 @@ describe.skipIf(!url)('a live server', () => {
   })
 
   it('resumes after the server drops the socket and misses nothing', async () => {
-    const client = await connect({ url, hello: { token: 'ana' } })
+    const client = await connect({ url, protocols: ['thread', 'ana'] })
     const items: Item[] = []
     client.subscribe((item) => items.push(item), { includeOwn: true })
     const thread = await client.createThread({ threadId: 'e2e-resume' })
