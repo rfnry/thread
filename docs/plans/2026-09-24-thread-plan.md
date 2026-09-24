@@ -8193,8 +8193,9 @@ async def main() -> None:
     await helper.step(thread.id, name="Read", input={"path": "rules/refunds.md"},
                       output=[Text(text="A double charge is refunded in full.")], duration_ms=12,
                       in_reply_to=question.id)
+    answer = "The second charge is refunded in full, per the refunds rule."
     async with helper.stream(thread.id, in_reply_to=question.id) as reply:
-        for word in "The second charge is refunded in full, per the refunds rule.".split():
+        for word in answer.split(" "):
             await reply.write(word + " ")
             await asyncio.sleep(0.05)
         await reply.finish(reply.text.strip())
@@ -8353,7 +8354,8 @@ async def assistant(server, engine):
         if not (isinstance(item, Message) and item.author.role == "user"):
             continue
         earlier = [e for e in resolve(await me.history(item.thread_id, before=item.seq)) if isinstance(e, Message)]
-        history = [Turn(role="user" if e.author.role == "user" else "assistant", content=e.content) for e in earlier]
+        history = [Turn(role="user" if e.author.role == "user" else "assistant",
+                        content=[part.model_dump() for part in e.content]) for e in earlier]
         async with me.stream(item.thread_id, in_reply_to=item.id) as reply:
 
             async def show(event):
@@ -8725,7 +8727,7 @@ Run: `cd packages/typescript && npm run build`, then `cd examples/typescript_cli
 
 - [ ] **Step 9: `examples/README.md`**
 
-```markdown
+````markdown
 # Examples
 
 Each folder is a standalone project: a `main.py` that reads top to bottom and a `pyproject.toml`
@@ -8743,7 +8745,7 @@ framework and your authentication are yours.
 | `two_assistants` | two engine agents on two vendors debating in one thread; when to stop is their code |
 | `engine_agent_in_a_thread` | `ThreadTools` mounted on an engine run; the run's tool calls mirrored as steps and a working label |
 | `two_replicas` | two servers on one Postgres, a person on each; events and signals cross through `LISTEN/NOTIFY` |
-| `typescript_client` | `@rfnry/thread` in Node against a Python server with an echo assistant |
+| `typescript_client` | `@rfnry/thread` in Node against a Python server with an echo assistant; the token rides in the subprotocol list, as a browser's would |
 
 ## Running
 
@@ -8756,16 +8758,18 @@ uv run --env-file ../../../.env.examples main.py
 ```
 
 `two_replicas` also needs `RFNRY_EXAMPLES_POSTGRES_URL`, a Postgres database, in the same file.
-`uv` builds each folder's environment on first run; the per-folder `uv.lock` files are ignored by git. Lint an example with
-its own ruff: `uv run ruff format . && uv run ruff check .`.
-```
+`typescript_client` needs the package built first (`npm run build` in `packages/typescript`), then
+`npm install`, `uv run serve.py` in one terminal and `node main.mjs` in another.
+`uv` builds each folder's environment on first run; the per-folder `uv.lock` files are ignored by
+git. Lint an example with its own ruff: `uv run ruff format . && uv run ruff check .`.
+````
 
 - [ ] **Step 10: Check the providers are byte-identical and run every example once**
 
 Run: `cd examples && for f in */providers.py; do cmp "$f" ../../engine/examples/image_question/providers.py || echo "DIFFERS: $f"; done`
 Expected: no output.
 
-Run, from each folder: `uv run ruff format . && uv run ruff check .`, then `uv run --env-file ../../../.env.examples main.py` (the terminal example: type two lines, then an empty line). Expected: each prints what its README row says; `two_replicas` with `RFNRY_EXAMPLES_POSTGRES_URL` set.
+Run, from each folder: `uv run ruff format . && uv run ruff check .`, then `uv run --env-file ../../../.env.examples main.py` (the terminal example: type two lines, then an empty line). `person_and_assistant` hands the engine its history parts as dicts (`part.model_dump()`): the engine's `Message` validates its own part classes and, unlike `run(input=)`, does not read the family's byte-identical ones by attribute. Expected: each prints what its README row says; `two_replicas` with `RFNRY_EXAMPLES_POSTGRES_URL` set.
 
 Run the key-prefix `git grep` from the executor brief over the whole repository — expected: nothing.
 
