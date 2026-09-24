@@ -180,14 +180,16 @@ class Server:
                     await _close(connection, CLOSE_PROTOCOL, "server: malformed frame")
                     break
                 if isinstance(frame, Request):
-                    if len(tasks) >= IN_FLIGHT:
+                    if frame.method == "signal.send" or len(tasks) >= IN_FLIGHT:
                         await self._answer(session, frame)
                         continue
                     task = asyncio.get_running_loop().create_task(self._answer(session, frame))
                     tasks.add(task)
                     task.add_done_callback(tasks.discard)
                 elif isinstance(frame, Notify):
-                    continue
+                    if frame.method == "signal.send":
+                        with contextlib.suppress(ThreadException):
+                            await self._verbs.signal(session, frame.payload)
                 else:
                     await _close(
                         connection,
@@ -275,6 +277,12 @@ class Server:
             return {"members": [_dump(m) for m in members]}
         if method == "event.send":
             return {"event": _dump(await verbs.send(actor, scope, payload))}
+        if method == "thread.present":
+            present = await verbs.present(actor, scope, _args(_Ref, method, payload).thread_id)
+            return {"identities": [_dump(identity) for identity in present]}
+        if method == "signal.send":
+            await verbs.signal(session, payload)
+            return {}
         raise InputError(f"server: unknown method {method!r}")
 
     async def create_thread(

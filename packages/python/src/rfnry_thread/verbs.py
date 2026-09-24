@@ -12,7 +12,10 @@ from rfnry_thread.errors import ForbiddenError, InputError, NotFoundError
 from rfnry_thread.hub import Hub, Session
 from rfnry_thread.models import (
     CLIENT_EVENTS,
+    CLIENT_SIGNALS,
     EVENTS,
+    SIGNALS,
+    Cancel,
     Custom,
     Edit,
     Event,
@@ -22,8 +25,12 @@ from rfnry_thread.models import (
     Message,
     Retract,
     Step,
+    StreamDelta,
+    StreamEnd,
+    StreamStart,
     Text,
     Thread,
+    Working,
 )
 from rfnry_thread.storage import Storage
 
@@ -261,3 +268,39 @@ class Verbs:
                 raise InputError(
                     f"server: only a message or a step can be retracted; {event.target!r} is a {target.kind}"
                 )
+
+    async def signal(self, session: Session, payload: dict[str, Any]) -> None:
+        kind = payload.get("kind")
+        if kind not in CLIENT_SIGNALS:
+            raise InputError(f"server: unknown signal kind {kind!r}")
+        thread_id = payload.get("thread_id")
+        if not isinstance(thread_id, str) or thread_id not in session.joined:
+            raise ForbiddenError(
+                f"server: signals need a join; {session.identity.id!r} has not joined thread {thread_id!r}"
+            )
+        try:
+            signal = SIGNALS.validate_python({**payload, "sender": session.identity})
+        except ValidationError as exc:
+            raise InputError(
+                f"server: invalid {kind} signal: {exc.errors(include_url=False)[0]['msg'].lower()}"
+            ) from exc
+        if (
+            isinstance(signal, Working)
+            and signal.label is not None
+            and len(signal.label) > LABEL_LIMIT
+        ):
+            raise InputError(f"server: a working label is at most {LABEL_LIMIT} characters")
+        if isinstance(signal, StreamStart) and (thread_id, signal.stream_id) in session.streams:
+            raise InputError(f"server: stream {signal.stream_id!r} was already started")
+        if (
+            isinstance(signal, StreamDelta | StreamEnd)
+            and (thread_id, signal.stream_id) not in session.streams
+        ):
+            raise InputError(f"server: stream {signal.stream_id!r} was not started")
+        if self._authorize is not None and isinstance(signal, Working | StreamStart | Cancel):
+            await self.thread(session.identity, session.scope, thread_id, "send")
+        await self._hub.signal(session, signal)
+
+    async def present(self, actor: Identity, scope: str, thread_id: str) -> list[Identity]:
+        await self.thread(actor, scope, thread_id, "read")
+        return self._hub.state.present(scope, thread_id)
