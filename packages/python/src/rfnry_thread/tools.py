@@ -1,14 +1,19 @@
 from __future__ import annotations
 
+import json
 from collections.abc import Awaitable, Callable, Iterable
 from dataclasses import dataclass
 from functools import partial
-from typing import Any, Protocol, runtime_checkable
+from typing import TYPE_CHECKING, Any, Protocol, runtime_checkable
 
-from pydantic import BaseModel, ValidationError
+from pydantic import BaseModel, Field, ValidationError
 
 from rfnry_thread.errors import ConfigurationError, InputError
-from rfnry_thread.models import Part
+from rfnry_thread.models import Identity, Message, Part, Step, Text
+from rfnry_thread.resolve import resolve
+
+if TYPE_CHECKING:
+    from rfnry_thread.client import Client
 
 Result = str | dict[str, Any] | list[Part]
 Body = Callable[[dict[str, Any]], Awaitable[Result]]
@@ -103,3 +108,87 @@ class Tools:
 
     def without(self, *names: str) -> Tools:
         return Tools._from({n: e for n, e in self._entries.items() if n not in names})
+
+
+class _Send(BaseModel):
+    text: str = Field(description="The message to post in the thread")
+
+
+class _ReadRecent(BaseModel):
+    limit: int = Field(
+        default=20, ge=1, le=200, description="How many of the latest messages and steps to read"
+    )
+
+
+class _Working(BaseModel):
+    label: str = Field(description="What you are doing right now, as a person would read it")
+
+
+class _Idle(BaseModel):
+    pass
+
+
+class ThreadTools(Tools):
+    def __init__(
+        self,
+        client: Client,
+        *,
+        thread_id: str,
+        triggered_by: Identity | None = None,
+        in_reply_to: str | None = None,
+    ) -> None:
+        if not thread_id:
+            raise ConfigurationError("tools: a thread_id is required")
+
+        async def send(args: dict[str, Any]) -> Result:
+            event = await client.send(
+                thread_id, args["text"], in_reply_to=in_reply_to, triggered_by=triggered_by
+            )
+            return {"id": event.id, "seq": event.seq}
+
+        async def read_recent(args: dict[str, Any]) -> Result:
+            limit = int(args.get("limit", 20))
+            events = await client.history(
+                thread_id, limit=200, kinds=["message", "step", "edit", "retract"]
+            )
+            view = [e for e in resolve(events) if isinstance(e, Message | Step)][-limit:]
+            found: list[Part] = []
+            for event in view:
+                header: dict[str, Any] = {
+                    "seq": event.seq,
+                    "kind": event.kind,
+                    "in_reply_to": event.in_reply_to,
+                    "author": event.author.model_dump(mode="json", include={"role", "id", "name"}),
+                }
+                if isinstance(event, Step):
+                    header |= {"name": event.name, "input": event.input, "is_error": event.is_error}
+                found.append(Text(text=json.dumps(header)))
+                found.extend(event.output if isinstance(event, Step) else event.content)
+            return found
+
+        async def working(args: dict[str, Any]) -> Result:
+            await client.working(thread_id, label=args["label"])
+            return "ok"
+
+        async def idle(args: dict[str, Any]) -> Result:
+            await client.idle(thread_id)
+            return "ok"
+
+        super().__init__(
+            [
+                Tool("send", "Post a message to the conversation", body=send, args=_Send),
+                Tool(
+                    "read_recent",
+                    "Read the latest messages and steps of the conversation, as they were sent",
+                    body=read_recent,
+                    args=_ReadRecent,
+                ),
+                Tool(
+                    "working",
+                    "Show the people in the conversation what you are doing",
+                    body=working,
+                    args=_Working,
+                ),
+                Tool("idle", "Show that you are no longer working", body=idle, args=_Idle),
+            ]
+        )

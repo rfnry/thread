@@ -1,0 +1,70 @@
+import json
+
+import pytest
+
+from rfnry_thread.errors import ConfigurationError, InputError
+from rfnry_thread.models import Image, Message, Text, Working
+from rfnry_thread.server import Server
+from rfnry_thread.tools import ThreadTools, Tool, Tools
+
+from .factories import ANA
+from .test_client import drain, pair, take
+
+
+async def test_four_tools_pinned_to_one_thread(server: Server) -> None:
+    ana, helper = await pair(server)
+    tools = ThreadTools(helper, thread_id="t1", triggered_by=ANA, in_reply_to="e1")
+    assert tools.names == ["send", "read_recent", "working", "idle"]
+    assert all(
+        "thread_id" not in d["input_schema"].get("properties", {}) for d in tools.definitions()
+    )
+    sent = await tools.dispatch("send", {"text": "The second charge is refunded."})
+    assert isinstance(sent, dict) and sent["seq"] > 0
+    message = await take(ana, Message)
+    assert (message.in_reply_to, message.triggered_by) == ("e1", ANA)
+    assert await tools.dispatch("working", {"label": "Checking the invoice"}) == "ok"
+    assert (await take(ana, Working)).label == "Checking the invoice"
+    assert await tools.dispatch("idle", {}) == "ok"
+
+
+async def test_read_recent_returns_resolved_events_as_parts(server: Server) -> None:
+    ana, helper = await pair(server)
+    image = Image(media_type="image/png", url="https://files.example.com/receipt.png")
+    first = await ana.send("t1", [Text(text="Here is the receipt."), image])
+    await ana.edit("t1", first.id, [Text(text="Here is the right receipt."), image])
+    await helper.step(
+        "t1", name="Read", input={"path": "rules/refunds.md"}, output=[Text(text="Refund in full.")]
+    )
+    retracted = await ana.send("t1", "never mind")
+    await ana.retract("t1", retracted.id)
+    await drain(helper)
+    recent = await ThreadTools(helper, thread_id="t1").dispatch("read_recent", {"limit": 10})
+    assert isinstance(recent, list)
+    headers = [json.loads(p.text) for p in recent if isinstance(p, Text) and p.text.startswith("{")]
+    assert [(h["kind"], h["author"]["id"]) for h in headers] == [
+        ("message", "ana"),
+        ("step", "helper"),
+    ]
+    assert recent[1:3] == [Text(text="Here is the right receipt."), image]
+    assert headers[1]["name"] == "Read" and headers[1]["input"] == {"path": "rules/refunds.md"}
+
+
+async def test_arguments_are_validated_and_the_thread_is_required(server: Server) -> None:
+    _, helper = await pair(server)
+    with pytest.raises(ConfigurationError, match="^tools: a thread_id is required$"):
+        ThreadTools(helper, thread_id="")
+    tools = ThreadTools(helper, thread_id="t1")
+    with pytest.raises(InputError, match="^tools: invalid arguments for read_recent"):
+        await tools.dispatch("read_recent", {"limit": 0})
+
+
+async def test_it_combines_like_any_tools(server: Server) -> None:
+    _, helper = await pair(server)
+
+    async def now(args: dict[str, object]) -> str:
+        return "2026-09-24T12:00:00Z"
+
+    combined = ThreadTools(helper, thread_id="t1").only("send", "read_recent") + Tools(
+        [Tool("now", "The current UTC time", body=now)]
+    )
+    assert combined.names == ["send", "read_recent", "now"]
