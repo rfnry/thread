@@ -8978,7 +8978,7 @@ Claude-Session: https://claude.ai/code/session_01GevsYJaAyM8ARLvEnXsoAB"
 Run, from `packages/python`: `uv run poe format && uv run poe check && uv run poe typecheck && uv run poe test`, then `RFNRY_TEST_POSTGRES_URL=postgresql://thread:thread@127.0.0.1:55436/thread uv run poe test:integration` (no skips), then `uv run poe test:e2e`.
 Run, from `packages/typescript`: `npm run check && npm run typecheck && npm test && npm run build`.
 Run: `git grep -nE 'anthropic|openai|google|gemini|claude' -- packages` — expected: nothing (vendor-neutral core; examples may name vendors).
-Run: `git grep -n '"""' -- packages/python/src` and `git grep -nE '^\s*#' -- packages/python/src` — expected: nothing (no docstrings, no comments).
+Run: `git grep -nE '^\s*#' -- packages/python/src` — expected: nothing (no comments); and, since `postgres.py`'s DDL strings are triple-quoted, check docstrings by AST: `uv run python -c "import ast, pathlib; print([f'{p}:{getattr(n, \"name\", \"module\")}' for p in pathlib.Path('src').rglob('*.py') for n in ast.walk(ast.parse(p.read_text())) if isinstance(n, (ast.Module, ast.ClassDef, ast.FunctionDef, ast.AsyncFunctionDef)) and ast.get_docstring(n) is not None])"` from `packages/python` — expected: `[]`.
 
 - [ ] **Step 2: Push**
 
