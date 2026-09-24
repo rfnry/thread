@@ -7,6 +7,7 @@ from typing import Any
 
 from pydantic import BaseModel, ConfigDict, ValidationError
 
+from rfnry_thread.client import Client
 from rfnry_thread.connection import Connection
 from rfnry_thread.errors import ConfigurationError, InputError, ThreadException
 from rfnry_thread.hub import Hub, Session
@@ -285,6 +286,15 @@ class Server:
             await verbs.signal(session, payload)
             return {}
         raise InputError(f"server: unknown method {method!r}")
+
+    async def connect(self, identity: Identity, scope: str) -> Client:
+        _identity(identity)
+        _scope(scope)
+
+        async def dial() -> Connection:
+            return self._attach(identity, scope)
+
+        return await Client._open(dial)
 
     async def start(self) -> None:
         if self._stop is not None:

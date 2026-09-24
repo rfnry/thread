@@ -4404,7 +4404,7 @@ This task builds the whole `Client` (verbs, `events()`, `Stream`, the outbox and
 
 ```python
 import asyncio
-from typing import TypeVar
+import contextlib
 
 import pytest
 
@@ -4433,10 +4433,8 @@ from rfnry_thread.server import Server
 
 from .factories import ANA, BRUNO, HELPER
 
-T = TypeVar("T")
 
-
-async def take(client: Client, kind: type[T], include_own: bool = False, timeout: float = 1.0) -> T:
+async def take[T](client: Client, kind: type[T], include_own: bool = False, timeout: float = 1.0) -> T:
     async def find() -> T:
         async for item in client.events(include_own=include_own):
             if isinstance(item, kind):
@@ -4453,10 +4451,8 @@ async def drain(client: Client, wait: float = 0.15, include_own: bool = True) ->
         async for item in client.events(include_own=include_own):
             items.append(item)
 
-    try:
+    with contextlib.suppress(TimeoutError):
         await asyncio.wait_for(collect(), wait)
-    except TimeoutError:
-        pass
     return items
 
 
@@ -4637,7 +4633,7 @@ import random
 import uuid
 from collections.abc import AsyncIterator, Awaitable, Callable
 from types import TracebackType
-from typing import Any, TypeVar
+from typing import Any
 
 from rfnry_thread.connection import Connection
 from rfnry_thread.errors import (
@@ -4692,8 +4688,6 @@ BACKOFF_CAP = 8.0
 RECONNECT = 0.5
 RECONNECT_CAP = 30.0
 
-E = TypeVar("E")
-
 
 def _wire(content: Content) -> list[dict[str, Any]]:
     return [part.model_dump(mode="json") for part in parts(content)]
@@ -4703,7 +4697,7 @@ def _who(identity: Identity | None) -> dict[str, Any] | None:
     return None if identity is None else identity.model_dump(mode="json")
 
 
-def _expect(event: Event, kind: type[E]) -> E:
+def _expect[E](event: Event, kind: type[E]) -> E:
     if not isinstance(event, kind):
         raise ThreadException(f"client: the server answered with a {event.kind}")
     return event
