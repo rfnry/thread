@@ -1,0 +1,34 @@
+import re
+from pathlib import Path
+
+import rfnry_thread
+
+from .test_public_api import CLIENT
+
+ROOT = Path(__file__).parents[4]
+DOCS = ROOT / "docs" / "thread.md"
+TYPESCRIPT = ROOT / "packages" / "typescript" / "src" / "index.ts"
+
+
+def test_every_public_name_is_documented() -> None:
+    text = DOCS.read_text(encoding="utf-8")
+    assert [
+        name for name in rfnry_thread.__all__ if f"`{name}`" not in text and f"{name}(" not in text
+    ] == []
+
+
+def test_every_client_verb_is_documented() -> None:
+    text = DOCS.read_text(encoding="utf-8")
+    assert [verb for verb in CLIENT if f".{verb}(" not in text and f"`{verb}`" not in text] == []
+
+
+def test_every_typescript_export_is_documented() -> None:
+    text = DOCS.read_text(encoding="utf-8")
+    exported = re.findall(r"export \{([^}]*)\} from", TYPESCRIPT.read_text(encoding="utf-8"))
+    names = {
+        name.strip().removeprefix("type ")
+        for group in exported
+        for name in group.split(",")
+        if name.strip()
+    }
+    assert sorted(name for name in names if name not in text) == []
