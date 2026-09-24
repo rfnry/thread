@@ -1,0 +1,14 @@
+{
+  "name": "signal",
+  "payload": {
+    "kind": "idle",
+    "sender": {
+      "id": "helper",
+      "metadata": {},
+      "name": "Helper",
+      "role": "assistant"
+    },
+    "thread_id": "t1"
+  },
+  "type": "push"
+}

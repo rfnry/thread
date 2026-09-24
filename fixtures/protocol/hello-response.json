@@ -1,0 +1,13 @@
+{
+  "id": "hello",
+  "payload": {
+    "identity": {
+      "id": "ana",
+      "metadata": {},
+      "name": "Ana",
+      "role": "user"
+    },
+    "scope": "acme"
+  },
+  "type": "response"
+}

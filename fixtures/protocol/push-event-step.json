@@ -1,0 +1,37 @@
+{
+  "name": "event",
+  "payload": {
+    "author": {
+      "id": "helper",
+      "metadata": {},
+      "name": "Helper",
+      "role": "assistant"
+    },
+    "client_id": "c2",
+    "created_at": "2026-01-01T12:00:00Z",
+    "duration_ms": 12,
+    "id": "e2",
+    "in_reply_to": "e1",
+    "input": {
+      "path": "rules/refunds.md"
+    },
+    "is_error": false,
+    "kind": "step",
+    "name": "Read",
+    "output": [
+      {
+        "text": "A double charge is refunded in full.",
+        "type": "text"
+      }
+    ],
+    "seq": 2,
+    "thread_id": "t1",
+    "triggered_by": {
+      "id": "ana",
+      "metadata": {},
+      "name": "Ana",
+      "role": "user"
+    }
+  },
+  "type": "push"
+}

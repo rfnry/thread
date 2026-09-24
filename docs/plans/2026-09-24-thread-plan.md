@@ -1036,6 +1036,7 @@ from rfnry_thread.errors import ForbiddenError, InputError
 from rfnry_thread.protocol import (
     METHODS,
     ErrorFrame,
+    Frame,
     Hello,
     Notify,
     Push,
@@ -1047,8 +1048,9 @@ from rfnry_thread.protocol import (
 
 
 def test_frames_round_trip_by_type() -> None:
-    for frame in [Hello(protocol=1), Request(id="1", method="thread.get", payload={"thread_id": "t"}),
-                  Notify(method="signal.send", payload={}), Push(name="event", payload={"kind": "message"})]:
+    frames: list[Frame] = [Hello(protocol=1), Request(id="1", method="thread.get", payload={"thread_id": "t"}),
+                           Notify(method="signal.send", payload={}), Push(name="event", payload={"kind": "message"})]
+    for frame in frames:
         assert decode(encode(frame)) == frame
 
 
@@ -1078,6 +1080,7 @@ def test_the_methods_are_the_designed_fourteen() -> None:
 import json
 import os
 from pathlib import Path
+from typing import Any
 
 import pytest
 
@@ -1087,6 +1090,7 @@ from rfnry_thread.models import (
     Cancel,
     Custom,
     Edit,
+    Event,
     Idle,
     Image,
     Invited,
@@ -1098,6 +1102,7 @@ from rfnry_thread.models import (
     Present,
     Read,
     Retract,
+    Signal,
     Step,
     StreamDelta,
     StreamEnd,
@@ -1117,8 +1122,8 @@ FIXTURES = Path(__file__).parents[4] / "fixtures" / "protocol"
 
 def golden() -> dict[str, Frame]:
     thread = Thread(id="t1", scope="acme", metadata={"topic": "billing"}, created_at=AT)
-    base = {"thread_id": "t1", "created_at": AT}
-    events = [
+    base: dict[str, Any] = {"thread_id": "t1", "created_at": AT}
+    events: list[Event] = [
         Message(id="e1", seq=1, author=ANA, client_id="c1", content=[Text(text="hello"), Image(media_type="image/png", data=b"\x89PNG")], **base),
         Step(id="e2", seq=2, author=HELPER, client_id="c2", name="Read", input={"path": "rules/refunds.md"},
              output=[Text(text="A double charge is refunded in full.")], duration_ms=12, in_reply_to="e1", triggered_by=ANA, **base),
@@ -1130,7 +1135,7 @@ def golden() -> dict[str, Frame]:
         ThreadUpdated(id="e8", seq=8, author=ANA, client_id="c8", metadata={"topic": "refunds"}, **base),
         Custom(id="e9", seq=9, author=ANA, client_id="c9", name="rating", payload={"stars": 5}, **base),
     ]
-    signals = [
+    signals: list[Signal] = [
         Working(thread_id="t1", sender=HELPER, label="Reading rules/refunds.md"),
         Idle(thread_id="t1", sender=HELPER),
         StreamStart(thread_id="t1", sender=HELPER, stream_id="s1", in_reply_to="e1"),

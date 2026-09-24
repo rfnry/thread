@@ -1,0 +1,17 @@
+{
+  "name": "signal",
+  "payload": {
+    "index": 0,
+    "kind": "stream.delta",
+    "sender": {
+      "id": "helper",
+      "metadata": {},
+      "name": "Helper",
+      "role": "assistant"
+    },
+    "stream_id": "s1",
+    "text": "Refunded ",
+    "thread_id": "t1"
+  },
+  "type": "push"
+}

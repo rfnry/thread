@@ -1,0 +1,32 @@
+{
+  "name": "event",
+  "payload": {
+    "author": {
+      "id": "ana",
+      "metadata": {},
+      "name": "Ana",
+      "role": "user"
+    },
+    "client_id": "c1",
+    "content": [
+      {
+        "text": "hello",
+        "type": "text"
+      },
+      {
+        "data": "iVBORw==",
+        "media_type": "image/png",
+        "type": "image",
+        "url": null
+      }
+    ],
+    "created_at": "2026-01-01T12:00:00Z",
+    "id": "e1",
+    "in_reply_to": null,
+    "kind": "message",
+    "seq": 1,
+    "thread_id": "t1",
+    "triggered_by": null
+  },
+  "type": "push"
+}

@@ -1,0 +1,11 @@
+{
+  "method": "signal.send",
+  "payload": {
+    "index": 1,
+    "kind": "stream.delta",
+    "stream_id": "s1",
+    "text": "in full.",
+    "thread_id": "t1"
+  },
+  "type": "notify"
+}

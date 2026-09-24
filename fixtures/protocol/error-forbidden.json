@@ -1,0 +1,8 @@
+{
+  "error": {
+    "code": "forbidden",
+    "message": "server: 'bruno' is not a member of thread 't1'"
+  },
+  "id": "3",
+  "type": "error"
+}

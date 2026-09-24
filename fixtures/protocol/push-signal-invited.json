@@ -1,0 +1,22 @@
+{
+  "name": "signal",
+  "payload": {
+    "kind": "invited",
+    "sender": {
+      "id": "ana",
+      "metadata": {},
+      "name": "Ana",
+      "role": "user"
+    },
+    "thread": {
+      "created_at": "2026-01-01T12:00:00Z",
+      "id": "t1",
+      "metadata": {
+        "topic": "billing"
+      },
+      "scope": "acme"
+    },
+    "thread_id": "t1"
+  },
+  "type": "push"
+}

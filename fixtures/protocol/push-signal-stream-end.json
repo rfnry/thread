@@ -1,0 +1,15 @@
+{
+  "name": "signal",
+  "payload": {
+    "kind": "stream.end",
+    "sender": {
+      "id": "helper",
+      "metadata": {},
+      "name": "Helper",
+      "role": "assistant"
+    },
+    "stream_id": "s1",
+    "thread_id": "t1"
+  },
+  "type": "push"
+}

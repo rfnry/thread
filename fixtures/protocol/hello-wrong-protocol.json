@@ -1,0 +1,8 @@
+{
+  "error": {
+    "code": "input",
+    "message": "server: the first frame must be a hello for protocol 1"
+  },
+  "id": "hello",
+  "type": "error"
+}

@@ -1,0 +1,23 @@
+{
+  "name": "event",
+  "payload": {
+    "author": {
+      "id": "ana",
+      "metadata": {},
+      "name": "Ana",
+      "role": "user"
+    },
+    "client_id": "c8",
+    "created_at": "2026-01-01T12:00:00Z",
+    "id": "e8",
+    "in_reply_to": null,
+    "kind": "thread_updated",
+    "metadata": {
+      "topic": "refunds"
+    },
+    "seq": 8,
+    "thread_id": "t1",
+    "triggered_by": null
+  },
+  "type": "push"
+}

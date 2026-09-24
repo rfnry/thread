@@ -1,0 +1,15 @@
+{
+  "name": "signal",
+  "payload": {
+    "kind": "working",
+    "label": "Reading rules/refunds.md",
+    "sender": {
+      "id": "helper",
+      "metadata": {},
+      "name": "Helper",
+      "role": "assistant"
+    },
+    "thread_id": "t1"
+  },
+  "type": "push"
+}

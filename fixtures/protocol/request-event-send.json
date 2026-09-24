@@ -1,0 +1,23 @@
+{
+  "id": "2",
+  "method": "event.send",
+  "payload": {
+    "client_id": "c1",
+    "content": [
+      {
+        "text": "hello",
+        "type": "text"
+      }
+    ],
+    "in_reply_to": null,
+    "kind": "message",
+    "thread_id": "t1",
+    "triggered_by": {
+      "id": "helper",
+      "metadata": {},
+      "name": "Helper",
+      "role": "assistant"
+    }
+  },
+  "type": "request"
+}

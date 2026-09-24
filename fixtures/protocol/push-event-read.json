@@ -1,0 +1,21 @@
+{
+  "name": "event",
+  "payload": {
+    "author": {
+      "id": "helper",
+      "metadata": {},
+      "name": "Helper",
+      "role": "assistant"
+    },
+    "client_id": "c5",
+    "created_at": "2026-01-01T12:00:00Z",
+    "id": "e5",
+    "in_reply_to": null,
+    "kind": "read",
+    "seq": 5,
+    "thread_id": "t1",
+    "triggered_by": null,
+    "up_to_seq": 4
+  },
+  "type": "push"
+}

@@ -1,0 +1,14 @@
+{
+  "name": "signal",
+  "payload": {
+    "kind": "left",
+    "sender": {
+      "id": "ana",
+      "metadata": {},
+      "name": "Ana",
+      "role": "user"
+    },
+    "thread_id": "t1"
+  },
+  "type": "push"
+}

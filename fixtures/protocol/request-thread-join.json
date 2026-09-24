@@ -1,0 +1,9 @@
+{
+  "id": "1",
+  "method": "thread.join",
+  "payload": {
+    "since": 0,
+    "thread_id": "t1"
+  },
+  "type": "request"
+}

@@ -1,0 +1,24 @@
+{
+  "name": "event",
+  "payload": {
+    "author": {
+      "id": "ana",
+      "metadata": {},
+      "name": "Ana",
+      "role": "user"
+    },
+    "client_id": "c9",
+    "created_at": "2026-01-01T12:00:00Z",
+    "id": "e9",
+    "in_reply_to": null,
+    "kind": "custom",
+    "name": "rating",
+    "payload": {
+      "stars": 5
+    },
+    "seq": 9,
+    "thread_id": "t1",
+    "triggered_by": null
+  },
+  "type": "push"
+}
