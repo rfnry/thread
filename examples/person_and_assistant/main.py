@@ -1,7 +1,6 @@
 import asyncio
 
 from rfnry_engine import Engine, TextDelta
-from rfnry_engine import Message as Turn
 from rfnry_thread import (
     Client,
     Identity,
@@ -55,10 +54,7 @@ async def assistant(server, engine):
             if isinstance(e, Message)
         ]
         history = [
-            Turn(
-                role="user" if e.author.role == "user" else "assistant",
-                content=[part.model_dump() for part in e.content],
-            )
+            {"role": "user" if e.author.role == "user" else "assistant", "content": e.content}
             for e in earlier
         ]
         async with me.stream(item.thread_id, in_reply_to=item.id) as reply:
