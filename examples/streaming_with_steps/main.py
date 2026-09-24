@@ -17,9 +17,9 @@ from rfnry_thread import (
 
 async def main() -> None:
     server = Server(InMemoryStorage())
-    ana = await server.connect(Identity(role="user", id="ana", name="Ana"), scope="demo")
+    ana = await server.connect(identity=Identity(role="user", id="ana", name="Ana"), scope="demo")
     helper = await server.connect(
-        Identity(role="assistant", id="helper", name="Helper"), scope="demo"
+        identity=Identity(role="assistant", id="helper", name="Helper"), scope="demo"
     )
     thread = await ana.create_thread(thread_id="refund")
     await ana.add_member(thread.id, helper.identity)

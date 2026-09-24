@@ -18,9 +18,9 @@ def output(result):
 async def main() -> None:
     server = Server(InMemoryStorage())
     engine = Engine("agents", generation=AnthropicProvider())
-    ana = await server.connect(Identity(role="user", id="ana", name="Ana"), scope="demo")
+    ana = await server.connect(identity=Identity(role="user", id="ana", name="Ana"), scope="demo")
     helper = await server.connect(
-        Identity(role="assistant", id="support", name="Support"), scope="demo"
+        identity=Identity(role="assistant", id="support", name="Support"), scope="demo"
     )
     thread = await ana.create_thread(thread_id="invoice")
     await ana.add_member(thread.id, helper.identity)

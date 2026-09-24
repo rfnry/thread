@@ -48,6 +48,12 @@ Identity(role="user", id="ana", name="Ana")
 Identity(role="assistant", id="helper", name="Helper", metadata={"agent": "support"})
 ```
 
+Every verb that takes an identity — `serve`, `server.connect`, `add_member`, `remove_member`,
+`triggered_by`, `cancel(to=)`, `ThreadTools(triggered_by=)` — reads it by its fields: any object
+with `role`, `id`, `name` and `metadata` will do, such as rfnry-senses' `Identity`, which has the
+same source. The values are validated as strictly as an `Identity`'s; one that does not fit is an
+`InputError`.
+
 **Parts** are the content of a message — the family's one vocabulary, shared byte for byte with
 rfnry-engine and rfnry-memory, so a message's parts reach a model without translation:
 
@@ -107,8 +113,8 @@ A **signal** is ephemeral. Every signal carries `thread_id` and `sender`, stampe
 ```python
 server = Server(InMemoryStorage())
 
-ana = await server.connect(Identity(role="user", id="ana", name="Ana"), scope="acme")
-helper = await server.connect(Identity(role="assistant", id="helper", name="Helper"), scope="acme")
+ana = await server.connect(identity=Identity(role="user", id="ana", name="Ana"), scope="acme")
+helper = await server.connect(identity=Identity(role="assistant", id="helper", name="Helper"), scope="acme")
 
 thread = await ana.create_thread(thread_id="support-ana")
 await ana.add_member(thread.id, helper.identity)
@@ -133,7 +139,7 @@ the server with who it is and in which scope. The library never sees how credent
 
 ### Serving and connecting
 
-`server.serve(connection, identity, scope)` runs one WebSocket until it closes. You authenticate
+`server.serve(connection, *, identity, scope)` runs one WebSocket until it closes. You authenticate
 the upgrade with your own framework, accept it, and say who is on the other end. A connection is
 anything with `receive_text()`, `send_text(text)` and `close(code, reason)`, which is what Starlette
 and FastAPI hand you:
@@ -149,13 +155,14 @@ async def thread_socket(websocket: WebSocket, user: User = Depends(current_user)
 ```
 
 Any other framework adapts in the same few lines. Refusing a connection is refusing the upgrade,
-before `serve`. Everything the socket says afterwards is authored as that identity, in that scope.
+before `serve`. `identity` and `scope` are keyword-only, on `serve` and `server.connect`
+alike. Everything the socket says afterwards is authored as that identity, in that scope.
 
 There are two ways to get a client, and they are the same class:
 
 ```python
 remote = await Client.connect("wss://app.example.com/thread", headers={"Authorization": f"Bearer {token}"})
-local = await server.connect(Identity(role="assistant", id="helper"), scope="acme")
+local = await server.connect(identity=Identity(role="assistant", id="helper"), scope="acme")
 ```
 
 `Client.connect` speaks the protocol over a WebSocket; `headers` go with the upgrade, whatever your
@@ -297,7 +304,7 @@ An assistant that speaks first creates the thread and adds the person; the perso
 receive `Invited`:
 
 ```python
-reminders = await server.connect(Identity(role="assistant", id="reminders"), scope="acme")
+reminders = await server.connect(identity=Identity(role="assistant", id="reminders"), scope="acme")
 renewal = await reminders.create_thread(thread_id="renewal-ana-2026-10")
 await reminders.add_member(renewal.id, Identity(role="user", id="ana"))
 await reminders.send(renewal.id, "Your plan renews Friday. Switch to yearly and save 15%?")
@@ -513,7 +520,7 @@ everything above.
 by a non-member, an `authorize` that says no, an edit or retraction of someone else's event, a
 signal from a connection that has not joined the thread, and on a client, an upgrade refused with
 HTTP 401 or 403 or a `headers` or `protocols` function that raised. `InputError` for a request the
-library refuses: an empty scope or id, a media part with both or neither of `data` and `url`, inline
+library refuses: an empty scope or id, an identity whose fields do not fit, a media part with both or neither of `data` and `url`, inline
 media over the cap, a custom payload over 64 KiB, an edit of anything but a message, an unknown
 event or signal kind, a malformed frame. `ConfigurationError` for a server that cannot work: a limit
 that is not positive, a `system` identity given to `serve` or `server.connect`. `StorageError` for

@@ -34,7 +34,9 @@ def upgrade(connection, request):
 
 
 async def echo(server):
-    me = await server.connect(Identity(role="assistant", id="echo", name="Echo"), scope="demo")
+    me = await server.connect(
+        identity=Identity(role="assistant", id="echo", name="Echo"), scope="demo"
+    )
     async for item in me.events():
         if isinstance(item, Invited):
             await me.join(item.thread_id)

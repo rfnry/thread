@@ -41,7 +41,7 @@ def upgrade(connection, request):
 
 async def assistant(server, engine):
     me = await server.connect(
-        Identity(role="assistant", id="assistant", name="Assistant"), scope="demo"
+        identity=Identity(role="assistant", id="assistant", name="Assistant"), scope="demo"
     )
     async for item in me.events():
         if isinstance(item, Invited):

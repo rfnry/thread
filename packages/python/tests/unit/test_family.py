@@ -25,7 +25,7 @@ BLOCKS = {
         "rfnry_thread/models.py",
         "rfnry_senses/models.py",
         "class Identity(BaseModel):",
-        "    metadata: dict[str, Any] = {}\n",
+        'raise InputError(f"models: not an identity: {exc.errors(include_url=False)}") from exc\n',
     ),
 }
 

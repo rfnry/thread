@@ -2,13 +2,14 @@ from __future__ import annotations
 
 import base64
 from datetime import datetime
-from typing import Annotated, Any, Literal, Self
+from typing import Annotated, Any, Literal, Protocol, Self
 
 from pydantic import (
     BaseModel,
     ConfigDict,
     Field,
     TypeAdapter,
+    ValidationError,
     field_serializer,
     model_validator,
 )
@@ -62,6 +63,24 @@ class Identity(BaseModel):
     id: str
     name: str | None = None
     metadata: dict[str, Any] = {}
+
+
+class IdentityLike(Protocol):
+    @property
+    def role(self) -> Literal["user", "assistant", "system"]: ...
+    @property
+    def id(self) -> str: ...
+    @property
+    def name(self) -> str | None: ...
+    @property
+    def metadata(self) -> dict[str, Any]: ...
+
+
+def as_identity(value: IdentityLike) -> Identity:
+    try:
+        return Identity.model_validate(value, from_attributes=True)
+    except ValidationError as exc:
+        raise InputError(f"models: not an identity: {exc.errors(include_url=False)}") from exc
 
 
 SYSTEM = Identity(role="system", id="system", name="system")

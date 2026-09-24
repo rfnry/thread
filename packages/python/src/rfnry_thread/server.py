@@ -11,7 +11,7 @@ from rfnry_thread.client import Client
 from rfnry_thread.connection import Connection
 from rfnry_thread.errors import ConfigurationError, InputError, ThreadException
 from rfnry_thread.hub import Hub, Session
-from rfnry_thread.models import SYSTEM, Identity, Member, Thread
+from rfnry_thread.models import SYSTEM, Identity, IdentityLike, Member, Thread, as_identity
 from rfnry_thread.outbound import Outbound
 from rfnry_thread.pipe import End, pipe
 from rfnry_thread.protocol import (
@@ -95,7 +95,8 @@ def _scope(scope: str) -> str:
     return scope
 
 
-def _identity(identity: Identity) -> Identity:
+def _identity(value: IdentityLike) -> Identity:
+    identity = as_identity(value)
     if identity.role == "system":
         raise ConfigurationError(
             "server: 'system' is the library's role; connect as a user or an assistant"
@@ -134,8 +135,8 @@ class Server:
         self._stop: Stop | None = None
         self._refresher: asyncio.Task[None] | None = None
 
-    async def serve(self, connection: Connection, identity: Identity, scope: str) -> None:
-        _identity(identity)
+    async def serve(self, connection: Connection, *, identity: IdentityLike, scope: str) -> None:
+        who = _identity(identity)
         _scope(scope)
         try:
             text = await connection.receive_text()
@@ -148,13 +149,13 @@ class Server:
         except InputError as error:
             await _refuse(connection, error)
             return
-        await self._run(connection, identity, scope)
+        await self._run(connection, who, scope)
 
-    def _attach(self, identity: Identity, scope: str) -> End:
-        _identity(identity)
+    def _attach(self, identity: IdentityLike, scope: str) -> End:
+        who = _identity(identity)
         _scope(scope)
         ours, theirs = pipe()
-        task = asyncio.get_running_loop().create_task(self.serve(theirs, identity, scope))
+        task = asyncio.get_running_loop().create_task(self.serve(theirs, identity=who, scope=scope))
         self._tasks.add(task)
         task.add_done_callback(self._tasks.discard)
         return ours
@@ -287,12 +288,12 @@ class Server:
             return {}
         raise InputError(f"server: unknown method {method!r}")
 
-    async def connect(self, identity: Identity, scope: str) -> Client:
-        _identity(identity)
+    async def connect(self, *, identity: IdentityLike, scope: str) -> Client:
+        who = _identity(identity)
         _scope(scope)
 
         async def dial() -> Connection:
-            return self._attach(identity, scope)
+            return self._attach(who, scope)
 
         return await Client._open(dial)
 
@@ -326,8 +327,8 @@ class Server:
     ) -> Thread:
         return await self._verbs.create_thread(SYSTEM, _scope(scope), thread_id, metadata or {})
 
-    async def add_member(self, scope: str, thread_id: str, identity: Identity) -> Member:
-        return await self._verbs.add_member(SYSTEM, _scope(scope), thread_id, identity)
+    async def add_member(self, scope: str, thread_id: str, identity: IdentityLike) -> Member:
+        return await self._verbs.add_member(SYSTEM, _scope(scope), thread_id, as_identity(identity))
 
     async def delete_thread(self, scope: str, thread_id: str) -> None:
         await self._verbs.delete_thread(SYSTEM, _scope(scope), thread_id)

@@ -7,7 +7,7 @@ from rfnry_thread.models import Image, Message, Text, Working
 from rfnry_thread.server import Server
 from rfnry_thread.tools import ThreadTools, Tool, Tools
 
-from .factories import ANA
+from .factories import ANA, lookalike
 from .test_client import drain, pair, take
 
 
@@ -68,3 +68,10 @@ async def test_it_combines_like_any_tools(server: Server) -> None:
         [Tool("now", "The current UTC time", body=now)]
     )
     assert combined.names == ["send", "read_recent", "now"]
+
+
+async def test_triggered_by_is_read_by_its_fields(server: Server) -> None:
+    ana, helper = await pair(server)
+    tools = ThreadTools(helper, thread_id="t1", triggered_by=lookalike(ANA))
+    await tools.dispatch("send", {"text": "On it."})
+    assert (await take(ana, Message)).triggered_by == ANA

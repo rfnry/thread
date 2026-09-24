@@ -9,7 +9,9 @@ TURNS = 3
 
 
 async def speaker(server, engine, name, opens):
-    me = await server.connect(Identity(role="assistant", id=name, name=name.title()), scope="demo")
+    me = await server.connect(
+        identity=Identity(role="assistant", id=name, name=name.title()), scope="demo"
+    )
     spoken = 0
     if opens:
         thread = await me.create_thread(thread_id="debate")

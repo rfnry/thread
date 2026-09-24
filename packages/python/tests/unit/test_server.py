@@ -10,7 +10,7 @@ from rfnry_thread.pipe import pipe
 from rfnry_thread.protocol import Hello, encode
 from rfnry_thread.server import Server
 
-from .factories import ANA
+from .factories import ANA, lookalike
 from .peer import Peer
 
 
@@ -95,3 +95,13 @@ async def test_an_unknown_method_is_an_input_error(server: Server) -> None:
     peer = await Peer.open(server, ANA)
     with pytest.raises(InputError, match="^server: unknown method 'thread.shout'$"):
         await peer.call("thread.shout")
+
+
+async def test_serve_reads_the_identity_by_its_fields(server: Server) -> None:
+    ours, theirs = pipe()
+    task = asyncio.create_task(server.serve(theirs, identity=lookalike(ANA), scope="acme"))
+    await ours.send_text(encode(Hello(protocol=1)))
+    reply = json.loads(await asyncio.wait_for(ours.receive_text(), 1.0))
+    assert reply["payload"]["identity"] == ANA.model_dump(mode="json")
+    await ours.close()
+    await asyncio.wait_for(task, 1.0)

@@ -119,7 +119,7 @@ async def until_joined(client: Client, timeout: float = 3.0) -> list[Item]:
 
 async def room(live: Live) -> tuple[Client, Client]:
     ana = await Client.connect(live.url, headers=ANA_HEADERS)
-    bruno = await live.server.connect(BRUNO, scope="acme")
+    bruno = await live.server.connect(identity=BRUNO, scope="acme")
     await ana.create_thread(thread_id="t1")
     await ana.add_member("t1", BRUNO)
     await ana.join("t1")
@@ -158,7 +158,7 @@ async def test_a_dropped_socket_resumes_every_joined_thread_in_order_once(live: 
         return ANA_HEADERS
 
     ana = await Client.connect(live.url, headers=headers)
-    bruno = await live.server.connect(BRUNO, scope="acme")
+    bruno = await live.server.connect(identity=BRUNO, scope="acme")
     await ana.create_thread(thread_id="t1")
     await ana.add_member("t1", BRUNO)
     await ana.join("t1")

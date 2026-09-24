@@ -48,7 +48,7 @@ class Socket:
 
 async def assistant(server: Server, open_sockets: list[Socket]) -> None:
     me = await server.connect(
-        Identity(role="assistant", id="bot-helper", name="Helper"), scope="acme"
+        identity=Identity(role="assistant", id="bot-helper", name="Helper"), scope="acme"
     )
     async for item in me.events():
         if isinstance(item, Invited):

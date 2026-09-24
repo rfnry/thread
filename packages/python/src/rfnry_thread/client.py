@@ -26,6 +26,7 @@ from rfnry_thread.models import (
     Edit,
     Event,
     Identity,
+    IdentityLike,
     Joined,
     Member,
     MemberRemoved,
@@ -37,6 +38,7 @@ from rfnry_thread.models import (
     Step,
     Thread,
     ThreadDeleted,
+    as_identity,
     parts,
 )
 from rfnry_thread.protocol import (
@@ -69,8 +71,8 @@ def _wire(content: Content) -> list[dict[str, Any]]:
     return [part.model_dump(mode="json") for part in parts(content)]
 
 
-def _who(identity: Identity | None) -> dict[str, Any] | None:
-    return None if identity is None else identity.model_dump(mode="json")
+def _who(identity: IdentityLike | None) -> dict[str, Any] | None:
+    return None if identity is None else as_identity(identity).model_dump(mode="json")
 
 
 def _expect[E](event: Event, kind: type[E]) -> E:
@@ -378,7 +380,7 @@ class Client:
         thread_id: str,
         content: Content,
         in_reply_to: str | None,
-        triggered_by: Identity | None,
+        triggered_by: IdentityLike | None,
         client_id: str | None = None,
     ) -> Message:
         event = await self._send(
@@ -453,14 +455,16 @@ class Client:
         reply = await self._request("thread.present", {"thread_id": thread_id})
         return [Identity.model_validate(i) for i in reply["identities"]]
 
-    async def add_member(self, thread_id: str, identity: Identity) -> Member:
+    async def add_member(self, thread_id: str, identity: IdentityLike) -> Member:
         reply = await self._request(
             "member.add", {"thread_id": thread_id, "identity": _who(identity)}
         )
         return Member.model_validate(reply["member"])
 
-    async def remove_member(self, thread_id: str, identity: Identity) -> None:
-        await self._request("member.remove", {"thread_id": thread_id, "identity_id": identity.id})
+    async def remove_member(self, thread_id: str, identity: IdentityLike) -> None:
+        await self._request(
+            "member.remove", {"thread_id": thread_id, "identity_id": as_identity(identity).id}
+        )
 
     async def list_members(self, thread_id: str) -> list[Member]:
         reply = await self._request("member.list", {"thread_id": thread_id})
@@ -471,15 +475,23 @@ class Client:
         thread_id: str,
         content: Content,
         in_reply_to: str | None = None,
-        triggered_by: Identity | None = None,
+        triggered_by: IdentityLike | None = None,
         client_id: str | None = None,
     ) -> Message:
         return await self._message(thread_id, content, in_reply_to, triggered_by, client_id)
 
     def stream(
-        self, thread_id: str, in_reply_to: str | None = None, triggered_by: Identity | None = None
+        self,
+        thread_id: str,
+        in_reply_to: str | None = None,
+        triggered_by: IdentityLike | None = None,
     ) -> Stream:
-        return Stream(self, thread_id, in_reply_to, triggered_by)
+        return Stream(
+            self,
+            thread_id,
+            in_reply_to,
+            None if triggered_by is None else as_identity(triggered_by),
+        )
 
     async def step(
         self,
@@ -490,7 +502,7 @@ class Client:
         is_error: bool = False,
         duration_ms: int | None = None,
         in_reply_to: str | None = None,
-        triggered_by: Identity | None = None,
+        triggered_by: IdentityLike | None = None,
         client_id: str | None = None,
     ) -> Step:
         event = await self._send(
@@ -541,7 +553,7 @@ class Client:
     async def idle(self, thread_id: str) -> None:
         await self._request("signal.send", {"thread_id": thread_id, "kind": "idle"})
 
-    async def cancel(self, thread_id: str, to: Identity) -> None:
+    async def cancel(self, thread_id: str, to: IdentityLike) -> None:
         await self._request(
             "signal.send", {"thread_id": thread_id, "kind": "cancel", "to": _who(to)}
         )

@@ -9,7 +9,7 @@ from typing import TYPE_CHECKING, Any, Protocol, runtime_checkable
 from pydantic import BaseModel, Field, ValidationError
 
 from rfnry_thread.errors import ConfigurationError, InputError
-from rfnry_thread.models import Identity, Message, Part, Step, Text
+from rfnry_thread.models import IdentityLike, Message, Part, Step, Text, as_identity
 from rfnry_thread.resolve import resolve
 
 if TYPE_CHECKING:
@@ -134,15 +134,16 @@ class ThreadTools(Tools):
         client: Client,
         *,
         thread_id: str,
-        triggered_by: Identity | None = None,
+        triggered_by: IdentityLike | None = None,
         in_reply_to: str | None = None,
     ) -> None:
         if not thread_id:
             raise ConfigurationError("tools: a thread_id is required")
+        cause = None if triggered_by is None else as_identity(triggered_by)
 
         async def send(args: dict[str, Any]) -> Result:
             event = await client.send(
-                thread_id, args["text"], in_reply_to=in_reply_to, triggered_by=triggered_by
+                thread_id, args["text"], in_reply_to=in_reply_to, triggered_by=cause
             )
             return {"id": event.id, "seq": event.seq}
 

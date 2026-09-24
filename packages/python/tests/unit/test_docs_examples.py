@@ -35,9 +35,9 @@ async def now(args: dict[str, Any]) -> str:
 
 async def context() -> dict[str, Any]:
     server = Server(InMemoryStorage())
-    ana = await server.connect(Identity(role="user", id="ana", name="Ana"), scope="acme")
+    ana = await server.connect(identity=Identity(role="user", id="ana", name="Ana"), scope="acme")
     helper = await server.connect(
-        Identity(role="assistant", id="helper", name="Helper"), scope="acme"
+        identity=Identity(role="assistant", id="helper", name="Helper"), scope="acme"
     )
     thread = await ana.create_thread(thread_id="support-ana")
     await ana.add_member(thread.id, helper.identity)

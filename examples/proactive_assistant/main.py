@@ -39,7 +39,7 @@ async def main() -> None:
             "ws://127.0.0.1:8765", headers={"Authorization": "Bearer ana-token"}
         )
         reminders = await server.connect(
-            Identity(role="assistant", id="reminders", name="Reminders"), scope="demo"
+            identity=Identity(role="assistant", id="reminders", name="Reminders"), scope="demo"
         )
 
         renewal = await reminders.create_thread(thread_id="renewal-ana-2026-10")
