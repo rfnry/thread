@@ -215,6 +215,17 @@ Only an event's author edits or retracts it; only messages are edited. `in_reply
 event to the one it answers and `triggered_by=` names who caused it — a scheduled assistant can say
 which person set it up, or leave it out.
 
+`client_id=` on `send`, `step`, `edit`, `retract` and `custom` (`clientId` in TypeScript) is the
+write's idempotency key, generated when you leave it out; name it yourself and the same write sent
+twice — a scheduled job that runs again, a retry after a crash — is stored once, and the second call
+returns the event stored the first time:
+
+```python
+reminder = await helper.send(thread.id, "Your plan renews Friday.", client_id="renewal-ana-2026-10")
+again = await helper.send(thread.id, "Your plan renews Friday.", client_id="renewal-ana-2026-10")
+assert again.id == reminder.id
+```
+
 Everything that arrives — events and signals of the threads you joined, and invitations — comes
 from one stream:
 
@@ -330,9 +341,11 @@ An event is stored and announced in one transaction; every replica with a connec
 thread reads it by `seq`. Signals are delivered on the sender's replica and mirrored to the others.
 Each replica keeps who is present, working and streaming, and repeats its own every ten seconds; a
 replica that stops repeating — it crashed — is forgotten within thirty. A missed announcement costs
-latency, never an event: resume reads from storage. `start()` holds one connection from the pool
-for `LISTEN`; `stop()` gives it back. Servers sharing one `InMemoryStorage` in one process link the
-same way, which is how the tests run two replicas without a database.
+latency, never an event: resume reads from storage. A replica whose `LISTEN` connection drops takes
+another with jittered backoff, listens again and repeats its own state at once, so the others
+rebuild it. `start()` holds one connection from the pool for `LISTEN`; `stop()` gives it back.
+Servers sharing one `InMemoryStorage` in one process link the same way, which is how the tests run
+two replicas without a database.
 
 ### Permissions
 
@@ -362,6 +375,13 @@ await server.create_thread("acme", thread_id="onboarding-bruno", metadata={"owne
 await server.add_member("acme", "onboarding-bruno", Identity(role="user", id="bruno"))
 await server.delete_thread("acme", "onboarding-bruno")
 ```
+
+`authenticate` sees the `hello` frame and nothing else — no cookies, no headers. Browsers attach
+cookies to a WebSocket upgrade from any site, and WebSockets have no CORS, so a socket that trusted
+the session cookie would let any page the person visits speak as them (cross-site WebSocket
+hijacking). A token in `hello` is sent by your page's own script, which another site cannot read. An
+app with cookie sessions mints a short-lived token from its own endpoint, which `SameSite` protects,
+and sends it in `hello`; as an async function, `hello` fetches a fresh one on every reconnect.
 
 ### The TypeScript client
 

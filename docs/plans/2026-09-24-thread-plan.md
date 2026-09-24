@@ -8,14 +8,14 @@
 
 **Tech Stack:** Python 3.12, pydantic 2, websockets (client transport), asyncpg (optional, `[postgres]`), pytest + pytest-asyncio, ruff, mypy strict, uv, hatchling, poethepoet. TypeScript 6 strict, `tsc` build (ESM only), vitest, Biome; Node ≥ 22 (global `WebSocket`).
 
-**Spec:** `docs/plans/2026-09-24-thread-design.md` (read §16, the revisions made while writing the docs) and the contract `docs/thread.md`. Where they differ, `docs/thread.md` wins; tell the human.
+**Spec:** `docs/plans/2026-09-24-thread-design.md` (read §16, the revisions made while writing the docs, and §17, the owner's answers: hello-only auth, the test database, re-LISTEN, caller-supplied `client_id`) and the contract `docs/thread.md`. Where they differ, `docs/thread.md` wins; tell the human.
 
 ## Global Constraints
 
 - Layout: `packages/python` (package `rfnry-thread`, import `rfnry_thread`) and `packages/typescript` (`@rfnry/thread`); shared golden fixtures in `fixtures/protocol/` at the repository root; examples in `examples/<name>/`.
 - Python: `requires-python = ">=3.12"`; dependencies exactly `pydantic>=2.13.4`, `websockets>=15.0`; extra `postgres = ["asyncpg>=0.31.0,<1.0"]`. The library imports no web framework, no model SDK, and never imports asyncpg (the pool is passed in).
 - ruff line-length 100, rules `E F I W B UP SIM`, `ignore = ["E501"]`; mypy `strict = true`; pytest `asyncio_mode = "auto"`, markers `postgres` and `live`, `addopts = "-m 'not postgres and not live'"`.
-- Gate for every Python commit, from `packages/python`: `uv run poe format && uv run poe check && uv run poe typecheck && uv run poe test`. Postgres tier: `RFNRY_TEST_POSTGRES_URL=postgresql://… uv run poe test:integration`, no skips before the Postgres task is committed.
+- Gate for every Python commit, from `packages/python`: `uv run poe format && uv run poe check && uv run poe typecheck && uv run poe test`. Postgres tier: `RFNRY_TEST_POSTGRES_URL=postgresql://thread:thread@127.0.0.1:55436/thread uv run poe test:integration`, no skips before the Postgres task is committed. That database is the `rfnry-thread-pg` container (restart policy set, dedicated to this repo; the tests truncate it freely).
 - Gate for every TypeScript commit, from `packages/typescript`: `npm run check && npm run typecheck && npm test`.
 - No comments, no docstrings (CLAUDE.md engineering rule 4). Names from the docs, verbatim.
 - Rule 9: every error message starts with its module's file stem, then a lowercase sentence; identifiers keep their case: `server: thread 'support-ana' was not found`. Logs are lowercase; the library logs only unexpected failures inside `serve`, as warnings on the `rfnry_thread` logger.
@@ -24,9 +24,9 @@
 - `Identity.role == "system"` is reserved for the library: `authenticate` or `server.connect` producing one is a `ConfigurationError`; adding one as a member is an `InputError`.
 - Family blocks are copied, never imported: the parts block (`class Text` … `Content = str | list[Part]`) and the tools block (`Result = ` … `if n not in names})`) byte-identical with `../engine`; `class Identity` byte-identical with `../senses` when that checkout has it.
 - Tables `thread_threads`, `thread_members`, `thread_events`; `NOTIFY` channels `thread_events` and `thread_signals`; notify payloads ≤ 7900 bytes.
-- Limits (constants, from the spec): inline media 256 KiB per event (`Server(max_inline_bytes=)`), replay 500 (`Server(replay_limit=)`), custom payload 64 KiB, hello deadline 10 s, outbound bound 1000 frames with a 10 s stall window, outbox deadline 60 s with backoff 0.5 s doubling to 8 s, reconnect backoff full jitter 0.5 s doubling to 30 s, state re-announcement 10 s and expiry 30 s, `Working.label` ≤ 1000 characters.
+- Limits (constants, from the spec): inline media 256 KiB per event (`Server(max_inline_bytes=)`), replay 500 (`Server(replay_limit=)`), custom payload 64 KiB, hello deadline 10 s, outbound bound 1000 frames with a 10 s stall window, outbox deadline 60 s with backoff 0.5 s doubling to 8 s, reconnect backoff full jitter 0.5 s doubling to 30 s (the client's reconnect and the Postgres re-`LISTEN` alike), state re-announcement 10 s and expiry 30 s, `Working.label` ≤ 1000 characters.
 - Close codes: 4000 protocol error, 4001 refused hello, 4002 hello deadline, 4003 too slow. Protocol version `1`.
-- Examples are standalone uv projects; keys come from `/home/frndvrgs/software/rfnry/.env.examples` via `uv run --env-file ../../../.env.examples main.py`, never committed; `examples/**/uv.lock` and `.env*` are git-ignored.
+- Examples are standalone uv projects; keys (and `RFNRY_EXAMPLES_POSTGRES_URL`, the same database URL as the tests) come from `/home/frndvrgs/software/rfnry/.env.examples` via `uv run --env-file ../../../.env.examples main.py`, never committed; `examples/**/uv.lock` and `.env*` are git-ignored.
 - Every commit message ends with the line `Claude-Session: https://claude.ai/code/session_01GevsYJaAyM8ARLvEnXsoAB`.
 
 ## Pre-change checklist (answered once for the whole build)
@@ -44,6 +44,7 @@
 3. **A stream's message versus its `stream.end` on another replica.** The UI rule "a `stream.end` with no message before it means abandoned" breaks if a remote replica reads the event after it pushes the signal. Pinned in Task 11 (`test_the_finishing_message_reaches_a_remote_connection_before_stream_end`) and again on Postgres in Task 15.
 4. **A person with two tabs.** Closing one tab must not announce `Left`; opening the second must not announce `Present` twice; only the last tab closing does. Pinned in Task 8 (`test_two_connections_of_one_member_are_one_presence`) and Task 10 (`test_two_tabs_are_one_presence_over_the_server`).
 5. **A member removed while the thread is open.** After `MemberRemoved` reaches them, they receive nothing more from the thread and cannot signal in it — on every replica. Pinned in Task 8 (`test_a_removed_member_is_cut_off_after_the_event`), Task 9 (`test_a_removed_member_stops_receiving_over_the_server`), Task 11 and Task 15 (`test_removal_cuts_off_a_member_on_another_replica`).
+6. **A replica whose `LISTEN` connection drops.** It must not go deaf for good: it re-acquires with jittered backoff, subscribes again, republishes its own state, and events said during the gap still arrive in order. Pinned in Task 11 (`test_a_resumed_listener_republishes_this_replicas_state`) and Task 15 (`test_a_dropped_listener_listens_again_and_resumes`, `test_signals_and_events_cross_again_after_the_listeners_drop`).
 
 ## File Structure
 
@@ -1302,7 +1303,7 @@ Written fresh, scope-first (the old store had no scope column and a global `seq`
 
 **Interfaces:**
 - Consumes: `Thread`, `Member`, `Event`, events (Task 3); `NotFoundError`, `StorageError` (Task 1).
-- Produces (in `rfnry_thread.storage`): `OnEvent = Callable[[str, str, int], Awaitable[None]]` (scope, thread_id, seq); `OnSignal = Callable[[str, str, dict[str, Any]], Awaitable[None]]` (scope, thread_id, payload); `Stop = Callable[[], Awaitable[None]]`; the `Storage` protocol:
+- Produces (in `rfnry_thread.storage`): `OnEvent = Callable[[str, str, int], Awaitable[None]]` (scope, thread_id, seq); `OnSignal = Callable[[str, str, dict[str, Any]], Awaitable[None]]` (scope, thread_id, payload); `OnResume = Callable[[], Awaitable[None]]`; `Stop = Callable[[], Awaitable[None]]`; the `Storage` protocol:
   - `initialize() -> None`
   - `create_thread(scope, thread: Thread) -> tuple[Thread, bool]` (stored, created)
   - `get_thread(scope, thread_id) -> Thread | None`
@@ -1314,7 +1315,7 @@ Written fresh, scope-first (the old store had no scope column and a global `seq`
   - `list_events(scope, thread_id, since: int | None = None, before: int | None = None, limit: int = 50, kinds: Sequence[str] | None = None) -> list[Event]` — always ascending; with `since`, the first `limit` after it; without, the last `limit` below `before` (or overall)
   - `get_event(scope, thread_id, event_id) -> Event | None`
   - `delete_scope(scope) -> int` (rows removed); `verify_absent(scope) -> bool`
-  - `listen(on_event, on_signal) -> Stop`; `publish(scope, thread_id, payload: dict[str, Any]) -> None` (every listener, the publisher's own included, receives a copy)
+  - `listen(on_event, on_signal, on_resume: OnResume | None = None) -> Stop` (`on_resume` is called each time the listener is subscribed again after its connection dropped; `InMemoryStorage` never drops, so never calls it); `publish(scope, thread_id, payload: dict[str, Any]) -> None` (every listener, the publisher's own included, receives a copy)
 - Produces: `InMemoryStorage()` in `rfnry_thread.inmemory`; `tests/until.py` with `async def until(check: Callable[[], bool], timeout: float = 2.0) -> None`.
 
 - [ ] **Step 1: Write the helper, the fixture and the failing suite**
@@ -1534,6 +1535,7 @@ from rfnry_thread.models import Event, Member, Thread
 
 OnEvent = Callable[[str, str, int], Awaitable[None]]
 OnSignal = Callable[[str, str, dict[str, Any]], Awaitable[None]]
+OnResume = Callable[[], Awaitable[None]]
 Stop = Callable[[], Awaitable[None]]
 
 
@@ -1577,7 +1579,7 @@ class Storage(Protocol):
 
     async def verify_absent(self, scope: str) -> bool: ...
 
-    async def listen(self, on_event: OnEvent, on_signal: OnSignal) -> Stop: ...
+    async def listen(self, on_event: OnEvent, on_signal: OnSignal, on_resume: OnResume | None = None) -> Stop: ...
 
     async def publish(self, scope: str, thread_id: str, payload: dict[str, Any]) -> None: ...
 ```
@@ -1593,7 +1595,7 @@ from typing import Any
 
 from rfnry_thread.errors import NotFoundError, StorageError
 from rfnry_thread.models import Event, Member, Thread
-from rfnry_thread.storage import OnEvent, OnSignal, Stop
+from rfnry_thread.storage import OnEvent, OnResume, OnSignal, Stop
 
 Key = tuple[str, str]
 
@@ -1720,7 +1722,7 @@ class InMemoryStorage:
     async def verify_absent(self, scope: str) -> bool:
         return not any(key[0] == scope for key in [*self._threads, *self._members, *self._events])
 
-    async def listen(self, on_event: OnEvent, on_signal: OnSignal) -> Stop:
+    async def listen(self, on_event: OnEvent, on_signal: OnSignal, on_resume: OnResume | None = None) -> Stop:
         entry = (on_event, on_signal)
         self._listeners.append(entry)
 
@@ -4236,8 +4238,8 @@ Written fresh (replaces `../rfnry-thread/packages/server-python/src/rfnry_thread
 - Test: `packages/python/tests/unit/test_replicas.py`
 
 **Interfaces:**
-- Consumes: `Hub.on_event`, `Hub.on_signal`, `Hub.announce`, `Hub.linked` (Task 8); `Storage.listen` (Task 5); `REFRESH` (Task 7).
-- Produces: `Server.start() -> None` (idempotent: listens on the storage, sets `linked`, starts re-announcing every `REFRESH` seconds) and `Server.stop() -> None` (idempotent: stops both).
+- Consumes: `Hub.on_event`, `Hub.on_signal`, `Hub.announce`, `Hub.linked` (Task 8); `Storage.listen`, `OnEvent`, `OnSignal`, `OnResume`, `Stop` (Task 5); `REFRESH` (Task 7).
+- Produces: `Server.start() -> None` (idempotent: listens on the storage with `Hub.announce` as `on_resume`, sets `linked`, starts re-announcing every `REFRESH` seconds) and `Server.stop() -> None` (idempotent: stops both).
 
 - [ ] **Step 1: Write the failing tests**
 
@@ -4251,6 +4253,7 @@ import pytest
 from rfnry_thread.inmemory import InMemoryStorage
 from rfnry_thread.server import Server
 from rfnry_thread.state import EXPIRY
+from rfnry_thread.storage import OnEvent, OnResume, OnSignal, Stop
 from until import until
 
 from .conftest import authenticate, say
@@ -4342,6 +4345,31 @@ async def test_a_replica_learns_who_is_here_from_the_re_announcement(storage: In
     await far.stop()
 
 
+async def test_a_resumed_listener_republishes_this_replicas_state(storage: InMemoryStorage) -> None:
+    resumes: list[OnResume | None] = []
+    listen = storage.listen
+
+    async def spy(on_event: OnEvent, on_signal: OnSignal, on_resume: OnResume | None = None) -> Stop:
+        resumes.append(on_resume)
+        return await listen(on_event, on_signal, on_resume)
+
+    storage.listen = spy  # type: ignore[method-assign]
+    near = Server(storage, authenticate=authenticate)
+    ana = await Peer.open(near, ANA)
+    await ana.call("thread.create", thread_id="t1")
+    await ana.call("thread.join", thread_id="t1")
+    far = Server(storage, authenticate=authenticate)
+    await near.start()
+    await far.start()
+    assert far._hub.state.present("acme", "t1") == []
+    resume = resumes[0]
+    assert resume is not None
+    await resume()
+    await until(lambda: far._hub.state.present("acme", "t1") == [ANA])
+    await near.stop()
+    await far.stop()
+
+
 async def test_stop_stops_listening_and_start_is_idempotent(storage: InMemoryStorage) -> None:
     near, far = Server(storage, authenticate=authenticate), Server(storage, authenticate=authenticate)
     await near.start()
@@ -4368,7 +4396,7 @@ In `server.py`, import `REFRESH` from `rfnry_thread.state` and add to `Server`:
     async def start(self) -> None:
         if self._stop is not None:
             return
-        self._stop = await self._storage.listen(self._hub.on_event, self._hub.on_signal)
+        self._stop = await self._storage.listen(self._hub.on_event, self._hub.on_signal, self._hub.announce)
         self._hub.linked = True
         self._refresher = asyncio.get_running_loop().create_task(self._refresh())
 
@@ -4388,6 +4416,8 @@ In `server.py`, import `REFRESH` from `rfnry_thread.state` and add to `Server`:
             await asyncio.sleep(REFRESH)
             await self._hub.announce()
 ```
+
+Why `announce` is `on_resume`: a replica whose `LISTEN` dropped (Task 15 re-listens) may have been silent past the peers' 30 s expiry; republishing at once rebuilds its presence, work and streams on the others instead of waiting for the next 10 s tick.
 
 - [ ] **Step 4: Run the gate**
 
@@ -4421,7 +4451,7 @@ This task builds the whole `Client` (verbs, `events()`, `Stream`, the outbox and
 - Produces (in `rfnry_thread.client`):
   - `HelloSource = dict[str, Any] | Callable[[], Awaitable[dict[str, Any]]]`; `Item = Event | Signal | Joined`
   - constants `HANDSHAKE = 10.0`, `DEADLINE = 60.0`, `BACKOFF = 0.5`, `BACKOFF_CAP = 8.0`, `RECONNECT = 0.5`, `RECONNECT_CAP = 30.0`
-  - `Client` with `identity: Identity`, `scope: str`; `classmethod async _open(dial: Callable[[], Awaitable[Connection]], hello: HelloSource) -> Client`; verbs `create_thread(thread_id=None, metadata=None) -> Thread`, `get_thread(thread_id) -> Thread`, `list_threads(before=None, limit=50) -> list[Thread]`, `update_thread(thread_id, metadata) -> Thread`, `delete_thread(thread_id) -> None`, `join(thread_id, since=None) -> Joined`, `leave(thread_id) -> None`, `history(thread_id, before=None, limit=50, kinds=None) -> list[Event]`, `present(thread_id) -> list[Identity]`, `add_member(thread_id, identity) -> Member`, `remove_member(thread_id, identity) -> None`, `list_members(thread_id) -> list[Member]`, `send(thread_id, content, in_reply_to=None, triggered_by=None) -> Message`, `stream(thread_id, in_reply_to=None, triggered_by=None) -> Stream`, `step(thread_id, name, input=None, output=None, is_error=False, duration_ms=None, in_reply_to=None, triggered_by=None) -> Step`, `edit(thread_id, target, content) -> Edit`, `retract(thread_id, target) -> Retract`, `read(thread_id, up_to_seq) -> Read`, `custom(thread_id, name, payload) -> Custom`, `working(thread_id, label=None) -> None`, `idle(thread_id) -> None`, `cancel(thread_id, to) -> None`, `events(include_own=False) -> AsyncIterator[Item]`, `close() -> None`
+  - `Client` with `identity: Identity`, `scope: str`; `classmethod async _open(dial: Callable[[], Awaitable[Connection]], hello: HelloSource) -> Client`; verbs `create_thread(thread_id=None, metadata=None) -> Thread`, `get_thread(thread_id) -> Thread`, `list_threads(before=None, limit=50) -> list[Thread]`, `update_thread(thread_id, metadata) -> Thread`, `delete_thread(thread_id) -> None`, `join(thread_id, since=None) -> Joined`, `leave(thread_id) -> None`, `history(thread_id, before=None, limit=50, kinds=None) -> list[Event]`, `present(thread_id) -> list[Identity]`, `add_member(thread_id, identity) -> Member`, `remove_member(thread_id, identity) -> None`, `list_members(thread_id) -> list[Member]`, `send(thread_id, content, in_reply_to=None, triggered_by=None, client_id=None) -> Message`, `stream(thread_id, in_reply_to=None, triggered_by=None) -> Stream`, `step(thread_id, name, input=None, output=None, is_error=False, duration_ms=None, in_reply_to=None, triggered_by=None, client_id=None) -> Step`, `edit(thread_id, target, content, client_id=None) -> Edit`, `retract(thread_id, target, client_id=None) -> Retract`, `read(thread_id, up_to_seq) -> Read`, `custom(thread_id, name, payload, client_id=None) -> Custom` (a `client_id` left out is generated; one supplied is the server's dedup key, so the same one twice stores one event and returns it both times), `working(thread_id, label=None) -> None`, `idle(thread_id) -> None`, `cancel(thread_id, to) -> None`, `events(include_own=False) -> AsyncIterator[Item]`, `close() -> None`
   - `Stream` with `id: str`, `text: str`, `async write(text) -> None`, `async finish(content=None) -> Message`, async context manager
 - Produces: `Server.connect(identity: Identity, scope: str) -> Client`.
 
@@ -4558,6 +4588,23 @@ async def test_every_writing_verb_returns_the_stored_event(server: Server) -> No
     assert isinstance(await ana.retract("t1", message.id), Retract)
     view = resolve(await ana.history("t1"))
     assert message.id not in [e.id for e in view]
+
+
+async def test_a_caller_supplied_client_id_stores_one_event_and_returns_it_twice(server: Server) -> None:
+    ana, helper = await pair(server)
+    first = await helper.send("t1", "Your plan renews Friday.", client_id="renewal-ana-2026-10")
+    again = await helper.send("t1", "Your plan renews Friday, again.", client_id="renewal-ana-2026-10")
+    assert again == first and first.client_id == "renewal-ana-2026-10"
+    step = await helper.step("t1", name="Read", client_id="read-1")
+    assert await helper.step("t1", name="Read", client_id="read-1") == step
+    edit = await helper.edit("t1", first.id, "Renews Friday.", client_id="edit-1")
+    assert await helper.edit("t1", first.id, "Renews Friday.", client_id="edit-1") == edit
+    custom = await helper.custom("t1", "rating", {"stars": 5}, client_id="rating-1")
+    assert await helper.custom("t1", "rating", {"stars": 4}, client_id="rating-1") == custom
+    retract = await helper.retract("t1", step.id, client_id="retract-1")
+    assert await helper.retract("t1", step.id, client_id="retract-1") == retract
+    mine = [e.client_id for e in await ana.history("t1") if e.author == HELPER]
+    assert mine == ["renewal-ana-2026-10", "read-1", "edit-1", "rating-1", "retract-1"]
 
 
 async def test_a_stream_is_signals_then_a_message_with_the_stream_id(server: Server) -> None:
@@ -5032,9 +5079,14 @@ class Client:
         return [Member.model_validate(m) for m in reply["members"]]
 
     async def send(
-        self, thread_id: str, content: Content, in_reply_to: str | None = None, triggered_by: Identity | None = None
+        self,
+        thread_id: str,
+        content: Content,
+        in_reply_to: str | None = None,
+        triggered_by: Identity | None = None,
+        client_id: str | None = None,
     ) -> Message:
-        return await self._message(thread_id, content, in_reply_to, triggered_by)
+        return await self._message(thread_id, content, in_reply_to, triggered_by, client_id)
 
     def stream(self, thread_id: str, in_reply_to: str | None = None, triggered_by: Identity | None = None) -> Stream:
         return Stream(self, thread_id, in_reply_to, triggered_by)
@@ -5049,23 +5101,26 @@ class Client:
         duration_ms: int | None = None,
         in_reply_to: str | None = None,
         triggered_by: Identity | None = None,
+        client_id: str | None = None,
     ) -> Step:
         event = await self._send(thread_id, {
             "kind": "step", "name": name, "input": input or {}, "output": _wire(output or []), "is_error": is_error,
-            "duration_ms": duration_ms, "in_reply_to": in_reply_to, "triggered_by": _who(triggered_by)})
+            "duration_ms": duration_ms, "in_reply_to": in_reply_to, "triggered_by": _who(triggered_by)}, client_id)
         return _expect(event, Step)
 
-    async def edit(self, thread_id: str, target: str, content: Content) -> Edit:
-        return _expect(await self._send(thread_id, {"kind": "edit", "target": target, "content": _wire(content)}), Edit)
+    async def edit(self, thread_id: str, target: str, content: Content, client_id: str | None = None) -> Edit:
+        event = await self._send(thread_id, {"kind": "edit", "target": target, "content": _wire(content)}, client_id)
+        return _expect(event, Edit)
 
-    async def retract(self, thread_id: str, target: str) -> Retract:
-        return _expect(await self._send(thread_id, {"kind": "retract", "target": target}), Retract)
+    async def retract(self, thread_id: str, target: str, client_id: str | None = None) -> Retract:
+        return _expect(await self._send(thread_id, {"kind": "retract", "target": target}, client_id), Retract)
 
     async def read(self, thread_id: str, up_to_seq: int) -> Read:
         return _expect(await self._send(thread_id, {"kind": "read", "up_to_seq": up_to_seq}), Read)
 
-    async def custom(self, thread_id: str, name: str, payload: dict[str, Any]) -> Custom:
-        return _expect(await self._send(thread_id, {"kind": "custom", "name": name, "payload": payload}), Custom)
+    async def custom(self, thread_id: str, name: str, payload: dict[str, Any], client_id: str | None = None) -> Custom:
+        event = await self._send(thread_id, {"kind": "custom", "name": name, "payload": payload}, client_id)
+        return _expect(event, Custom)
 
     async def working(self, thread_id: str, label: str | None = None) -> None:
         await self._request("signal.send", {"thread_id": thread_id, "kind": "working", "label": label})
@@ -5111,6 +5166,7 @@ class Client:
 Notes for the implementer:
 - `Client.connect(url, hello=)` arrives in Task 13 with the WebSocket transport.
 - `_own` reads `sender` for signals and `author` for events.
+- `client_id=` is the one knob on a write's identity: `_send` uses it as given, or generates one. The server's dedup answers a repeat with the event stored first, so the second call returns it unchanged — even with different content (the `test_a_caller_supplied_client_id…` test pins that).
 - `Stream` is not constructed by consumers; it is public so it can be named in type hints.
 
 Add to `server.py` (import `Client` from `rfnry_thread.client`):
@@ -5609,9 +5665,9 @@ Claude-Session: https://claude.ai/code/session_01GevsYJaAyM8ARLvEnXsoAB"
 
 ---
 
-### Task 15: PostgresStorage — rows, dedup, gapless seq, LISTEN/NOTIFY; two replicas on one database
+### Task 15: PostgresStorage — rows, dedup, gapless seq, LISTEN/NOTIFY, re-LISTEN; two replicas on one database
 
-Adapted from `../rfnry-thread/packages/server-python/src/rfnry_thread_server/store/postgres/{store.py,schema.sql}`: the dedup key `(thread, author, client_id)` answered with the stored row, `ON CONFLICT DO NOTHING` for idempotent creation, an advisory lock around the DDL. New: `scope` leads every key, `seq` is thread-local and gapless (a `last_seq` column bumped under the thread row's lock in the event's transaction — the old global identity column had gaps), the `NOTIFY` rides the same transaction, and the pool is the consumer's (the engine's `PostgresStorage(pool)` shape; no executor protocol, no driver import).
+Adapted from `../rfnry-thread/packages/server-python/src/rfnry_thread_server/store/postgres/{store.py,schema.sql}`: the dedup key `(thread, author, client_id)` answered with the stored row, `ON CONFLICT DO NOTHING` for idempotent creation, an advisory lock around the DDL. New: `scope` leads every key, `seq` is thread-local and gapless (a `last_seq` column bumped under the thread row's lock in the event's transaction — the old global identity column had gaps), the `NOTIFY` rides the same transaction, the `LISTEN` connection is watched and re-acquired with jittered backoff when it drops (the old store went deaf for good), and the pool is the consumer's (the engine's `PostgresStorage(pool)` shape; no executor protocol, no driver import).
 
 **Files:**
 - Create: `packages/python/src/rfnry_thread/postgres.py`
@@ -5619,8 +5675,8 @@ Adapted from `../rfnry-thread/packages/server-python/src/rfnry_thread_server/sto
 - Test: `packages/python/tests/integration/test_replicas.py`, `packages/python/tests/integration/test_tenancy.py`
 
 **Interfaces:**
-- Consumes: the `Storage` protocol and its suite (Task 5); `Server`, `start`/`stop` (Tasks 9, 11); `tests/unit/peer.py`, `tests/unit/conftest.py` (Task 9).
-- Produces: `PostgresStorage(pool: Any)` in `rfnry_thread.postgres`, implementing `Storage`; channels `thread_events` (payload `{"s", "t", "q"}`) and `thread_signals` (payload `{"s", "t", "p"}`); `NOTIFY_LIMIT = 7900`.
+- Consumes: the `Storage` protocol, `OnResume` and the suite (Task 5); `Server`, `start`/`stop` (Tasks 9, 11 — `start` passes `Hub.announce` as `on_resume`); `tests/unit/peer.py`, `tests/unit/conftest.py` (Task 9); `tests/until.py` (Task 5).
+- Produces: `PostgresStorage(pool: Any)` in `rfnry_thread.postgres`, implementing `Storage`; channels `thread_events` (payload `{"s", "t", "q"}`) and `thread_signals` (payload `{"s", "t", "p"}`); `NOTIFY_LIMIT = 7900`; `RELISTEN = 0.5`, `RELISTEN_CAP = 30.0` (full-jitter backoff for re-acquiring a dropped `LISTEN` connection). `listen` holds one pool connection, watches it with asyncpg's termination listener, and on a drop releases it, acquires another after `random() * min(RELISTEN_CAP, RELISTEN * 2**attempt)` seconds (retrying until one subscribes), adds both channel listeners, then awaits `on_resume`.
 
 - [ ] **Step 1: Add the Postgres parameter and the failing tests**
 
@@ -5669,19 +5725,50 @@ async def storage(request: Any) -> AsyncIterator[Storage]:
 `packages/python/tests/integration/test_replicas.py`:
 
 ```python
+import asyncio
 from collections.abc import AsyncIterator
+from datetime import UTC, datetime
+from typing import Any
 
 import pytest
 
+from rfnry_thread.models import Message, Text, Thread
 from rfnry_thread.postgres import PostgresStorage
 from rfnry_thread.server import Server
 from unit.conftest import authenticate, say
 from unit.factories import ANA, HELPER
 from unit.peer import Peer
+from until import until
 
 from .conftest import fresh, postgres_pool
 
 pytestmark = pytest.mark.postgres
+
+
+async def listeners(pool: Any) -> list[int]:
+    async with pool.acquire() as conn:
+        rows = await conn.fetch(
+            "SELECT pid FROM pg_stat_activity WHERE datname = current_database() "
+            "AND pid <> pg_backend_pid() AND query = 'LISTEN \"thread_signals\"'"
+        )
+    return [row["pid"] for row in rows]
+
+
+async def terminate(pool: Any, expected: int) -> list[int]:
+    killed = await listeners(pool)
+    assert len(killed) == expected
+    async with pool.acquire() as conn:
+        for pid in killed:
+            await conn.execute("SELECT pg_terminate_backend($1)", pid)
+    return killed
+
+
+async def relistened(pool: Any, killed: list[int], expected: int, timeout: float = 5.0) -> None:
+    async def wait() -> None:
+        while len([pid for pid in await listeners(pool) if pid not in killed]) < expected:
+            await asyncio.sleep(0.05)
+
+    await asyncio.wait_for(wait(), timeout)
 
 
 @pytest.fixture
@@ -5745,7 +5832,53 @@ async def test_removal_cuts_off_a_member_on_another_replica(replicas: tuple[Serv
     await say(ana, "t1", "after")
     kinds = [p["kind"] for p in await helper.quiet(0.5)]
     assert "member_removed" in kinds and "message" not in kinds
+
+
+async def test_a_dropped_listener_listens_again_and_resumes() -> None:
+    pool = await postgres_pool()
+    storage = await fresh(pool)
+    await storage.create_thread("acme", Thread(id="t1", scope="acme", created_at=datetime.now(UTC)))
+    seen: list[int] = []
+    heard: list[dict[str, Any]] = []
+    resumed = asyncio.Event()
+
+    async def on_event(scope: str, thread_id: str, seq: int) -> None:
+        seen.append(seq)
+
+    async def on_signal(scope: str, thread_id: str, payload: dict[str, Any]) -> None:
+        heard.append(payload)
+
+    async def on_resume() -> None:
+        resumed.set()
+
+    stop = await storage.listen(on_event, on_signal, on_resume)
+    killed = await terminate(pool, 1)
+    await relistened(pool, killed, 1)
+    await asyncio.wait_for(resumed.wait(), 5.0)
+    await storage.publish("acme", "t1", {"kind": "idle"})
+    await storage.append_event("acme", Message(id="m1", thread_id="t1", author=ANA, created_at=datetime.now(UTC),
+                                               client_id="c1", content=[Text(text="back")]))
+    await until(lambda: heard == [{"kind": "idle"}] and seen == [1])
+    await stop()
+    assert await listeners(pool) == []
+    await pool.close()
+
+
+async def test_signals_and_events_cross_again_after_the_listeners_drop(replicas: tuple[Server, Server]) -> None:
+    ana, helper = await room(*replicas)
+    pool = await postgres_pool()
+    killed = await terminate(pool, 2)
+    await say(ana, "t1", "during")
+    await relistened(pool, killed, 2)
+    await helper.call("signal.send", thread_id="t1", kind="working", label="Reading")
+    assert (await ana.push("working", timeout=2.0))["label"] == "Reading"
+    await say(ana, "t1", "after")
+    messages = [p for p in await helper.quiet(0.5) if p["kind"] == "message"]
+    assert [p["content"][0]["text"] for p in messages] == ["during", "after"]
+    await pool.close()
 ```
+
+`listeners` matches a backend whose last statement was asyncpg's `LISTEN "thread_signals"` — the second of the two subscriptions, so a match means the connection hears both channels. Why "during" arrives: its notification may be lost with the terminated listener, but the notification for "after" finds the far connection's cursor two behind and the hub fills the gap from storage (Task 8) — the bus carries latency, storage carries completeness.
 
 `packages/python/tests/integration/test_tenancy.py`:
 
@@ -5788,7 +5921,7 @@ async def test_erasure_is_provable_and_falsifiable(storage: Storage) -> None:
 
 - [ ] **Step 2: Run them to verify they fail**
 
-Run: `cd packages/python && RFNRY_TEST_POSTGRES_URL=postgresql://… uv run pytest tests/integration -q -m postgres`
+Run: `cd packages/python && RFNRY_TEST_POSTGRES_URL=postgresql://thread:thread@127.0.0.1:55436/thread uv run pytest tests/integration -q -m postgres`
 Expected: FAIL — `No module named 'rfnry_thread.postgres'`.
 
 - [ ] **Step 3: Implement**
@@ -5801,17 +5934,20 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import json
+import random
 from collections.abc import AsyncIterator, Sequence
 from contextlib import asynccontextmanager
 from typing import Any
 
 from rfnry_thread.errors import NotFoundError, StorageError, ThreadException
 from rfnry_thread.models import EVENTS, Event, Member, Thread
-from rfnry_thread.storage import OnEvent, OnSignal, Stop
+from rfnry_thread.storage import OnEvent, OnResume, OnSignal, Stop
 
 EVENTS_CHANNEL = "thread_events"
 SIGNALS_CHANNEL = "thread_signals"
 NOTIFY_LIMIT = 7900
+RELISTEN = 0.5
+RELISTEN_CAP = 30.0
 _LOCK = 0x7468726561640001
 
 _DDL = [
@@ -6043,10 +6179,10 @@ class PostgresStorage:
             ]
         return all(count == 0 for count in counts)
 
-    async def listen(self, on_event: OnEvent, on_signal: OnSignal) -> Stop:
-        async with self._guard("listen"):
-            conn = await self._pool.acquire()
+    async def listen(self, on_event: OnEvent, on_signal: OnSignal, on_resume: OnResume | None = None) -> Stop:
         tasks: set[asyncio.Future[None]] = set()
+        lost = asyncio.Event()
+        held: list[Any] = [None]
 
         def receive(_connection: Any, _pid: int, channel: str, text: str) -> None:
             data = json.loads(text)
@@ -6057,17 +6193,58 @@ class PostgresStorage:
             tasks.add(future)
             future.add_done_callback(tasks.discard)
 
-        async with self._guard("listen"):
-            await conn.add_listener(EVENTS_CHANNEL, receive)
-            await conn.add_listener(SIGNALS_CHANNEL, receive)
+        def terminated(_connection: Any) -> None:
+            lost.set()
 
-        async def stop() -> None:
+        async def attach() -> None:
+            conn = await self._pool.acquire()
+            try:
+                conn.add_termination_listener(terminated)
+                await conn.add_listener(EVENTS_CHANNEL, receive)
+                await conn.add_listener(SIGNALS_CHANNEL, receive)
+            except BaseException:
+                with contextlib.suppress(Exception):
+                    await self._pool.release(conn)
+                raise
+            held[0] = conn
+
+        async def release() -> None:
+            conn, held[0] = held[0], None
+            if conn is None:
+                return
             with contextlib.suppress(Exception):
+                conn.remove_termination_listener(terminated)
                 await conn.remove_listener(EVENTS_CHANNEL, receive)
                 await conn.remove_listener(SIGNALS_CHANNEL, receive)
+            with contextlib.suppress(Exception):
+                await self._pool.release(conn)
+
+        async def relisten() -> None:
+            while True:
+                await lost.wait()
+                lost.clear()
+                await release()
+                attempt = 0
+                while held[0] is None:
+                    await asyncio.sleep(random.random() * min(RELISTEN_CAP, RELISTEN * 2**attempt))
+                    attempt += 1
+                    with contextlib.suppress(Exception):
+                        await attach()
+                if on_resume is not None:
+                    with contextlib.suppress(Exception):
+                        await on_resume()
+
+        async with self._guard("listen"):
+            await attach()
+        watcher = asyncio.get_running_loop().create_task(relisten())
+
+        async def stop() -> None:
+            watcher.cancel()
+            with contextlib.suppress(asyncio.CancelledError):
+                await watcher
+            await release()
             for future in list(tasks):
                 future.cancel()
-            await self._pool.release(conn)
 
         return stop
 
@@ -6082,19 +6259,21 @@ class PostgresStorage:
 
 Why the order in `append_event`: the `FOR UPDATE` on the thread row serializes every append to one thread across replicas, so the dedup read after it sees any concurrent twin that committed first (READ COMMITTED takes a fresh snapshot per statement), and `last_seq + 1` never skips or repeats. A rollback undoes the bump with the row, so `seq` stays gapless.
 
+Why `listen` re-listens itself: a database restart, a failover or a proxy idle timeout closes the `LISTEN` connection without an error anyone awaits; without the watcher the replica would keep serving its own connections and silently stop hearing the others. asyncpg's termination listener fires when the socket closes; the watcher releases the dead connection (the pool discards a closed one), backs off with full jitter so a fleet of replicas does not stampede a recovering database, subscribes on a fresh connection and calls `on_resume` — `Server.start` passes `Hub.announce`, so the replica's presence, work and open streams are republished at once. Nothing replays missed notifications: the next event notification for a thread gap-fills each cursor from storage, and clients resume from theirs. `on_resume` failing (the database still flapping) is swallowed; the next drop or the 10 s re-announcement covers it.
+
 - [ ] **Step 4: Run both tiers**
 
 Run: `cd packages/python && uv run poe format && uv run poe check && uv run poe typecheck && uv run poe test`
 Expected: PASS (Postgres parameters deselected).
 
 Run: `RFNRY_TEST_POSTGRES_URL=postgresql://thread:thread@127.0.0.1:55436/thread uv run poe test:integration`
-Expected: PASS with no skips — the storage suite (including 20 concurrent duplicates), the two-replica tests (including the 20-stream ordering test) and the tenancy canary, on Postgres. (Use any scratch database; the URL above is an example — ask the human which one to use.)
+Expected: PASS with no skips — the storage suite (including 20 concurrent duplicates), the two-replica tests (including the 20-stream ordering test and the two re-LISTEN tests, which terminate the listener backends with `pg_terminate_backend`) and the tenancy canary, on Postgres. The URL is the `rfnry-thread-pg` container, dedicated to this repo; the role owns its backends, so it may terminate them.
 
 - [ ] **Step 5: Commit**
 
 ```bash
 git add packages/python
-git commit -m "feat: PostgresStorage — scope-first tables, gapless seq under the thread lock, NOTIFY in the same transaction
+git commit -m "feat: PostgresStorage — scope-first tables, gapless seq under the thread lock, NOTIFY in the same transaction, re-LISTEN with backoff
 
 Claude-Session: https://claude.ai/code/session_01GevsYJaAyM8ARLvEnXsoAB"
 ```
@@ -6616,7 +6795,7 @@ The outbox is adapted from `../rfnry-thread/packages/client-react/src/outbox.ts`
 
 **Interfaces:**
 - Consumes: errors, types, protocol (Task 16).
-- Produces: `timing` (mutable tuning for tests: `handshakeMs`, `reconnectMs`, `reconnectCapMs`, `deadlineMs`, `backoffMs`, `backoffCapMs`); `Outbox`; `connect(options: { url: string; hello?: HelloSource }): Promise<Client>`; `Client` with `identity`, `scope`, `closed: Promise<ThreadException | null>`, `createThread(options?: { threadId?: string; metadata?: Record<string, unknown> })`, `getThread(threadId)`, `listThreads(options?: { before?: string; limit?: number })`, `updateThread(threadId, metadata)`, `deleteThread(threadId)`, `join(threadId, options?: { since?: number })`, `leave(threadId)`, `history(threadId, options?: { before?: number; limit?: number; kinds?: string[] })`, `present(threadId)`, `addMember(threadId, identity)`, `removeMember(threadId, identity)`, `listMembers(threadId)`, `send(threadId, content, options?: { inReplyTo?: string; triggeredBy?: Identity })`, `stream(threadId, options?)`, `step(threadId, options: { name, input?, output?, isError?, durationMs?, inReplyTo?, triggeredBy? })`, `edit(threadId, target, content)`, `retract(threadId, target)`, `read(threadId, upToSeq)`, `custom(threadId, name, payload)`, `working(threadId, label?)`, `idle(threadId)`, `cancel(threadId, to)`, `subscribe(listener, options?: { includeOwn?: boolean }): () => void`, `close()`; `Stream` with `id`, `text`, `write(text): void`, `finish(content?): Promise<Message>`, `abort(): Promise<void>`.
+- Produces: `timing` (mutable tuning for tests: `handshakeMs`, `reconnectMs`, `reconnectCapMs`, `deadlineMs`, `backoffMs`, `backoffCapMs`); `Outbox`; `connect(options: { url: string; hello?: HelloSource }): Promise<Client>`; `Client` with `identity`, `scope`, `closed: Promise<ThreadException | null>`, `createThread(options?: { threadId?: string; metadata?: Record<string, unknown> })`, `getThread(threadId)`, `listThreads(options?: { before?: string; limit?: number })`, `updateThread(threadId, metadata)`, `deleteThread(threadId)`, `join(threadId, options?: { since?: number })`, `leave(threadId)`, `history(threadId, options?: { before?: number; limit?: number; kinds?: string[] })`, `present(threadId)`, `addMember(threadId, identity)`, `removeMember(threadId, identity)`, `listMembers(threadId)`, `send(threadId, content, options?: { inReplyTo?: string; triggeredBy?: Identity; clientId?: string })`, `stream(threadId, options?: { inReplyTo?: string; triggeredBy?: Identity })`, `step(threadId, options: { name, input?, output?, isError?, durationMs?, inReplyTo?, triggeredBy?, clientId? })`, `edit(threadId, target, content, options?: { clientId?: string })`, `retract(threadId, target, options?: { clientId?: string })`, `read(threadId, upToSeq)`, `custom(threadId, name, payload, options?: { clientId?: string })` (`clientId` as in Python: generated when left out, the dedup key when given), `working(threadId, label?)`, `idle(threadId)`, `cancel(threadId, to)`, `subscribe(listener, options?: { includeOwn?: boolean }): () => void`, `close()`; `Stream` with `id`, `text`, `write(text): void`, `finish(content?): Promise<Message>`, `abort(): Promise<void>`.
 
 - [ ] **Step 1: Write the fake socket and the failing tests**
 
@@ -6910,6 +7089,21 @@ describe('client', () => {
     expect(sent.in_reply_to).toBe('e0')
   })
 
+  it('stores a caller-supplied clientId once and returns the stored event both times', async () => {
+    const { client } = await joined()
+    const first = await client.send('t1', 'Your plan renews Friday.', { clientId: 'renewal-ana-2026-10' })
+    const again = await client.send('t1', 'Your plan renews Friday, again.', { clientId: 'renewal-ana-2026-10' })
+    expect(again).toEqual(first)
+    expect(first.client_id).toBe('renewal-ana-2026-10')
+    await client.step('t1', { name: 'Read', clientId: 'read-1' })
+    await client.edit('t1', first.id, 'Renews Friday.', { clientId: 'edit-1' })
+    await client.retract('t1', first.id, { clientId: 'retract-1' })
+    await client.custom('t1', 'rating', { stars: 5 }, { clientId: 'rating-1' })
+    const ids = server.sent('event.send').map((frame) => frame.payload.client_id)
+    expect(ids).toEqual(['renewal-ana-2026-10', 'renewal-ana-2026-10', 'read-1', 'edit-1', 'retract-1', 'rating-1'])
+    expect(server.stored.size).toBe(5)
+  })
+
   it('streams: start, deltas as notifies in order, the message with the stream id, then end', async () => {
     const { client } = await joined()
     const reply = client.stream('t1', { inReplyTo: 'e1' })
@@ -7087,7 +7281,9 @@ type Payload = Record<string, unknown>
 export type HelloSource = Payload | (() => Promise<Payload>)
 export type ConnectOptions = { url: string; hello?: HelloSource }
 export type Listener = (item: Item) => void
-export type SendOptions = { inReplyTo?: string; triggeredBy?: Identity }
+export type StreamOptions = { inReplyTo?: string; triggeredBy?: Identity }
+export type SendOptions = StreamOptions & { clientId?: string }
+export type WriteOptions = { clientId?: string }
 export type StepOptions = SendOptions & {
   name: string
   input?: Record<string, unknown>
@@ -7141,7 +7337,7 @@ function handshake(socket: WebSocket, auth: Payload): Promise<Payload> {
 type Wire = {
   request(method: string, payload: Payload): Promise<Payload>
   notify(method: string, payload: Payload): void
-  message(threadId: string, content: Content, options: SendOptions, clientId: string): Promise<Message>
+  message(threadId: string, content: Content, options: StreamOptions, clientId: string): Promise<Message>
 }
 
 export class Stream {
@@ -7154,7 +7350,7 @@ export class Stream {
   constructor(
     private readonly wire: Wire,
     private readonly threadId: string,
-    private readonly options: SendOptions
+    private readonly options: StreamOptions
   ) {
     this.started = wire.request('signal.send', {
       thread_id: threadId,
@@ -7382,7 +7578,7 @@ export class Client {
     return reply.event as Event
   }
 
-  private async message(threadId: string, content: Content, options: SendOptions, clientId?: string): Promise<Message> {
+  private async message(threadId: string, content: Content, options: StreamOptions, clientId?: string): Promise<Message> {
     const fields = {
       kind: 'message',
       content: parts(content),
@@ -7463,10 +7659,10 @@ export class Client {
   }
 
   send(threadId: string, content: Content, options: SendOptions = {}): Promise<Message> {
-    return this.message(threadId, content, options)
+    return this.message(threadId, content, options, options.clientId)
   }
 
-  stream(threadId: string, options: SendOptions = {}): Stream {
+  stream(threadId: string, options: StreamOptions = {}): Stream {
     return new Stream(this.wire, threadId, options)
   }
 
@@ -7480,23 +7676,23 @@ export class Client {
       duration_ms: options.durationMs ?? null,
       in_reply_to: options.inReplyTo ?? null,
       triggered_by: options.triggeredBy ?? null,
-    })) as Step
+    }, options.clientId)) as Step
   }
 
-  async edit(threadId: string, target: string, content: Content): Promise<Edit> {
-    return (await this.event(threadId, { kind: 'edit', target, content: parts(content) })) as Edit
+  async edit(threadId: string, target: string, content: Content, options: WriteOptions = {}): Promise<Edit> {
+    return (await this.event(threadId, { kind: 'edit', target, content: parts(content) }, options.clientId)) as Edit
   }
 
-  async retract(threadId: string, target: string): Promise<Retract> {
-    return (await this.event(threadId, { kind: 'retract', target })) as Retract
+  async retract(threadId: string, target: string, options: WriteOptions = {}): Promise<Retract> {
+    return (await this.event(threadId, { kind: 'retract', target }, options.clientId)) as Retract
   }
 
   async read(threadId: string, upToSeq: number): Promise<Read> {
     return (await this.event(threadId, { kind: 'read', up_to_seq: upToSeq })) as Read
   }
 
-  async custom(threadId: string, name: string, payload: Record<string, unknown>): Promise<Custom> {
-    return (await this.event(threadId, { kind: 'custom', name, payload })) as Custom
+  async custom(threadId: string, name: string, payload: Record<string, unknown>, options: WriteOptions = {}): Promise<Custom> {
+    return (await this.event(threadId, { kind: 'custom', name, payload }, options.clientId)) as Custom
   }
 
   async working(threadId: string, label?: string): Promise<void> {
@@ -7548,6 +7744,7 @@ The option types (`ConnectOptions`, `SendOptions`, …) stay unexported: every p
 Notes for the implementer:
 - `establish()` is public only because `connect` calls it; it is not documented and not exported from `index.ts` beyond the class.
 - The fake socket assigns `onopen`/`onmessage`/`onclose`/`onerror` as properties, which is exactly what the client uses; do not switch the client to `addEventListener` without switching the fake.
+- `clientId` goes to `event()` as given, or `newId()` makes one; the fake's store keys on `thread_id:client_id` like the server's dedup, so "stores a caller-supplied clientId once…" sees the first stored frame come back for the repeat. A stream keeps `client_id = stream.id` and takes no `clientId`, hence `StreamOptions`.
 - In "stores a write whose ack was lost exactly once", the fake closes the socket instead of answering; the outbox retries with the same `client_id` after the reconnect and the fake's store answers with the stored event.
 
 - [ ] **Step 4: Run the gate**
@@ -8402,7 +8599,7 @@ async def main() -> None:
 asyncio.run(main())
 ```
 
-Needs `RFNRY_EXAMPLES_POSTGRES_URL` (a scratch database); the README says so.
+Needs `RFNRY_EXAMPLES_POSTGRES_URL`, which `../.env.examples` sets to the `rfnry-thread-pg` container (`postgresql://thread:thread@127.0.0.1:55436/thread`); the README says so.
 
 - [ ] **Step 8: `typescript_client/`**
 
@@ -8518,8 +8715,8 @@ cd examples/person_and_assistant
 uv run --env-file ../../../.env.examples main.py
 ```
 
-`two_replicas` needs `RFNRY_EXAMPLES_POSTGRES_URL`, a scratch database. `uv` builds each folder's
-environment on first run; the per-folder `uv.lock` files are ignored by git. Lint an example with
+`two_replicas` also needs `RFNRY_EXAMPLES_POSTGRES_URL`, a Postgres database, in the same file.
+`uv` builds each folder's environment on first run; the per-folder `uv.lock` files are ignored by git. Lint an example with
 its own ruff: `uv run ruff format . && uv run ruff check .`.
 ```
 
@@ -8718,7 +8915,7 @@ Claude-Session: https://claude.ai/code/session_01GevsYJaAyM8ARLvEnXsoAB"
 
 - [ ] **Step 1: Full verification**
 
-Run, from `packages/python`: `uv run poe format && uv run poe check && uv run poe typecheck && uv run poe test`, then `RFNRY_TEST_POSTGRES_URL=… uv run poe test:integration` (no skips), then `uv run poe test:e2e`.
+Run, from `packages/python`: `uv run poe format && uv run poe check && uv run poe typecheck && uv run poe test`, then `RFNRY_TEST_POSTGRES_URL=postgresql://thread:thread@127.0.0.1:55436/thread uv run poe test:integration` (no skips), then `uv run poe test:e2e`.
 Run, from `packages/typescript`: `npm run check && npm run typecheck && npm test && npm run build`.
 Run: `git grep -nE 'anthropic|openai|google|gemini|claude' -- packages` — expected: nothing (vendor-neutral core; examples may name vendors).
 Run: `git grep -n '"""' -- packages/python/src` and `git grep -nE '^\s*#' -- packages/python/src` — expected: nothing (no docstrings, no comments).
