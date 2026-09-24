@@ -767,7 +767,7 @@ def test_joined_round_trips() -> None:
 `packages/python/tests/unit/test_resolve.py`:
 
 ```python
-from rfnry_thread.models import Edit, Retract, Step, Text
+from rfnry_thread.models import Edit, Message, Retract, Step, Text
 from rfnry_thread.resolve import resolve
 
 from .factories import ANA, AT, HELPER, message
@@ -784,7 +784,8 @@ def retract(seq: int, target: str) -> Retract:
 
 def test_the_latest_edit_wins_and_edits_leave_the_view() -> None:
     view = resolve([message(1, "hello"), edit(2, "e1", "hullo"), edit(3, "e1", "hello!")])
-    assert [(e.id, e.content) for e in view] == [("e1", [Text(text="hello!")])]
+    assert len(view) == 1 and isinstance(view[0], Message)
+    assert (view[0].id, view[0].content) == ("e1", [Text(text="hello!")])
 
 
 def test_a_retracted_event_and_the_retraction_leave_the_view() -> None:
@@ -796,7 +797,7 @@ def test_a_retracted_event_and_the_retraction_leave_the_view() -> None:
 def test_the_view_is_in_seq_order_whatever_the_input_order() -> None:
     view = resolve([message(3, "c"), message(1, "a"), edit(4, "e1", "A"), message(2, "b")])
     assert [e.seq for e in view] == [1, 2, 3]
-    assert view[0].content == [Text(text="A")]
+    assert isinstance(view[0], Message) and view[0].content == [Text(text="A")]
 ```
 
 - [ ] **Step 2: Run them to verify they fail**
