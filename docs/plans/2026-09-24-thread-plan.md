@@ -238,8 +238,8 @@ def test_every_child_is_a_thread_exception_named_error(cls: type[ThreadException
 
 
 def test_the_names_do_not_shadow_builtins() -> None:
-    assert ForbiddenError is not PermissionError
-    assert TransportError is not ConnectionError
+    assert not issubclass(ForbiddenError, PermissionError)
+    assert not issubclass(TransportError, ConnectionError)
 
 
 @pytest.mark.parametrize("cls", [ThreadException, *FAMILY])
@@ -8745,7 +8745,7 @@ Expected: no output.
 
 Run, from each folder: `uv run ruff format . && uv run ruff check .`, then `uv run --env-file ../../../.env.examples main.py` (the terminal example: type two lines, then an empty line). Expected: each prints what its README row says; `two_replicas` with `RFNRY_EXAMPLES_POSTGRES_URL` set.
 
-Run: `git grep -nE 'sk-ant-|AIza' -- examples` — expected: nothing.
+Run the key-prefix `git grep` from the executor brief over the whole repository — expected: nothing.
 
 - [ ] **Step 11: Commit**
 

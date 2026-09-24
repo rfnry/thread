@@ -1,0 +1,68 @@
+[project]
+name = "rfnry-thread"
+version = "0.1.0"
+description = "Realtime conversation where people and AI assistants are equal participants"
+readme = "README.md"
+requires-python = ">=3.12"
+authors = [{name = "rfnry", email = "contact@rfnry.dev"}]
+dependencies = [
+    "pydantic>=2.13.4",
+    "websockets>=15.0",
+]
+
+[project.optional-dependencies]
+postgres = ["asyncpg>=0.31.0,<1.0"]
+dev = [
+    "pytest>=9.1.1",
+    "pytest-asyncio>=1.4.0",
+    "ruff>=0.16.4",
+    "mypy>=2.3.1",
+    "poethepoet>=0.48.0",
+    "asyncpg>=0.31.0,<1.0",
+]
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/rfnry_thread"]
+
+[tool.pytest.ini_options]
+asyncio_mode = "auto"
+testpaths = ["tests"]
+pythonpath = ["src", "tests"]
+markers = [
+    "postgres: needs a real Postgres (set RFNRY_TEST_POSTGRES_URL)",
+    "live: runs the TypeScript client against a live server (needs node and npm)",
+]
+addopts = "-m 'not postgres and not live'"
+
+[tool.ruff]
+line-length = 100
+target-version = "py312"
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "W", "B", "UP", "SIM"]
+ignore = ["E501"]
+
+[tool.ruff.lint.isort]
+combine-as-imports = true
+
+[tool.poe.tasks]
+format = { cmd = "ruff format src tests" }
+check = { cmd = "ruff check src tests" }
+"check:fix" = { cmd = "ruff check --fix src tests" }
+typecheck = { cmd = "mypy" }
+test = { cmd = "pytest -q" }
+"test:integration" = { cmd = "pytest -q -m postgres" }
+"test:e2e" = { cmd = "pytest -q -m live" }
+fixtures = { cmd = "pytest -q tests/unit/test_golden.py", env = { RFNRY_WRITE_FIXTURES = "1" } }
+
+[tool.mypy]
+strict = true
+files = ["src/rfnry_thread", "tests"]
+
+[[tool.mypy.overrides]]
+module = "asyncpg.*"
+ignore_missing_imports = true
