@@ -1,3 +1,4 @@
+export { Client, connect, Stream } from './client.js'
 export {
   ConfigurationError,
   ForbiddenError,
