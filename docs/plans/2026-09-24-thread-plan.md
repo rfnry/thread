@@ -2050,6 +2050,7 @@ from rfnry_thread.models import (
     Idle,
     Left,
     Present,
+    Signal,
     StreamDelta,
     StreamEnd,
     StreamStart,
@@ -2079,11 +2080,11 @@ def test_a_snapshot_is_presence_then_work_then_streams_with_their_text() -> None
 
 def test_idle_left_and_stream_end_clear_what_they_end() -> None:
     cache = state([0.0])
-    for signal in [Present(thread_id="t1", sender=ANA), Working(thread_id="t1", sender=HELPER),
-                   StreamStart(thread_id="t1", sender=HELPER, stream_id="s1")]:
-        cache.apply("acme", signal, "me")
-    for signal in [Left(thread_id="t1", sender=ANA), Idle(thread_id="t1", sender=HELPER),
-                   StreamEnd(thread_id="t1", sender=HELPER, stream_id="s1")]:
+    opened: list[Signal] = [Present(thread_id="t1", sender=ANA), Working(thread_id="t1", sender=HELPER),
+                            StreamStart(thread_id="t1", sender=HELPER, stream_id="s1")]
+    closed: list[Signal] = [Left(thread_id="t1", sender=ANA), Idle(thread_id="t1", sender=HELPER),
+                            StreamEnd(thread_id="t1", sender=HELPER, stream_id="s1")]
+    for signal in [*opened, *closed]:
         cache.apply("acme", signal, "me")
     assert cache.snapshot("acme", "t1") == []
     assert cache.own() == {}
