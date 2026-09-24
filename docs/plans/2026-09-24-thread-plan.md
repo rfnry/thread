@@ -1950,7 +1950,7 @@ class Outbound:
         self._deltas: dict[tuple[str, str], Push] = {}
         self._ready = asyncio.Event()
         self._progress = clock()
-        self._stalled: asyncio.Task[None] | None = None
+        self._stalled: asyncio.Future[None] | None = None
         self.closed = False
         self._writer = asyncio.create_task(self._run())
 
@@ -1972,7 +1972,7 @@ class Outbound:
         self._ready.set()
         if len(self._frames) > self._bound and self._clock() - self._progress > self._stall:
             self.closed = True
-            self._stalled = asyncio.create_task(self._on_stall())
+            self._stalled = asyncio.ensure_future(self._on_stall())
 
     async def _run(self) -> None:
         try:
