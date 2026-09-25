@@ -1,4 +1,4 @@
-# Press 2 — die change procedure (rev B)
+# Press 2 — die change procedure, rev B (issued 2026-05-12, supersedes rev A)
 
 1. Bring the ram to the bottom of its stroke and set the ram safety block.
 2. Lock out at D-14 and open the dump valve.
