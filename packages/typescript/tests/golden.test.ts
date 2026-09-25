@@ -4,7 +4,7 @@ import { describe, expect, it } from 'vitest'
 import { decode, encode } from '../src/protocol.js'
 import { EVENT_KINDS, SIGNAL_KINDS } from '../src/types.js'
 
-const FIXTURES = join(import.meta.dirname, '../../../fixtures/protocol')
+const FIXTURES = join(import.meta.dirname, '../../../tests/fixtures/protocol')
 const files = readdirSync(FIXTURES).filter((name) => name.endsWith('.json'))
 
 describe('golden fixtures', () => {
