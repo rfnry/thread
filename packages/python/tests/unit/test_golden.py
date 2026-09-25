@@ -49,7 +49,7 @@ from rfnry_thread.protocol import (
 
 from .factories import ANA, AT, BRUNO, HELPER
 
-FIXTURES = Path(__file__).parents[4] / "tests" / "fixtures" / "protocol"
+FIXTURES = Path(__file__).parents[1] / "fixtures" / "protocol"
 
 
 def golden() -> dict[str, Frame]:

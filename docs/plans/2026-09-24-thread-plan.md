@@ -12,7 +12,7 @@
 
 ## Global Constraints
 
-- Layout: `packages/python` (package `rfnry-thread`, import `rfnry_thread`) and `packages/typescript` (`@rfnry/thread`); shared golden fixtures in `tests/fixtures/protocol/` at the repository root; examples in `examples/<name>/`.
+- Layout: `packages/python` (package `rfnry-thread`, import `rfnry_thread`) and `packages/typescript` (`@rfnry/thread`); shared golden fixtures in `packages/python/tests/fixtures/protocol/`, beside the Python tests that write them; examples in `examples/<name>/`.
 - Python: `requires-python = ">=3.12"`; dependencies exactly `pydantic>=2.13.4`, `websockets>=15.0`; extra `postgres = ["asyncpg>=0.31.0,<1.0"]`. The library imports no web framework, no model SDK, and never imports asyncpg (the pool is passed in).
 - ruff line-length 100, rules `E F I W B UP SIM`, `ignore = ["E501"]`; mypy `strict = true`; pytest `asyncio_mode = "auto"`, markers `postgres` and `live`, `addopts = "-m 'not postgres and not live'"`.
 - Gate for every Python commit, from `packages/python`: `uv run poe format && uv run poe check && uv run poe typecheck && uv run poe test`. Postgres tier: `RFNRY_TEST_POSTGRES_URL=postgresql://thread:thread@127.0.0.1:55436/thread uv run poe test:integration`, no skips before the Postgres task is committed. That database is the `rfnry-thread-pg` container (restart policy set, dedicated to this repo; the tests truncate it freely).
@@ -51,7 +51,6 @@
 
 ```
 .gitignore
-tests/fixtures/protocol/*.json                golden frames, written by Python, read by both suites
 packages/python/
   pyproject.toml  README.md
   src/rfnry_thread/
@@ -76,6 +75,7 @@ packages/python/
   tests/
     unit/     conftest.py peer.py + one test file per task
     integration/  conftest.py test_storage.py test_replicas.py test_tenancy.py
+    fixtures/protocol/*.json  golden frames, written by Python, read by both suites
     e2e/      conftest.py test_typescript.py
 packages/typescript/
   package.json tsconfig.json tsconfig.build.json biome.json vitest.config.ts README.md
@@ -1018,7 +1018,7 @@ Frames written fresh (six types instead of the old connection.open request); fix
 
 **Files:**
 - Create: `packages/python/src/rfnry_thread/protocol.py`
-- Create: `tests/fixtures/protocol/*.json` (written by the test in write mode)
+- Create: `packages/python/tests/fixtures/protocol/*.json` (written by the test in write mode)
 - Test: `packages/python/tests/unit/test_protocol.py`, `packages/python/tests/unit/test_golden.py`
 
 **Interfaces:**
@@ -1117,7 +1117,7 @@ from rfnry_thread.protocol import ErrorFrame, Failure, Frame, Hello, Notify, Pus
 
 from .factories import ANA, AT, BRUNO, HELPER
 
-FIXTURES = Path(__file__).parents[4] / "tests" / "fixtures" / "protocol"
+FIXTURES = Path(__file__).parents[1] / "fixtures" / "protocol"
 
 
 def golden() -> dict[str, Frame]:
@@ -1283,8 +1283,8 @@ def failure(request_id: str, error: ThreadException) -> ErrorFrame:
 
 - [ ] **Step 4: Write the fixtures and run the gate**
 
-Run: `cd packages/python && uv run poe fixtures && git status --short ../../tests/fixtures`
-Expected: 27 new files under `tests/fixtures/protocol/` (8 named frames, 9 event pushes, 10 signal pushes). Open `push-event-message.json` and check `"data": "iVBORw=="` — standard base64.
+Run: `cd packages/python && uv run poe fixtures && git status --short tests/fixtures`
+Expected: 27 new files under `packages/python/tests/fixtures/protocol/` (8 named frames, 9 event pushes, 10 signal pushes). Open `push-event-message.json` and check `"data": "iVBORw=="` — standard base64.
 
 Run: `uv run poe format && uv run poe check && uv run poe typecheck && uv run poe test`
 Expected: PASS; `test_every_fixture_round_trips` runs 27 cases.
@@ -1292,7 +1292,7 @@ Expected: PASS; `test_every_fixture_round_trips` runs 27 cases.
 - [ ] **Step 5: Commit**
 
 ```bash
-git add tests/fixtures packages/python
+git add packages/python
 git commit -m "feat: protocol version 1 — six frame types, golden fixtures shared by both clients
 
 Claude-Session: https://claude.ai/code/session_01GevsYJaAyM8ARLvEnXsoAB"
@@ -6286,7 +6286,7 @@ Fixture discipline adapted from `../rfnry-thread/packages/client-react/tests/pro
 - Test: `packages/typescript/tests/golden.test.ts`, `packages/typescript/tests/resolve.test.ts`, `packages/typescript/tests/errors.test.ts`
 
 **Interfaces:**
-- Consumes: `tests/fixtures/protocol/*.json` (Task 4).
+- Consumes: `packages/python/tests/fixtures/protocol/*.json` (Task 4).
 - Produces (TypeScript): error classes `ThreadException` (`code = 'internal'`), `NotFoundError`, `InputError`, `ConfigurationError`, `ForbiddenError`, `StorageError`, `TransportError` and `raised(code, message)`; wire types `Identity`, `Text`, `Image`, `Audio`, `Document`, `Part`, `Content`, `Thread`, `Member`, `Message`, `Step`, `Edit`, `Retract`, `Read`, `MemberAdded`, `MemberRemoved`, `ThreadUpdated`, `Custom`, `Event`, `Working`, `Idle`, `StreamStart`, `StreamDelta`, `StreamEnd`, `Cancel`, `Present`, `Left`, `Invited`, `ThreadDeleted`, `Signal`, `Joined`, `Item`; constants `EVENT_KINDS`, `SIGNAL_KINDS`; `PROTOCOL = 1`, frame types, `encode(frame)`, `decode(text)`; `resolve(events: Event[]): Event[]`.
 
 - [ ] **Step 1: Write the toolchain files**
@@ -6452,7 +6452,7 @@ import { describe, expect, it } from 'vitest'
 import { decode, encode } from '../src/protocol.js'
 import { EVENT_KINDS, SIGNAL_KINDS } from '../src/types.js'
 
-const FIXTURES = join(import.meta.dirname, '../../../tests/fixtures/protocol')
+const FIXTURES = join(import.meta.dirname, '../../python/tests/fixtures/protocol')
 const files = readdirSync(FIXTURES).filter((name) => name.endsWith('.json'))
 
 describe('golden fixtures', () => {
