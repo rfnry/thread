@@ -62,31 +62,15 @@ class FloorAssistant:
             )
             return
         corpus = f"{self.factory}:{machine.choice}"
-        shared = [part for part in message.content if isinstance(part, Document)]
-        for document in shared:
-            ingested = await self.memory.ingest(
-                corpus, name=document.name, text=document.data.decode()
-            )
-            await self.client.step(
-                thread,
-                name="ingest",
-                input={"corpus": corpus, "name": document.name},
-                output=[Text(text=f"{ingested.source.chunks} chunks")],
-                in_reply_to=message.id,
-            )
-        if shared:
-            names = ", ".join(d.name for d in shared)
-            await self.client.send(
-                thread, f"Filed {names} with the {machine.choice} manuals.", in_reply_to=message.id
-            )
-            return
         await self.client.working(thread, label=f"Reading the {machine.choice} manuals")
         run = await self.engine.run(
             "machinist",
             scope=self.factory,
-            input=question,
+            input=message.content,
             context=f"The machine is {machine.choice} at the {self.factory} factory.",
-            tools=MemoryTools(self.memory, corpus_id=corpus).only("search", "read_source"),
+            tools=MemoryTools(self.memory, corpus_id=corpus).only(
+                "search", "read_source", "ingest"
+            ),
         )
         for step in run.steps:
             await self.client.step(
@@ -114,7 +98,7 @@ async def transcript(client, thread_id):
             for step in events:
                 if isinstance(step, Step) and step.in_reply_to == event.id:
                     shown = next(iter(step.input.values()), "")
-                    detail = text(step.output) if step.name in ("pick_machine", "ingest") else ""
+                    detail = text(step.output) if step.name == "pick_machine" else ""
                     print(f"    · {step.name} {shown} {detail}".rstrip())
             for reply in events:
                 if isinstance(reply, Message) and reply.in_reply_to == event.id:
