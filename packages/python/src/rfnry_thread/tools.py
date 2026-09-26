@@ -24,7 +24,9 @@ Dispatcher = Callable[[dict[str, Any]], Awaitable[Result]]
 class ToolsLike(Protocol):
     def definitions(self) -> list[dict[str, Any]]: ...
 
-    async def dispatch(self, name: str, args: dict[str, Any]) -> str | dict[str, Any] | list[Any]: ...
+    async def dispatch(
+        self, name: str, args: dict[str, Any]
+    ) -> str | dict[str, Any] | list[Any]: ...
 
 
 @dataclass(frozen=True)
@@ -52,7 +54,9 @@ class Tool:
             try:
                 args = self.args.model_validate(args).model_dump(exclude_unset=True)
             except ValidationError as exc:
-                raise InputError(f"tools: invalid arguments for {self.name}: {exc.errors(include_url=False)}") from exc
+                raise InputError(
+                    f"tools: invalid arguments for {self.name}: {exc.errors(include_url=False)}"
+                ) from exc
         return await self.body(args)
 
 

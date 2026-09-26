@@ -42,9 +42,6 @@ addopts = "-m 'not postgres and not live'"
 line-length = 100
 target-version = "py312"
 
-[tool.ruff.format]
-exclude = ["src/rfnry_thread/models.py", "src/rfnry_thread/tools.py"]
-
 [tool.ruff.lint]
 select = ["E", "F", "I", "W", "B", "UP", "SIM"]
 ignore = ["E501"]
