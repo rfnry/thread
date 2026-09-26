@@ -14,6 +14,7 @@ and hands `serve` who it is. Your framework and your authentication are yours.
 | `person_and_assistant` | you in the terminal over a WebSocket, an engine agent in the server's process answering with a stream |
 | `two_assistants` | two engine agents on two vendors debating in one thread; when to stop is their code |
 | `engine_agent_in_a_thread` | `ThreadTools` mounted on an engine run; the run's tool calls mirrored as steps and a working label |
+| `approve_in_a_thread` | an engine agent with a workspace whose shell commands wait for the user's answer in the thread through `approve=`: the request is a message, the user replies allow, deny or always, `Write` and `Edit` pass, and each step records whether it was approved |
 | `steering` | a person steers an engine assistant mid-run: a follow-up lands through the run's `inbox` at the next step and the plan adapts; "hold on, let's pause" is just another message the model wraps up on; a `cancel` signal calls `stop.now()` and the finished steps are kept; editing an earlier message rewinds the conversation to it, and the abandoned run is reviewed in the refinery |
 | `two_replicas` | two servers on one Postgres, a person on each; events and signals cross through `LISTEN/NOTIFY` |
 | `typescript_client` | `@rfnry/thread` in Node against a Python server with an echo assistant; the token rides in the subprotocol list, as a browser's would |
