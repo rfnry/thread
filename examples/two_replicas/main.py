@@ -5,6 +5,8 @@ import asyncpg
 from rfnry_thread import Client, Identity, Message, PostgresStorage, Server, Working
 from websockets.asyncio.server import serve
 
+DSN = os.environ.get("THREAD_POSTGRES_URL", "postgresql://thread:thread@127.0.0.1:55436/thread")
+
 PEOPLE = {
     "ana": Identity(role="user", id="ana", name="Ana"),
     "bruno": Identity(role="user", id="bruno", name="Bruno"),
@@ -46,8 +48,7 @@ async def replica(pool, port):
 
 
 async def main() -> None:
-    url = os.environ["RFNRY_EXAMPLES_POSTGRES_URL"]
-    one, two = await asyncpg.create_pool(url), await asyncpg.create_pool(url)
+    one, two = await asyncpg.create_pool(DSN), await asyncpg.create_pool(DSN)
     (first, first_socket), (second, second_socket) = (
         await replica(one, 8771),
         await replica(two, 8772),

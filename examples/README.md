@@ -34,7 +34,7 @@ cd examples/person_and_assistant
 uv run --env-file ../../../.env.examples main.py
 ```
 
-`two_replicas` also needs `RFNRY_EXAMPLES_POSTGRES_URL`, a Postgres database, in the same file.
+`two_replicas` reads `THREAD_POSTGRES_URL`, defaulting to the development container on port 55436.
 `typescript_client` needs the package built first (`npm run build` in `packages/typescript`), then
 `npm install`, `uv run serve.py` in one terminal and `node main.mjs` in another.
 `uv` builds each folder's environment on first run; the per-folder `uv.lock` files are ignored by
