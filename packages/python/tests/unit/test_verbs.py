@@ -238,6 +238,21 @@ async def test_authorize_decides_each_of_the_five_actions(storage: InMemoryStora
     assert [action for _, action in asked] == ["create", "manage", "read", "send", "delete"]
 
 
+async def test_listing_leaves_out_the_threads_authorize_refuses_to_read(
+    storage: InMemoryStorage,
+) -> None:
+    async def authorize(identity: Identity, action: str, thread: Thread) -> bool:
+        return not (action == "read" and thread.metadata.get("archived"))
+
+    server = Server(storage, authorize=authorize)
+    ana = await room(server)
+    await ana.call("thread.create", thread_id="secret", metadata={"archived": True})
+    with pytest.raises(ForbiddenError, match="^server: 'ana' may not read in thread 'secret'$"):
+        await ana.call("thread.get", thread_id="secret")
+    assert [t["id"] for t in (await ana.call("thread.list"))["threads"]] == ["t1"]
+    assert (await ana.call("thread.list", limit=1))["threads"] == []
+
+
 async def test_joined_members_receive_events_in_order_and_a_join_since_replays(
     server: Server,
 ) -> None:
