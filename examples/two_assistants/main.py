@@ -32,11 +32,11 @@ async def speaker(server, engine, name, opens):
 
 async def main() -> None:
     server = Server(InMemoryStorage())
-    claude = Engine("agents", generation=AnthropicProvider())
-    gemini = Engine("agents", generation=GoogleProvider())
-    skeptic = asyncio.create_task(speaker(server, gemini, "skeptic", opens=False))
+    optimist_engine = Engine("agents", generation=AnthropicProvider())
+    skeptic_engine = Engine("agents", generation=GoogleProvider())
+    skeptic = asyncio.create_task(speaker(server, skeptic_engine, "skeptic", opens=False))
     await asyncio.sleep(0.1)
-    await speaker(server, claude, "optimist", opens=True)
+    await speaker(server, optimist_engine, "optimist", opens=True)
     await skeptic
 
 
