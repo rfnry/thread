@@ -248,19 +248,43 @@ async def test_authorize_decides_each_of_the_five_actions(storage: InMemoryStora
     assert [action for _, action in asked] == ["create", "manage", "read", "send", "delete"]
 
 
-async def test_listing_leaves_out_the_threads_authorize_refuses_to_read(
+async def test_listing_skips_what_authorize_refuses_and_reads_on_to_fill_the_page(
     storage: InMemoryStorage,
 ) -> None:
     async def authorize(identity: Identity, action: str, thread: Thread) -> bool:
         return not (action == "read" and thread.metadata.get("archived"))
 
     server = Server(storage, authorize=authorize)
-    ana = await room(server)
-    await ana.call("thread.create", thread_id="secret", metadata={"archived": True})
-    with pytest.raises(ForbiddenError, match="^server: 'ana' may not read in thread 'secret'$"):
-        await ana.call("thread.get", thread_id="secret")
-    assert [t["id"] for t in (await ana.call("thread.list"))["threads"]] == ["t1"]
-    assert (await ana.call("thread.list", limit=1))["threads"] == []
+    ana = await Peer.open(server, ANA)
+    for thread_id in ("a1", "a2", "a3"):
+        await ana.call("thread.create", thread_id=thread_id)
+    for thread_id in ("r1", "r2", "r3", "r4"):
+        await ana.call("thread.create", thread_id=thread_id, metadata={"archived": True})
+    with pytest.raises(ForbiddenError, match="^server: 'ana' may not read in thread 'r4'$"):
+        await ana.call("thread.get", thread_id="r4")
+    reads: list[str | None] = []
+    original = storage.list_threads
+
+    async def counted(
+        scope: str,
+        member_id: str | None,
+        before: str | None = None,
+        limit: int = 50,
+        metadata: dict[str, Any] | None = None,
+    ) -> list[Thread]:
+        reads.append(before)
+        return await original(scope, member_id, before, limit, metadata)
+
+    storage.list_threads = counted  # type: ignore[method-assign]
+
+    async def page(before: str | None) -> list[str]:
+        reads.clear()
+        listed = (await ana.call("thread.list", before=before, limit=2))["threads"]
+        return [t["id"] for t in listed]
+
+    assert await page(None) == ["a3", "a2"] and reads == [None, "r3", "r1"]
+    assert await page("a2") == ["a1"] and reads == ["a2"]
+    assert await page("a1") == [] and reads == ["a1"]
 
 
 async def test_joined_members_receive_events_in_order_and_a_join_since_replays(

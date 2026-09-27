@@ -140,13 +140,22 @@ class Verbs:
         limit: int,
         metadata: dict[str, Any] | None = None,
     ) -> list[Thread]:
-        member_id = None if actor.role == "system" else actor.id
-        threads = await self._storage.list_threads(
-            scope, member_id, before, _limit(limit), metadata
-        )
-        if actor.role == "system" or self._authorize is None:
-            return threads
-        return [thread for thread in threads if await self._authorize(actor, "read", thread)]
+        limit = _limit(limit)
+        if actor.role == "system":
+            return await self._storage.list_threads(scope, None, before, limit, metadata)
+        if self._authorize is None:
+            return await self._storage.list_threads(scope, actor.id, before, limit, metadata)
+        readable: list[Thread] = []
+        while True:
+            page = await self._storage.list_threads(scope, actor.id, before, limit, metadata)
+            for thread in page:
+                if await self._authorize(actor, "read", thread):
+                    readable.append(thread)
+                    if len(readable) == limit:
+                        return readable
+            if len(page) < limit:
+                return readable
+            before = page[-1].id
 
     async def update_thread(
         self, actor: Identity, scope: str, thread_id: str, metadata: dict[str, Any]
