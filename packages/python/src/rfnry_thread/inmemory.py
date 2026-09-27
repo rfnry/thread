@@ -150,6 +150,11 @@ class InMemoryStorage:
     async def get_event(self, scope: str, thread_id: str, event_id: str) -> Event | None:
         return next((e for e in self._events.get((scope, thread_id), []) if e.id == event_id), None)
 
+    async def find_event(
+        self, scope: str, thread_id: str, author_id: str, client_id: str
+    ) -> Event | None:
+        return self._keys.get((scope, thread_id, author_id, client_id))
+
     async def delete_scope(self, scope: str) -> int:
         keys = [key for key in self._threads if key[0] == scope]
         removed = 0

@@ -184,6 +184,16 @@ async def test_a_message_keeps_its_metadata(storage: Storage) -> None:
     assert isinstance(fetched, Message) and fetched.metadata == metadata
 
 
+async def test_an_event_is_found_by_its_author_and_client_id(storage: Storage) -> None:
+    await room(storage, "t1")
+    await room(storage, "t1", "tenant-b")
+    sent, _ = await storage.append_event("acme", say("t1", "c1"))
+    assert await storage.find_event("acme", "t1", "ana", "c1") == sent
+    assert await storage.find_event("acme", "t1", "bruno", "c1") is None
+    assert await storage.find_event("acme", "t1", "ana", "c2") is None
+    assert await storage.find_event("tenant-b", "t1", "ana", "c1") is None
+
+
 async def test_concurrent_duplicates_store_one_event_and_seq_stays_gapless(
     storage: Storage,
 ) -> None:

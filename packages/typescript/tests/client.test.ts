@@ -1,6 +1,6 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { type Client, connect } from '../src/client.js'
-import { ForbiddenError, TransportError } from '../src/errors.js'
+import { ForbiddenError, InputError, TransportError } from '../src/errors.js'
 import { timing } from '../src/timing.js'
 import type { Item } from '../src/types.js'
 import { FakeServer, helper, message } from './fakes.js'
@@ -174,6 +174,22 @@ describe('client', () => {
     const abandoned = client.stream('t1')
     abandoned.write('never mind')
     await abandoned.abort()
+    expect(server.sent('event.send')).toHaveLength(1)
+  })
+
+  it('ends the stream when the server refuses the message it finishes with', async () => {
+    const { client } = await joined()
+    server.handlers.set('event.send', () => {
+      throw Object.assign(new Error('server: refused'), { code: 'input' })
+    })
+    const reply = client.stream('t1')
+    reply.write('4111 1111 1111 1111')
+    await expect(reply.finish()).rejects.toBeInstanceOf(InputError)
+    const kinds = server
+      .sent('signal.send')
+      .map((frame) => frame.payload.kind)
+      .filter((kind) => kind !== 'stream.delta')
+    expect(kinds).toEqual(['stream.start', 'stream.end'])
     expect(server.sent('event.send')).toHaveLength(1)
   })
 

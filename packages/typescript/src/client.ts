@@ -144,14 +144,11 @@ export class Stream {
     if (this.ended) throw new InputError(`client: stream '${this.id}' has already ended`)
     this.ended = true
     await this.started.catch(() => undefined)
-    const message = await this.wire.message(
-      this.threadId,
-      content ?? this.text,
-      this.options,
-      this.id
-    )
-    await this.end()
-    return message
+    try {
+      return await this.wire.message(this.threadId, content ?? this.text, this.options, this.id)
+    } finally {
+      await this.end()
+    }
   }
 
   async abort(): Promise<void> {

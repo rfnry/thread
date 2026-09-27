@@ -148,16 +148,17 @@ class Stream:
         if self._ended:
             raise InputError(f"client: stream {self.id!r} has already ended")
         self._ended = True
-        message = await self._client._message(
-            self._thread_id,
-            self.text if content is None else content,
-            self._in_reply_to,
-            self._triggered_by,
-            self.id,
-            self._metadata,
-        )
-        await self._end()
-        return message
+        try:
+            return await self._client._message(
+                self._thread_id,
+                self.text if content is None else content,
+                self._in_reply_to,
+                self._triggered_by,
+                self.id,
+                self._metadata,
+            )
+        finally:
+            await self._end()
 
     async def _end(self) -> None:
         with contextlib.suppress(ThreadException):

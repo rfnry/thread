@@ -9,7 +9,7 @@ from unit.factories import ANA, HELPER
 from unit.peer import Peer
 from until import until
 
-from rfnry_thread.models import Message, Text, Thread
+from rfnry_thread.models import Identity, Message, Part, Text, Thread
 from rfnry_thread.postgres import PostgresStorage
 from rfnry_thread.server import Server
 
@@ -90,6 +90,47 @@ async def test_a_message_reaches_the_other_replica_with_its_metadata(
     assert pushed["metadata"] == {"run_id": "r1", "reviewed": False}
     history = (await ana.call("thread.history", thread_id="t1", kinds=["message"]))["events"]
     assert [e["metadata"] for e in history] == [{"run_id": "r1", "reviewed": False}]
+
+
+async def test_a_second_replica_receives_only_the_redacted_form() -> None:
+    async def redact(author: Identity, thread: Thread, content: list[Part]) -> list[Part]:
+        return [
+            Text(text=p.text.replace("4111111111111111", "**** 1111"))
+            for p in content
+            if isinstance(p, Text)
+        ]
+
+    near_pool, far_pool = await postgres_pool(), await postgres_pool()
+    near = Server(await fresh(near_pool), redact=redact)
+    far = Server(PostgresStorage(far_pool))
+    await near.start()
+    await far.start()
+    try:
+        ana, helper = await room(near, far)
+        sent = await say(ana, "t1", "card 4111111111111111", client_id="c1")
+        await ana.call(
+            "event.send",
+            thread_id="t1",
+            kind="edit",
+            client_id="e1",
+            target=sent["id"],
+            content=[{"type": "text", "text": "card 4111111111111111, sorry"}],
+        )
+        pushed = [p for p in await helper.quiet(0.5) if p["kind"] in ("message", "edit")]
+        assert [p["content"][0]["text"] for p in pushed] == [
+            "card **** 1111",
+            "card **** 1111, sorry",
+        ]
+        history = (await helper.call("thread.history", thread_id="t1"))["events"]
+        assert "4111111111111111" not in str(history)
+        async with far_pool.acquire() as conn:
+            rows = await conn.fetch("SELECT body::text AS body FROM thread_events")
+        assert rows and all("4111111111111111" not in row["body"] for row in rows)
+    finally:
+        await near.stop()
+        await far.stop()
+        await near_pool.close()
+        await far_pool.close()
 
 
 async def test_signals_are_mirrored_through_notify(replicas: tuple[Server, Server]) -> None:

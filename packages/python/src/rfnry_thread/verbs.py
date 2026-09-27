@@ -6,9 +6,9 @@ from collections.abc import Awaitable, Callable, Sequence
 from datetime import UTC, datetime
 from typing import Any
 
-from pydantic import ValidationError
+from pydantic import TypeAdapter, ValidationError
 
-from rfnry_thread.errors import ForbiddenError, InputError, NotFoundError
+from rfnry_thread.errors import ConfigurationError, ForbiddenError, InputError, NotFoundError
 from rfnry_thread.hub import Hub, Session
 from rfnry_thread.models import (
     CLIENT_EVENTS,
@@ -23,6 +23,7 @@ from rfnry_thread.models import (
     Joined,
     Member,
     Message,
+    Part,
     Retract,
     Step,
     StreamDelta,
@@ -35,6 +36,8 @@ from rfnry_thread.models import (
 from rfnry_thread.storage import Storage
 
 Authorize = Callable[[Identity, str, Thread], Awaitable[bool]]
+Redact = Callable[[Identity, Thread, list[Part]], Awaitable[list[Part]]]
+PARTS: TypeAdapter[list[Part]] = TypeAdapter(list[Part])
 
 CUSTOM_LIMIT = 64 * 1024
 METADATA_LIMIT = 8 * 1024
@@ -54,12 +57,18 @@ def _limit(limit: int) -> int:
 
 class Verbs:
     def __init__(
-        self, storage: Storage, hub: Hub, authorize: Authorize | None, max_inline_bytes: int
+        self,
+        storage: Storage,
+        hub: Hub,
+        authorize: Authorize | None,
+        max_inline_bytes: int,
+        redact: Redact | None = None,
     ) -> None:
         self._storage = storage
         self._hub = hub
         self._authorize = authorize
         self._max_inline = max_inline_bytes
+        self._redact = redact
 
     async def _allow(self, actor: Identity, action: str, thread: Thread) -> None:
         if actor.role == "system" or self._authorize is None:
@@ -228,7 +237,7 @@ class Verbs:
             raise InputError("server: event.send needs a thread_id")
         if not payload.get("client_id"):
             raise InputError("server: event.send needs a client_id")
-        await self.thread(actor, scope, thread_id, "send")
+        thread = await self.thread(actor, scope, thread_id, "send")
         fields = {
             k: v for k, v in payload.items() if k not in ("id", "seq", "author", "created_at")
         }
@@ -241,23 +250,44 @@ class Verbs:
                 f"server: invalid {kind} event: {exc.errors(include_url=False)[0]['msg'].lower()}"
             ) from exc
         await self._check(scope, actor, event)
+        if self._redact is not None and isinstance(event, Message | Edit):
+            sent = await self._storage.find_event(scope, thread_id, actor.id, event.client_id)
+            if sent is not None:
+                return sent
+            event = await self._redacted(self._redact, actor, thread, event)
         stored, created = await self._storage.append_event(scope, event)
         if created:
             await self._hub.deliver(scope, stored)
         return stored
 
+    async def _redacted(
+        self, redact: Redact, actor: Identity, thread: Thread, event: Message | Edit
+    ) -> Message | Edit:
+        try:
+            content = PARTS.validate_python(await redact(actor, thread, list(event.content)))
+        except ValidationError as exc:
+            raise ConfigurationError(
+                f"server: redact must return a list of parts: {exc.errors(include_url=False)[0]['msg'].lower()}"
+            ) from exc
+        if not content:
+            raise InputError(f"server: nothing is left of the {event.kind} once redacted")
+        self._inline(content)
+        return event.model_copy(update={"content": content})
+
+    def _inline(self, content: list[Part]) -> None:
+        size = sum(
+            len(part.data)
+            for part in content
+            if not isinstance(part, Text) and part.data is not None
+        )
+        if size > self._max_inline:
+            raise InputError(
+                f"server: inline media is {size} bytes; the cap is {self._max_inline} — upload it and send a url"
+            )
+
     async def _check(self, scope: str, actor: Identity, event: Event) -> None:
         if isinstance(event, Message | Edit | Step):
-            content = event.output if isinstance(event, Step) else event.content
-            size = sum(
-                len(part.data)
-                for part in content
-                if not isinstance(part, Text) and part.data is not None
-            )
-            if size > self._max_inline:
-                raise InputError(
-                    f"server: inline media is {size} bytes; the cap is {self._max_inline} — upload it and send a url"
-                )
+            self._inline(event.output if isinstance(event, Step) else event.content)
         if isinstance(event, Custom) and len(json.dumps(event.payload).encode()) > CUSTOM_LIMIT:
             raise InputError(f"server: a custom payload is at most {CUSTOM_LIMIT} bytes")
         if isinstance(event, Message) and len(json.dumps(event.metadata).encode()) > METADATA_LIMIT:

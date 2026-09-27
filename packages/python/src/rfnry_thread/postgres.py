@@ -315,6 +315,19 @@ class PostgresStorage:
             )
         return None if body is None else _event(body)
 
+    async def find_event(
+        self, scope: str, thread_id: str, author_id: str, client_id: str
+    ) -> Event | None:
+        async with self._guard("find_event"), self._pool.acquire() as conn:
+            body = await conn.fetchval(
+                "SELECT body FROM thread_events WHERE scope = $1 AND thread_id = $2 AND author_id = $3 AND client_id = $4",
+                scope,
+                thread_id,
+                author_id,
+                client_id,
+            )
+        return None if body is None else _event(body)
+
     async def delete_scope(self, scope: str) -> int:
         async with self._guard("delete_scope"), self._pool.acquire() as conn, conn.transaction():
             removed = 0

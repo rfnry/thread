@@ -267,7 +267,8 @@ async with helper.stream(thread.id, in_reply_to=message.id) as reply:
 
 Leaving the block stores the text written as one message, with the stream's `metadata=`;
 `await reply.finish(content)` stores something else instead — the text and an image, say. An
-exception inside the block abandons the stream: `StreamEnd` arrives and nothing is stored. The finishing message always arrives before
+exception inside the block, or a finishing message the server refuses, abandons the stream:
+`StreamEnd` arrives and nothing is stored. The finishing message always arrives before
 `StreamEnd`, so a `StreamEnd` with no message before it means the stream was abandoned. Only text
 streams; media arrives in the message.
 
@@ -406,6 +407,26 @@ elevated = await server.list_threads("acme", metadata={"elevated": True, "locati
 await server.add_member("acme", elevated[0].id, Identity(role="user", id="bruno"))
 ```
 
+**Redacting.** What must never be stored — card numbers, health records — your function masks
+between receiving a message and storing it:
+
+```python
+async def redact(author, thread, content):
+    return [Text(text=mask(part.text)) if part.type == "text" else part for part in content]
+
+server = Server(storage, redact=redact)
+```
+
+It is called for every message and edit before it is stored, whoever writes it, and on the message
+a stream ends in. What it returns is what is stored, delivered and handed back to the sender; the
+original reaches no storage and no other connection. It is checked like any content — parts, the
+inline cap — and must leave at least one part. Raising refuses the write and nothing is stored: an
+`InputError` or `ForbiddenError` you raise reaches the sender as itself, anything else as the
+server's generic failure, logged as a warning, and the outbox retries neither. A repeated
+`client_id` gets the stored message back without another call. It never sees stream deltas —
+signals, shown live and never stored, so text that must never be shown is not streamed — nor a
+message's `metadata`, custom payloads, or a step's input and output, which are the writer's own.
+
 Securing the upgrade is yours, like the rest of authentication. A short checklist:
 
 - Serve over `wss://`, never `ws://`, outside your own machine.
@@ -530,7 +551,7 @@ assert await server.verify_absent("acme")
 
 Everything the package exports, by role.
 
-- **Serve:** `Server`, `Connection`.
+- **Serve:** `Server`, with your `authorize` and `redact`; `Connection`.
 - **Take part:** `Client`, `Stream`, `Joined`.
 - **Who and what:** `Identity`, `Thread`, `Member`; parts `Text`, `Image`, `Audio`, `Document`, `Part`, `Content`.
 - **The log:** `Message`, `Step`, `Edit`, `Retract`, `Read`, `MemberAdded`, `MemberRemoved`, `ThreadUpdated`, `Custom`, `Event`; `resolve`.
@@ -550,9 +571,10 @@ signal from a connection that has not joined the thread, and on a client, an upg
 HTTP 401 or 403 or a `headers` or `protocols` function that raised. `InputError` for a request the
 library refuses: an empty scope or id, an identity whose fields do not fit, a media part with both or neither of `data` and `url`, inline
 media over the cap, a custom payload over 64 KiB, message metadata over 8 KiB or not a JSON
-object, an edit of anything but a message, an unknown event or signal kind, a malformed frame. `ConfigurationError` for a server that cannot work: a limit
-that is not positive, a `system` identity given to `serve` or `server.connect`. `StorageError` for
-the database. `TransportError` for the socket: a write not acknowledged within its deadline, a client used after `close()`, a connection
+object, a message or edit that redaction leaves empty, an edit of anything but a message, an
+unknown event or signal kind, a malformed frame. `ConfigurationError` for a server that cannot
+work: a limit that is not positive, a `system` identity given to `serve` or `server.connect`, a
+`redact` that returns something other than parts. `StorageError` for the database. `TransportError` for the socket: a write not acknowledged within its deadline, a client used after `close()`, a connection
 that cannot be opened. On a client, an error the server raised is raised again with its class and
 message.
 

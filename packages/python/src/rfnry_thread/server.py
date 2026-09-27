@@ -29,7 +29,7 @@ from rfnry_thread.protocol import (
 )
 from rfnry_thread.state import REFRESH
 from rfnry_thread.storage import Stop, Storage
-from rfnry_thread.verbs import Authorize, Verbs
+from rfnry_thread.verbs import Authorize, Redact, Verbs
 
 log = logging.getLogger("rfnry_thread")
 
@@ -121,6 +121,7 @@ class Server:
         storage: Storage,
         *,
         authorize: Authorize | None = None,
+        redact: Redact | None = None,
         max_inline_bytes: int = 256 * 1024,
         replay_limit: int = 500,
     ) -> None:
@@ -130,7 +131,7 @@ class Server:
             raise ConfigurationError("server: replay_limit must be positive")
         self._storage = storage
         self._hub = Hub(storage, replay_limit)
-        self._verbs = Verbs(storage, self._hub, authorize, max_inline_bytes)
+        self._verbs = Verbs(storage, self._hub, authorize, max_inline_bytes, redact)
         self._tasks: set[asyncio.Task[None]] = set()
         self._stop: Stop | None = None
         self._refresher: asyncio.Task[None] | None = None
