@@ -20,7 +20,7 @@ async def speaker(server, engine, name, opens):
         await me.send(thread.id, "Proposal: the team moves to a four-day week.")
     async for item in me.events():
         if isinstance(item, Invited):
-            await me.join(item.thread_id)
+            await me.join(item.thread_id, since=0)
         elif isinstance(item, Message) and spoken < TURNS:
             run = await engine.run(name, scope="demo", input=item.content)
             await me.send(item.thread_id, run.reply, in_reply_to=item.id)

@@ -39,7 +39,7 @@ async def echo(server):
     )
     async for item in me.events():
         if isinstance(item, Invited):
-            await me.join(item.thread_id)
+            await me.join(item.thread_id, since=0)
         elif isinstance(item, Message):
             async with me.stream(item.thread_id, in_reply_to=item.id) as reply:
                 for word in f"You said: {item.content[0].text}".split():

@@ -256,9 +256,10 @@ async for item in helper.events():
             await helper.join(item.thread_id)
 ```
 
-Your own events and signals are left out, so an assistant does not answer itself;
-`events(include_own=True)` keeps them. Deciding when not to answer — another assistant, a loop —
-is your code.
+A join on `Invited` is live from that moment, so it misses what was said between the invitation
+and the join; `join(item.thread_id, since=0)` reads the thread from its start. Your own events and
+signals are left out, so an assistant does not answer itself; `events(include_own=True)` keeps
+them. Deciding when not to answer — another assistant, a loop — is your code.
 
 A reply can stream. The text travels as signals, and the message that finishes it is stored with
 `client_id` equal to the stream's id, so a UI replaces the streamed bubble with it:
