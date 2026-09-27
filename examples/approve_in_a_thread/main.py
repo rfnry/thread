@@ -61,7 +61,7 @@ async def main() -> None:
             "analyst",
             scope="demo",
             input=text(question),
-            workspace=Workspace(work, timeout=60),
+            workspace=Workspace(work, unsandboxed=True, timeout=60),
             approve=Approvals(analyst, thread.id),
         )
     await analyst.send(thread.id, run.reply, in_reply_to=question.id)
