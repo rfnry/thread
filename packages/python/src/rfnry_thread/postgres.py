@@ -27,6 +27,7 @@ _DDL = [
         PRIMARY KEY (scope, id))
     """,
     "CREATE INDEX IF NOT EXISTS ix_thread_threads_created ON thread_threads (scope, created_at DESC, id DESC)",
+    "CREATE INDEX IF NOT EXISTS ix_thread_threads_metadata ON thread_threads USING GIN (metadata)",
     """
     CREATE TABLE IF NOT EXISTS thread_members (
         scope TEXT NOT NULL, thread_id TEXT NOT NULL, identity_id TEXT NOT NULL,
@@ -120,19 +121,37 @@ class PostgresStorage:
         return None if row is None else _thread(row)
 
     async def list_threads(
-        self, scope: str, member_id: str, before: str | None = None, limit: int = 50
+        self,
+        scope: str,
+        member_id: str | None,
+        before: str | None = None,
+        limit: int = 50,
+        metadata: dict[str, Any] | None = None,
     ) -> list[Thread]:
+        join = ""
+        where = ["t.scope = $1"]
+        args: list[Any] = [scope]
+        if member_id is not None:
+            args.append(member_id)
+            join = (
+                "JOIN thread_members m ON m.scope = t.scope AND m.thread_id = t.id "
+                f"AND m.identity_id = ${len(args)} "
+            )
+        if metadata:
+            args.append(json.dumps(metadata))
+            where.append(f"t.metadata @> ${len(args)}::jsonb")
+        if before is not None:
+            args.append(before)
+            where.append(
+                "(t.created_at, t.id) < (SELECT a.created_at, a.id FROM thread_threads a "
+                f"WHERE a.scope = $1 AND a.id = ${len(args)})"
+            )
+        args.append(max(limit, 0))
         async with self._guard("list_threads"), self._pool.acquire() as conn:
             rows = await conn.fetch(
-                "SELECT t.scope, t.id, t.metadata, t.created_at FROM thread_threads t "
-                "JOIN thread_members m ON m.scope = t.scope AND m.thread_id = t.id AND m.identity_id = $2 "
-                "WHERE t.scope = $1 AND ($3::text IS NULL OR (t.created_at, t.id) < "
-                "(SELECT a.created_at, a.id FROM thread_threads a WHERE a.scope = $1 AND a.id = $3)) "
-                "ORDER BY t.created_at DESC, t.id DESC LIMIT $4",
-                scope,
-                member_id,
-                before,
-                max(limit, 0),
+                f"SELECT t.scope, t.id, t.metadata, t.created_at FROM thread_threads t {join}"
+                f"WHERE {' AND '.join(where)} ORDER BY t.created_at DESC, t.id DESC LIMIT ${len(args)}",
+                *args,
             )
         return [_thread(row) for row in rows]
 

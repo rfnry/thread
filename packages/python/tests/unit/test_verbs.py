@@ -291,3 +291,44 @@ async def test_the_server_verbs_act_as_the_system(server: Server) -> None:
     await server.delete_thread("acme", thread.id)
     with pytest.raises(NotFoundError):
         await bruno.call("thread.get", thread_id=thread.id)
+
+
+async def test_the_server_lists_every_thread_of_a_scope_by_metadata(server: Server) -> None:
+    catalog: list[tuple[str, dict[str, Any]]] = [
+        ("a", {"elevated": True, "location": "reno", "machine": {"id": "press-4", "line": 2}}),
+        ("b", {"elevated": "true", "location": "reno"}),
+        ("c", {"elevated": True, "location": "austin", "tags": ["leak", "urgent"]}),
+        ("d", {"elevated": False, "count": 1}),
+        ("e", {}),
+    ]
+    for thread_id, metadata in catalog:
+        await server.create_thread("acme", thread_id=thread_id, metadata=metadata)
+    await server.create_thread("globex", thread_id="g", metadata={"elevated": True})
+
+    async def listed(**query: Any) -> list[str]:
+        return [t.id for t in await server.list_threads("acme", **query)]
+
+    assert await listed() == ["e", "d", "c", "b", "a"]
+    assert await listed(metadata={}) == ["e", "d", "c", "b", "a"]
+    assert await listed(metadata={"elevated": True}) == ["c", "a"]
+    assert await listed(metadata={"elevated": "true"}) == ["b"]
+    assert await listed(metadata={"elevated": True, "location": "reno"}) == ["a"]
+    assert await listed(metadata={"machine": {"id": "press-4"}}) == ["a"]
+    assert await listed(metadata={"tags": ["urgent"]}) == ["c"]
+    assert await listed(metadata={"count": True}) == []
+    assert await listed(metadata={"elevated": True}, limit=1) == ["c"]
+    assert await listed(metadata={"elevated": True}, before="c") == ["a"]
+    assert [t.scope for t in await server.list_threads("globex")] == ["globex"]
+    with pytest.raises(InputError, match="^server: limit must be between 1 and 500$"):
+        await server.list_threads("acme", limit=0)
+    with pytest.raises(InputError, match="^server: a scope is required$"):
+        await server.list_threads("")
+
+
+async def test_a_members_own_list_is_unchanged_and_takes_no_metadata(server: Server) -> None:
+    await server.create_thread("acme", thread_id="elsewhere", metadata={"elevated": True})
+    ana = await room(server)
+    assert [t["id"] for t in (await ana.call("thread.list"))["threads"]] == ["t1"]
+    with pytest.raises(InputError, match="^server: invalid thread.list payload"):
+        await ana.call("thread.list", metadata={"elevated": True})
+    assert [t.id for t in await server.list_threads("acme")] == ["t1", "elsewhere"]

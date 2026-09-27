@@ -10,6 +10,8 @@ from rfnry_thread.errors import NotFoundError
 from rfnry_thread.models import SYSTEM, Event, Member, Message, Read, Text, Thread
 from rfnry_thread.storage import Storage
 
+from .conftest import fresh, postgres_pool
+
 
 def thread(thread_id: str, scope: str = "acme", minutes: int = 0) -> Thread:
     return Thread(
@@ -66,6 +68,55 @@ async def test_threads_are_listed_for_a_member_newest_first_in_pages(storage: St
     assert [t.id for t in await storage.list_threads("acme", "ana", limit=2)] == ["d", "b"]
     assert [t.id for t in await storage.list_threads("acme", "ana", before="b")] == ["a"]
     assert await storage.list_threads("acme", "bruno") == []
+
+
+async def test_threads_are_listed_by_metadata_for_anyone_or_for_a_member(
+    storage: Storage,
+) -> None:
+    catalog: list[tuple[str, dict[str, Any]]] = [
+        ("a", {"elevated": True, "location": "reno", "machine": {"id": "press-4", "line": 2}}),
+        ("b", {"elevated": "true", "location": "reno"}),
+        ("c", {"elevated": True, "location": "austin", "tags": ["leak", "urgent"]}),
+        ("d", {"elevated": False, "count": 1, "ratio": 1.0}),
+        ("e", {}),
+    ]
+    for minutes, (thread_id, metadata) in enumerate(catalog):
+        await storage.create_thread(
+            "acme",
+            Thread(
+                id=thread_id,
+                scope="acme",
+                metadata=metadata,
+                created_at=AT + timedelta(minutes=minutes),
+            ),
+        )
+    await storage.create_thread(
+        "globex", Thread(id="g", scope="globex", metadata={"elevated": True}, created_at=AT)
+    )
+    for thread_id in ("a", "b"):
+        await storage.add_member(
+            "acme", Member(thread_id=thread_id, identity=ANA, added_at=AT, added_by=SYSTEM)
+        )
+
+    async def listed(member_id: str | None = None, **query: Any) -> list[str]:
+        return [t.id for t in await storage.list_threads("acme", member_id, **query)]
+
+    assert await listed() == ["e", "d", "c", "b", "a"]
+    assert await listed(metadata={}) == ["e", "d", "c", "b", "a"]
+    assert await listed(metadata={"elevated": True}) == ["c", "a"]
+    assert await listed(metadata={"elevated": "true"}) == ["b"]
+    assert await listed(metadata={"location": "reno", "machine": {"line": 2}}) == ["a"]
+    assert await listed(metadata={"machine": {"id": "press-4", "line": 3}}) == []
+    assert await listed(metadata={"tags": ["urgent"]}) == ["c"]
+    assert await listed(metadata={"tags": "urgent"}) == []
+    assert await listed(metadata={"count": True}) == []
+    assert await listed(metadata={"count": 1.0, "ratio": 1}) == ["d"]
+    assert await listed(metadata={"elevated": True}, limit=1) == ["c"]
+    assert await listed(metadata={"elevated": True}, before="c") == ["a"]
+    assert await listed(metadata={"elevated": True}, before="ghost") == []
+    assert await listed("ana") == ["b", "a"]
+    assert await listed("ana", metadata={"elevated": True}) == ["a"]
+    assert [t.id for t in await storage.list_threads("globex", None)] == ["g"]
 
 
 async def test_update_and_delete_take_members_and_events_along(storage: Storage) -> None:
@@ -201,3 +252,18 @@ async def test_listeners_hear_new_events_and_published_signals(storage: Storage)
 
 def test_it_is_a_storage(storage: Storage) -> None:
     assert isinstance(storage, Storage)
+
+
+@pytest.mark.postgres
+async def test_initialize_adds_the_metadata_index_to_an_existing_database() -> None:
+    pool = await postgres_pool()
+    storage = await fresh(pool)
+    async with pool.acquire() as conn:
+        await conn.execute("DROP INDEX ix_thread_threads_metadata")
+    await storage.initialize()
+    async with pool.acquire() as conn:
+        definition = await conn.fetchval(
+            "SELECT indexdef FROM pg_indexes WHERE indexname = 'ix_thread_threads_metadata'"
+        )
+    await pool.close()
+    assert definition is not None and "USING gin (metadata)" in definition

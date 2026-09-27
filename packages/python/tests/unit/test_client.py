@@ -305,3 +305,9 @@ def test_serve_and_connect_take_who_and_where_by_keyword() -> None:
         parameters = inspect.signature(verb).parameters
         assert parameters["identity"].kind is inspect.Parameter.KEYWORD_ONLY
         assert parameters["scope"].kind is inspect.Parameter.KEYWORD_ONLY
+    listing = inspect.signature(Server.list_threads).parameters
+    assert [name for name, p in listing.items() if p.kind is p.KEYWORD_ONLY] == [
+        "metadata",
+        "before",
+        "limit",
+    ]

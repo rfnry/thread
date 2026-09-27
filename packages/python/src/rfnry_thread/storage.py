@@ -20,7 +20,12 @@ class Storage(Protocol):
     async def get_thread(self, scope: str, thread_id: str) -> Thread | None: ...
 
     async def list_threads(
-        self, scope: str, member_id: str, before: str | None = None, limit: int = 50
+        self,
+        scope: str,
+        member_id: str | None,
+        before: str | None = None,
+        limit: int = 50,
+        metadata: dict[str, Any] | None = None,
     ) -> list[Thread]: ...
 
     async def update_thread(

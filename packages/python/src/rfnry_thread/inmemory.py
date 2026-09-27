@@ -11,6 +11,18 @@ from rfnry_thread.storage import OnEvent, OnResume, OnSignal, Stop
 Key = tuple[str, str]
 
 
+def _contains(have: Any, want: Any) -> bool:
+    if isinstance(want, dict):
+        return isinstance(have, dict) and all(
+            key in have and _contains(have[key], value) for key, value in want.items()
+        )
+    if isinstance(want, list):
+        return isinstance(have, list) and all(any(_contains(h, w) for h in have) for w in want)
+    if isinstance(want, bool) or isinstance(have, bool):
+        return have is want
+    return bool(have == want)
+
+
 class InMemoryStorage:
     def __init__(self) -> None:
         self._threads: dict[Key, Thread] = {}
@@ -37,12 +49,19 @@ class InMemoryStorage:
         return self._threads.get((scope, thread_id))
 
     async def list_threads(
-        self, scope: str, member_id: str, before: str | None = None, limit: int = 50
+        self,
+        scope: str,
+        member_id: str | None,
+        before: str | None = None,
+        limit: int = 50,
+        metadata: dict[str, Any] | None = None,
     ) -> list[Thread]:
         threads = [
             thread
             for (owner, thread_id), thread in self._threads.items()
-            if owner == scope and member_id in self._members[(owner, thread_id)]
+            if owner == scope
+            and (member_id is None or member_id in self._members[(owner, thread_id)])
+            and _contains(thread.metadata, metadata or {})
         ]
         threads.sort(key=lambda t: (t.created_at, t.id), reverse=True)
         if before is not None:

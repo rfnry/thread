@@ -327,6 +327,16 @@ class Server:
     ) -> Thread:
         return await self._verbs.create_thread(SYSTEM, _scope(scope), thread_id, metadata or {})
 
+    async def list_threads(
+        self,
+        scope: str,
+        *,
+        metadata: dict[str, Any] | None = None,
+        before: str | None = None,
+        limit: int = 50,
+    ) -> list[Thread]:
+        return await self._verbs.list_threads(SYSTEM, _scope(scope), before, limit, metadata)
+
     async def add_member(self, scope: str, thread_id: str, identity: IdentityLike) -> Member:
         return await self._verbs.add_member(SYSTEM, _scope(scope), thread_id, as_identity(identity))
 

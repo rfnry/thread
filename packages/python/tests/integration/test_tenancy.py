@@ -37,3 +37,15 @@ async def test_erasure_is_provable_and_falsifiable(storage: Storage) -> None:
         "tenant-a", Thread(id="orphan", scope="tenant-a", created_at=datetime.now(UTC))
     )
     assert not await server.verify_absent("tenant-a")
+
+
+async def test_the_server_lists_only_the_scope_it_is_asked_for(storage: Storage) -> None:
+    server = Server(storage)
+    await server.create_thread("tenant-a", thread_id="t1", metadata={"elevated": True})
+    await server.create_thread(
+        "tenant-b", thread_id="t1", metadata={"elevated": True, "marker": "B"}
+    )
+    await server.create_thread("tenant-b", thread_id="t2", metadata={"elevated": True})
+    listed = await server.list_threads("tenant-a", metadata={"elevated": True})
+    assert [(t.scope, t.id, t.metadata) for t in listed] == [("tenant-a", "t1", {"elevated": True})]
+    assert await server.list_threads("tenant-a", metadata={"marker": "B"}) == []

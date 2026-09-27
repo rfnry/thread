@@ -89,6 +89,7 @@ SERVER = {
     "start",
     "stop",
     "create_thread",
+    "list_threads",
     "add_member",
     "delete_thread",
     "delete_scope",

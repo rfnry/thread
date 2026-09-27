@@ -124,9 +124,15 @@ class Verbs:
         return await self.thread(actor, scope, thread_id, "read")
 
     async def list_threads(
-        self, actor: Identity, scope: str, before: str | None, limit: int
+        self,
+        actor: Identity,
+        scope: str,
+        before: str | None,
+        limit: int,
+        metadata: dict[str, Any] | None = None,
     ) -> list[Thread]:
-        return await self._storage.list_threads(scope, actor.id, before, _limit(limit))
+        member_id = None if actor.role == "system" else actor.id
+        return await self._storage.list_threads(scope, member_id, before, _limit(limit), metadata)
 
     async def update_thread(
         self, actor: Identity, scope: str, thread_id: str, metadata: dict[str, Any]
