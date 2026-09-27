@@ -574,7 +574,9 @@ Everything the package exports, by role.
 - **Fail loudly:** `ThreadException`, `NotFoundError`, `InputError`, `ConfigurationError`, `ForbiddenError`, `StorageError`, `TransportError`.
 
 The TypeScript package exports `connect`, `resolve`, the same error classes, and the types of
-everything above.
+everything above; `Item` is what a listener receives — an event, a signal or a re-join's `Joined` —
+and `ConnectOptions`, `Protocols`, `Listener`, `StreamOptions`, `SendOptions`, `WriteOptions` and
+`StepOptions` type the options.
 
 ## Errors
 

@@ -165,7 +165,13 @@ export class Stream {
   }
 }
 
+let establish: (client: Client) => Promise<void>
+
 export class Client {
+  static {
+    establish = (client) => client.establish()
+  }
+
   identity!: Identity
   scope!: string
   readonly closed: Promise<ThreadException | null>
@@ -208,7 +214,7 @@ export class Client {
     }
   }
 
-  async establish(): Promise<void> {
+  private async establish(): Promise<void> {
     const socket = await open(this.options.url, await this.offered())
     let reply: Payload
     try {
@@ -568,6 +574,6 @@ export class Client {
 
 export async function connect(options: ConnectOptions): Promise<Client> {
   const client = new Client(options)
-  await client.establish()
+  await establish(client)
   return client
 }

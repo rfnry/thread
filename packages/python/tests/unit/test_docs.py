@@ -24,11 +24,16 @@ def test_every_client_verb_is_documented() -> None:
 
 def test_every_typescript_export_is_documented() -> None:
     text = DOCS.read_text(encoding="utf-8")
-    exported = re.findall(r"export \{([^}]*)\} from", TYPESCRIPT.read_text(encoding="utf-8"))
+    index = TYPESCRIPT.read_text(encoding="utf-8")
+    exported = re.findall(r"export (?:type )?\{([^}]*)\} from", index)
     names = {
         name.strip().removeprefix("type ")
         for group in exported
         for name in group.split(",")
         if name.strip()
     }
-    assert sorted(name for name in names if name not in text) == []
+    for module in re.findall(r"export (?:type )?\* from '\./(\w+)\.js'", index):
+        source = (TYPESCRIPT.parent / f"{module}.ts").read_text(encoding="utf-8")
+        names |= set(re.findall(r"^export (?:type|const|function|class) (\w+)", source, re.M))
+    assert names
+    assert sorted(name for name in names if f"`{name}`" not in text) == []

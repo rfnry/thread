@@ -98,27 +98,3 @@ export type Signal =
 
 export type Joined = { thread: Thread; seq: number; truncated: boolean }
 export type Item = Event | Signal | Joined
-
-export const EVENT_KINDS: Event['kind'][] = [
-  'message',
-  'step',
-  'edit',
-  'retract',
-  'read',
-  'member_added',
-  'member_removed',
-  'thread_updated',
-  'custom',
-]
-export const SIGNAL_KINDS: Signal['kind'][] = [
-  'working',
-  'idle',
-  'stream.start',
-  'stream.delta',
-  'stream.end',
-  'cancel',
-  'present',
-  'left',
-  'invited',
-  'thread.deleted',
-]

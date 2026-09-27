@@ -2,10 +2,33 @@ import { readdirSync, readFileSync } from 'node:fs'
 import { join } from 'node:path'
 import { describe, expect, it } from 'vitest'
 import { decode, encode, type Push } from '../src/protocol.js'
-import { EVENT_KINDS, type Message, SIGNAL_KINDS } from '../src/types.js'
+import type { Event, Message, Signal } from '../src/types.js'
 
 const FIXTURES = join(import.meta.dirname, '../../python/tests/fixtures/protocol')
 const files = readdirSync(FIXTURES).filter((name) => name.endsWith('.json'))
+const EVENT_KINDS = Object.keys({
+  message: true,
+  step: true,
+  edit: true,
+  retract: true,
+  read: true,
+  member_added: true,
+  member_removed: true,
+  thread_updated: true,
+  custom: true,
+} satisfies Record<Event['kind'], true>)
+const SIGNAL_KINDS = Object.keys({
+  working: true,
+  idle: true,
+  'stream.start': true,
+  'stream.delta': true,
+  'stream.end': true,
+  cancel: true,
+  present: true,
+  left: true,
+  invited: true,
+  'thread.deleted': true,
+} satisfies Record<Signal['kind'], true>)
 
 describe('golden fixtures', () => {
   it('exist', () => {
