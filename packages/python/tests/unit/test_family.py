@@ -39,7 +39,7 @@ def cut(path: Path, start: str, end: str) -> str:
 @pytest.mark.parametrize("name", BLOCKS)
 def test_the_shared_block_is_byte_identical_with_the_sibling_library(name: str) -> None:
     sibling, own, theirs, start, end = BLOCKS[name]
-    path = ROOT.parent / sibling / SRC / theirs
-    if not path.exists() or start not in path.read_text(encoding="utf-8"):
-        pytest.skip(f"no {start!r} in a sibling checkout at {path}")
-    assert cut(ROOT / SRC / own, start, end) == cut(path, start, end)
+    checkout = ROOT.parent / sibling
+    if not checkout.exists():
+        pytest.skip(f"no sibling checkout at {checkout}")
+    assert cut(ROOT / SRC / own, start, end) == cut(checkout / SRC / theirs, start, end)
