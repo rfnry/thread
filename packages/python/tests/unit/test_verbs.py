@@ -8,7 +8,7 @@ from rfnry_thread.models import Identity, Thread
 from rfnry_thread.server import Server
 
 from .conftest import say
-from .factories import ANA, BRUNO, HELPER
+from .factories import ANA, BRUNO, HELPER, lookalike
 from .peer import Peer
 
 
@@ -291,6 +291,54 @@ async def test_the_server_verbs_act_as_the_system(server: Server) -> None:
     await server.delete_thread("acme", thread.id)
     with pytest.raises(NotFoundError):
         await bruno.call("thread.get", thread_id=thread.id)
+
+
+async def test_the_server_updates_metadata_and_removes_members_as_the_system(
+    storage: InMemoryStorage,
+) -> None:
+    asked: list[str] = []
+
+    async def authorize(identity: Identity, action: str, thread: Thread) -> bool:
+        asked.append(action)
+        return True
+
+    server = Server(storage, authorize=authorize)
+    await server.create_thread("acme", thread_id="t1", metadata={"topic": "billing"})
+    for identity in (ANA, BRUNO):
+        await server.add_member("acme", "t1", identity)
+    ana = await Peer.open(server, ANA)
+    bruno = await Peer.open(server, BRUNO)
+    await ana.call("thread.join", thread_id="t1")
+    await bruno.call("thread.join", thread_id="t1")
+    await ana.quiet()
+    asked.clear()
+    updated = await server.update_thread("acme", "t1", {"topic": "billing", "elevated": True})
+    assert updated.metadata == {"topic": "billing", "elevated": True}
+    for peer in (ana, bruno):
+        pushed = await peer.push("thread_updated")
+        assert pushed["metadata"] == updated.metadata and pushed["author"]["role"] == "system"
+    await server.remove_member("acme", "t1", lookalike(BRUNO))
+    removed = await bruno.push("member_removed")
+    assert (removed["identity"]["id"], removed["author"]["role"]) == ("bruno", "system")
+    assert (await ana.push("member_removed"))["identity"]["id"] == "bruno"
+    assert (await ana.push("left"))["sender"]["id"] == "bruno"
+    assert asked == []
+    await say(ana, "t1", "after")
+    assert "message" not in [p["kind"] for p in await bruno.quiet()]
+    history = (await ana.call("thread.history", thread_id="t1"))["events"]
+    assert [(e["kind"], e["author"]["role"]) for e in history][-3:] == [
+        ("thread_updated", "system"),
+        ("member_removed", "system"),
+        ("message", "user"),
+    ]
+    with pytest.raises(NotFoundError, match="^server: thread 'ghost' was not found$"):
+        await server.update_thread("acme", "ghost", {})
+    with pytest.raises(NotFoundError, match="^server: thread 'ghost' was not found$"):
+        await server.remove_member("acme", "ghost", BRUNO)
+    with pytest.raises(NotFoundError, match="^server: 'bruno' is not a member of thread 't1'$"):
+        await server.remove_member("acme", "t1", BRUNO)
+    with pytest.raises(InputError, match="^server: a scope is required$"):
+        await server.update_thread("", "t1", {})
 
 
 async def test_the_server_lists_every_thread_of_a_scope_by_metadata(server: Server) -> None:

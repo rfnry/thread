@@ -338,8 +338,14 @@ class Server:
     ) -> list[Thread]:
         return await self._verbs.list_threads(SYSTEM, _scope(scope), before, limit, metadata)
 
+    async def update_thread(self, scope: str, thread_id: str, metadata: dict[str, Any]) -> Thread:
+        return await self._verbs.update_thread(SYSTEM, _scope(scope), thread_id, metadata)
+
     async def add_member(self, scope: str, thread_id: str, identity: IdentityLike) -> Member:
         return await self._verbs.add_member(SYSTEM, _scope(scope), thread_id, as_identity(identity))
+
+    async def remove_member(self, scope: str, thread_id: str, identity: IdentityLike) -> None:
+        await self._verbs.remove_member(SYSTEM, _scope(scope), thread_id, as_identity(identity).id)
 
     async def delete_thread(self, scope: str, thread_id: str) -> None:
         await self._verbs.delete_thread(SYSTEM, _scope(scope), thread_id)

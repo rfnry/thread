@@ -389,8 +389,14 @@ jobs and back office:
 await server.create_thread("acme", thread_id="onboarding-bruno", metadata={"owner": "bruno"})
 await server.add_member("acme", "onboarding-bruno", Identity(role="user", id="bruno"))
 await server.list_threads("acme", metadata={"owner": "bruno"})
+await server.update_thread("acme", "onboarding-bruno", {"owner": "carla"})
+await server.remove_member("acme", "onboarding-bruno", Identity(role="user", id="bruno"))
 await server.delete_thread("acme", "onboarding-bruno")
 ```
+
+They write what the client's verbs write — `MemberAdded`, `ThreadUpdated`, `MemberRemoved`, authored
+by the system — reach whoever has the thread open the same way, and raise the same errors; they are
+never put to `authorize`.
 
 `server.list_threads(scope, metadata=, before=, limit=50)` lists every thread of the scope, member
 or not, newest first, `before=` a thread id for the next page. `metadata=` is containment: every key
@@ -399,10 +405,11 @@ given has that value, nested objects alike, compared as JSON — `True` matches 
 
 That is how a product offers **threads anyone may join** — a question elevated to the whole plant,
 a channel: say so in the thread's metadata, list by it, and let your endpoint add whoever asks. The
-new member's connections receive `Invited`, and their client joins with `since=0` for the whole log:
+new member's connections receive `Invited`, and their client joins with `since=0` for the whole
+log; `server.remove_member` takes them out again when the thread turns private:
 
 ```python
-await ana.update_thread(thread.id, {"elevated": True, "location": "reno"})
+await server.update_thread("acme", thread.id, {"elevated": True, "location": "reno"})
 elevated = await server.list_threads("acme", metadata={"elevated": True, "location": "reno"})
 await server.add_member("acme", elevated[0].id, Identity(role="user", id="bruno"))
 ```

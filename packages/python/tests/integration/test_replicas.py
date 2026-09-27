@@ -164,6 +164,21 @@ async def test_the_finishing_message_reaches_a_remote_connection_before_stream_e
         assert message < end
 
 
+async def test_the_servers_own_update_and_removal_reach_the_other_replica(
+    replicas: tuple[Server, Server],
+) -> None:
+    near, far = replicas
+    ana, helper = await room(near, far)
+    await near.update_thread("acme", "t1", {"elevated": True})
+    pushed = await helper.push("thread_updated", timeout=2.0)
+    assert pushed["metadata"] == {"elevated": True} and pushed["author"]["role"] == "system"
+    await near.remove_member("acme", "t1", HELPER)
+    removed = await helper.push("member_removed", timeout=2.0)
+    assert (removed["identity"]["id"], removed["author"]["role"]) == ("helper", "system")
+    await say(ana, "t1", "after")
+    assert "message" not in [p["kind"] for p in await helper.quiet(0.5)]
+
+
 async def test_removal_cuts_off_a_member_on_another_replica(
     replicas: tuple[Server, Server],
 ) -> None:

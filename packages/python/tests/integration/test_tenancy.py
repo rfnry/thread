@@ -49,3 +49,22 @@ async def test_the_server_lists_only_the_scope_it_is_asked_for(storage: Storage)
     listed = await server.list_threads("tenant-a", metadata={"elevated": True})
     assert [(t.scope, t.id, t.metadata) for t in listed] == [("tenant-a", "t1", {"elevated": True})]
     assert await server.list_threads("tenant-a", metadata={"marker": "B"}) == []
+
+
+async def test_the_server_updates_and_removes_only_in_the_scope_it_is_asked_for(
+    storage: Storage,
+) -> None:
+    server = Server(storage)
+    for scope in ("tenant-a", "tenant-b"):
+        await server.create_thread(scope, thread_id="t1", metadata={"topic": "billing"})
+        await server.add_member(scope, "t1", ANA)
+    updated = await server.update_thread("tenant-a", "t1", {"topic": "refunds"})
+    await server.remove_member("tenant-a", "t1", ANA)
+    assert updated.metadata == {"topic": "refunds"}
+    other = await storage.get_thread("tenant-b", "t1")
+    assert other is not None and other.metadata == {"topic": "billing"}
+    assert await storage.is_member("tenant-b", "t1", "ana")
+    assert not await storage.is_member("tenant-a", "t1", "ana")
+    kinds = [e.kind for e in await storage.list_events("tenant-a", "t1")]
+    assert kinds == ["member_added", "thread_updated", "member_removed"]
+    assert [e.kind for e in await storage.list_events("tenant-b", "t1")] == ["member_added"]
