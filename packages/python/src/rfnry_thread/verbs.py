@@ -338,6 +338,10 @@ class Verbs:
             raise InputError(f"server: stream {signal.stream_id!r} was not started")
         if self._authorize is not None and isinstance(signal, Working | StreamStart | Cancel):
             await self.thread(session.identity, session.scope, thread_id, "send")
+            if thread_id not in session.joined:
+                raise ForbiddenError(
+                    f"server: signals need a join; {session.identity.id!r} has not joined thread {thread_id!r}"
+                )
         await self._hub.signal(session, signal)
 
     async def present(self, actor: Identity, scope: str, thread_id: str) -> list[Identity]:

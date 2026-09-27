@@ -287,9 +287,10 @@ async with helper.stream(thread.id, in_reply_to=message.id) as reply:
 await helper.idle(thread.id)
 ```
 
-`Working` shows what is happening now and is gone when the assistant is idle or disconnects; the
-steps stay in the log. A UI folds the steps under the reply that shares their `in_reply_to`. Which
-steps to show — every tool call, only the ones a person would care about, none — is yours.
+`Working` shows what is happening now and is gone when the assistant is idle, leaves or
+disconnects; the steps stay in the log. A UI folds the steps under the reply that shares their
+`in_reply_to`. Which steps to show — every tool call, only the ones a person would care about,
+none — is yours.
 
 Showing an engine run's work is a few lines of your code: an `on_event` callback that turns a text
 delta into `reply.write` and a finished tool call into `client.step`. Open the stream on the first

@@ -124,6 +124,13 @@ class Hub:
             room.discard(session)
             if not room:
                 del self._rooms[(session.scope, thread_id)]
+        for stream_id in sorted(s for t, s in session.streams if t == thread_id):
+            await self.signal(
+                session,
+                StreamEnd(thread_id=thread_id, sender=session.identity, stream_id=stream_id),
+            )
+        if thread_id in session.working:
+            await self.signal(session, Idle(thread_id=thread_id, sender=session.identity))
         await self._depart(session, thread_id)
 
     async def deliver(self, scope: str, event: Event) -> None:
@@ -256,13 +263,6 @@ class Hub:
                 del self._local[key]
 
     async def drop(self, session: Session) -> None:
-        for thread_id, stream_id in sorted(session.streams):
-            await self.signal(
-                session,
-                StreamEnd(thread_id=thread_id, sender=session.identity, stream_id=stream_id),
-            )
-        for thread_id in sorted(session.working):
-            await self.signal(session, Idle(thread_id=thread_id, sender=session.identity))
         for thread_id in list(session.joined):
             await self.leave(session, thread_id)
         self.sessions.discard(session)

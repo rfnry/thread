@@ -1,3 +1,5 @@
+import asyncio
+
 import pytest
 
 from rfnry_thread.errors import ForbiddenError, InputError
@@ -141,6 +143,35 @@ async def test_a_dropped_connection_ends_its_stream_and_work(server: Server) -> 
     assert [p["kind"] for p in await ana.quiet()] == ["stream.end", "idle", "left"]
 
 
+async def test_leaving_ends_the_work_and_a_late_joiner_sees_none(server: Server) -> None:
+    ana, helper = await joined(server, ANA, HELPER)
+    await helper.call("signal.send", thread_id="t1", kind="working", label="Reading")
+    await ana.quiet()
+    await helper.call("thread.leave", thread_id="t1")
+    assert [p["kind"] for p in await ana.quiet()] == ["idle", "left"]
+    with pytest.raises(ForbiddenError):
+        await helper.call("signal.send", thread_id="t1", kind="idle")
+    await ana.call("member.add", thread_id="t1", identity=BRUNO.model_dump(mode="json"))
+    bruno = await Peer.open(server, BRUNO)
+    await bruno.call("thread.join", thread_id="t1")
+    assert [p["kind"] for p in bruno.pushes] == ["present", "present"]
+
+
+async def test_a_member_removed_mid_stream_ends_the_stream(server: Server) -> None:
+    ana, helper = await joined(server, ANA, HELPER)
+    await helper.call("signal.send", thread_id="t1", kind="stream.start", stream_id="s1")
+    await helper.notify(
+        "signal.send", thread_id="t1", kind="stream.delta", stream_id="s1", index=0, text="Half"
+    )
+    await ana.quiet()
+    await ana.call("member.remove", thread_id="t1", identity_id="helper")
+    assert [p["kind"] for p in await ana.quiet()] == ["member_removed", "stream.end", "left"]
+    await ana.call("member.add", thread_id="t1", identity=BRUNO.model_dump(mode="json"))
+    bruno = await Peer.open(server, BRUNO)
+    await bruno.call("thread.join", thread_id="t1")
+    assert [p["kind"] for p in bruno.pushes] == ["present", "present"]
+
+
 async def test_cancel_names_who_should_stop(server: Server) -> None:
     ana, helper = await joined(server, ANA, HELPER)
     await ana.call("signal.send", thread_id="t1", kind="cancel", to=HELPER.model_dump(mode="json"))
@@ -173,3 +204,26 @@ async def test_authorize_send_applies_to_signals_that_speak(storage: InMemorySto
     _, helper = await joined(server, ANA, HELPER)
     with pytest.raises(ForbiddenError, match="^server: 'helper' may not send in thread 't1'$"):
         await helper.call("signal.send", thread_id="t1", kind="working")
+
+
+async def test_a_signal_that_outlives_its_join_is_refused(storage: InMemoryStorage) -> None:
+    asked, release = asyncio.Event(), asyncio.Event()
+
+    async def authorize(identity: Identity, action: str, thread: Thread) -> bool:
+        if identity.id == "helper" and action == "send":
+            asked.set()
+            await release.wait()
+        return True
+
+    server = Server(storage, authorize=authorize)
+    ana, helper = await joined(server, ANA, HELPER)
+    working = asyncio.create_task(helper.call("signal.send", thread_id="t1", kind="working"))
+    await asyncio.wait_for(asked.wait(), 1.0)
+    await ana.call("member.remove", thread_id="t1", identity_id="helper")
+    release.set()
+    with pytest.raises(ForbiddenError, match="^server: signals need a join"):
+        await working
+    await ana.call("member.add", thread_id="t1", identity=BRUNO.model_dump(mode="json"))
+    bruno = await Peer.open(server, BRUNO)
+    await bruno.call("thread.join", thread_id="t1")
+    assert [p["kind"] for p in bruno.pushes] == ["present", "present"]

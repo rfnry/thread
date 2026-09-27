@@ -165,6 +165,32 @@ async def test_a_dropped_connection_ends_its_streams_and_work() -> None:
     assert [s.kind for s in hub.state.snapshot("acme", "t1")] == ["present"]
 
 
+async def test_leaving_ends_its_streams_and_work_in_that_thread_only() -> None:
+    storage, hub, thread = await setup()
+    other, _ = await storage.create_thread("acme", Thread(id="t2", scope="acme", created_at=AT))
+    await storage.add_member(
+        "acme", Member(thread_id="t2", identity=HELPER, added_at=AT, added_by=SYSTEM)
+    )
+    helper, _ = open_session(HELPER)
+    ana, recorder = open_session(ANA)
+    await hub.join(ana, thread, None)
+    await hub.join(helper, thread, None)
+    await hub.join(helper, other, None)
+    for thread_id in ("t1", "t2"):
+        await hub.signal(helper, Working(thread_id=thread_id, sender=HELPER))
+        await hub.signal(helper, StreamStart(thread_id=thread_id, sender=HELPER, stream_id="s1"))
+    await pushes(ana, recorder)
+    await hub.leave(helper, "t1")
+    assert kinds(await pushes(ana, recorder)) == ["stream.end", "idle", "left"]
+    assert [s.kind for s in hub.state.snapshot("acme", "t1")] == ["present"]
+    assert [s.kind for s in hub.state.snapshot("acme", "t2")] == [
+        "present",
+        "working",
+        "stream.start",
+    ]
+    assert (helper.working, helper.streams) == ({"t2"}, {("t2", "s1")})
+
+
 async def test_an_invitation_reaches_only_connections_not_in_the_thread() -> None:
     _, hub, thread = await setup()
     joined, joined_recorder = open_session(BRUNO)
