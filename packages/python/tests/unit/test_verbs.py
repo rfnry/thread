@@ -204,6 +204,16 @@ async def test_only_the_author_edits_or_retracts_and_only_what_can_be(server: Se
     await helper.call(
         "event.send", thread_id="t1", kind="retract", client_id="r1", target=step["id"]
     )
+    read = (await ana.call("event.send", thread_id="t1", kind="read", client_id="d1", up_to_seq=1))[
+        "event"
+    ]
+    with pytest.raises(
+        InputError,
+        match=f"^server: only a message or a step can be retracted; '{read['id']}' is a read$",
+    ):
+        await ana.call(
+            "event.send", thread_id="t1", kind="retract", client_id="r3", target=read["id"]
+        )
     with pytest.raises(NotFoundError, match="^server: event 'ghost' was not found$"):
         await ana.call("event.send", thread_id="t1", kind="retract", client_id="r2", target="ghost")
 

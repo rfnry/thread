@@ -218,9 +218,9 @@ await ana.read(thread.id, up_to_seq=message.seq)
 await ana.custom(thread.id, "rating", {"stars": 5})
 ```
 
-Only an event's author edits or retracts it; only messages are edited. `in_reply_to=` ties an
-event to the one it answers and `triggered_by=` names who caused it — a scheduled assistant can say
-which person set it up, or leave it out.
+Only an event's author edits or retracts it; only messages are edited, and only messages and
+steps are retracted. `in_reply_to=` ties an event to the one it answers and `triggered_by=` names
+who caused it — a scheduled assistant can say which person set it up, or leave it out.
 
 `metadata=` on `send` and `stream` is yours, stored on the message: a JSON object of at most 8 KiB
 — the engine run that wrote a reply, say, so a mark on the reply can be filed against the run. It
@@ -584,10 +584,11 @@ signal from a connection that has not joined the thread, and on a client, an upg
 HTTP 401 or 403 or a `headers` or `protocols` function that raised. `InputError` for a request the
 library refuses: an empty scope or id, an identity whose fields do not fit, a media part with both or neither of `data` and `url`, inline
 media over the cap, a custom payload over 64 KiB, message metadata over 8 KiB or not a JSON
-object, a message or edit that redaction leaves empty, an edit of anything but a message, an
-unknown event or signal kind, a malformed frame. `ConfigurationError` for a server that cannot
-work: a limit that is not positive, a `system` identity given to `serve` or `server.connect`, a
-`redact` that returns something other than parts. `StorageError` for the database. `TransportError` for the socket: a write not acknowledged within its deadline, a client used after `close()`, a connection
+object, a message or edit that redaction leaves empty, an edit of anything but a message, a
+retraction of anything but a message or a step, an unknown event or signal kind, a malformed frame.
+`ConfigurationError` for a server that cannot work: a limit that is not positive, a `system`
+identity given to `serve` or `server.connect`, a `redact` that returns something other than parts.
+`StorageError` for the database. `TransportError` for the socket: a write not acknowledged within its deadline, a client used after `close()`, a connection
 that cannot be opened. On a client, an error the server raised is raised again with its class and
 message.
 
