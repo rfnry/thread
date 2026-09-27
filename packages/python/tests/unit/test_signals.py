@@ -172,6 +172,26 @@ async def test_a_member_removed_mid_stream_ends_the_stream(server: Server) -> No
     assert [p["kind"] for p in bruno.pushes] == ["present", "present"]
 
 
+async def test_a_member_the_server_removes_mid_stream_ends_its_stream_and_work(
+    server: Server,
+) -> None:
+    ana, helper = await joined(server, ANA, HELPER)
+    await helper.call("signal.send", thread_id="t1", kind="working", label="Writing")
+    await helper.call("signal.send", thread_id="t1", kind="stream.start", stream_id="s1")
+    await ana.quiet()
+    await server.remove_member("acme", "t1", HELPER)
+    assert [p["kind"] for p in await ana.quiet()] == [
+        "member_removed",
+        "stream.end",
+        "idle",
+        "left",
+    ]
+    await server.add_member("acme", "t1", BRUNO)
+    bruno = await Peer.open(server, BRUNO)
+    await bruno.call("thread.join", thread_id="t1")
+    assert [p["kind"] for p in bruno.pushes] == ["present", "present"]
+
+
 async def test_cancel_names_who_should_stop(server: Server) -> None:
     ana, helper = await joined(server, ANA, HELPER)
     await ana.call("signal.send", thread_id="t1", kind="cancel", to=HELPER.model_dump(mode="json"))
