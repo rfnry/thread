@@ -454,6 +454,28 @@ async def test_the_server_lists_every_thread_of_a_scope_by_metadata(server: Serv
         await server.list_threads("")
 
 
+async def test_the_servers_list_never_asks_authorize_while_a_members_list_does(
+    storage: InMemoryStorage,
+) -> None:
+    asked: list[tuple[str, str]] = []
+
+    async def authorize(identity: Identity, action: str, thread: Thread) -> bool:
+        asked.append((identity.id, action))
+        return not (action == "read" and thread.metadata.get("archived"))
+
+    server = Server(storage, authorize=authorize)
+    ana = await Peer.open(server, ANA)
+    await ana.call("thread.create", thread_id="open", metadata={"elevated": True})
+    await ana.call(
+        "thread.create", thread_id="archived", metadata={"elevated": True, "archived": True}
+    )
+    asked.clear()
+    listed = await server.list_threads("acme", metadata={"elevated": True})
+    assert [t.id for t in listed] == ["archived", "open"] and asked == []
+    assert [t["id"] for t in (await ana.call("thread.list"))["threads"]] == ["open"]
+    assert asked == [("ana", "read"), ("ana", "read")]
+
+
 async def test_a_members_own_list_is_unchanged_and_takes_no_metadata(server: Server) -> None:
     await server.create_thread("acme", thread_id="elsewhere", metadata={"elevated": True})
     ana = await room(server)
