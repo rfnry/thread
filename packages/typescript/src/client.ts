@@ -217,6 +217,10 @@ export class Client {
       socket.close()
       throw error
     }
+    if (this.stopped) {
+      socket.close(1000, 'client: closed')
+      throw new TransportError('client: the client is closed')
+    }
     this.identity = reply.identity as Identity
     this.scope = String(reply.scope)
     this.socket = socket

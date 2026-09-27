@@ -237,6 +237,34 @@ describe('client', () => {
     await expect(client.send('t1', 'late')).rejects.toBeInstanceOf(ForbiddenError)
   })
 
+  it('closes a socket a reconnect opened after close()', async () => {
+    let calls = 0
+    let held = false
+    let release = () => {}
+    const client = await connect({
+      url: 'ws://fake',
+      protocols: async () => {
+        calls += 1
+        if (calls === 2)
+          await new Promise<void>((resolve) => {
+            held = true
+            release = () => resolve()
+          })
+        return ['thread', 'tok']
+      },
+    })
+    await client.join('t1', { since: 0 })
+    server.drop()
+    await vi.waitFor(() => expect(held).toBe(true))
+    await client.close()
+    release()
+    await vi.waitFor(() => expect(server.hellos).toHaveLength(2))
+    await vi.waitFor(() =>
+      expect(server.sockets.filter((socket) => socket.readyState === 1)).toEqual([])
+    )
+    expect(await client.closed).toBeNull()
+  })
+
   it('refuses calls after close', async () => {
     const { client } = await joined()
     await client.close()
