@@ -80,6 +80,18 @@ async def test_events_cross_databases_replicas_in_order_once(
     assert [p["seq"] for p in messages] == list(range(3, 13))
 
 
+async def test_a_message_reaches_the_other_replica_with_its_metadata(
+    replicas: tuple[Server, Server],
+) -> None:
+    ana, helper = await room(*replicas)
+    sent = await say(helper, "t1", "Refunded.", metadata={"run_id": "r1", "reviewed": False})
+    pushed = await ana.push("message", timeout=2.0)
+    assert pushed["id"] == sent["id"]
+    assert pushed["metadata"] == {"run_id": "r1", "reviewed": False}
+    history = (await ana.call("thread.history", thread_id="t1", kinds=["message"]))["events"]
+    assert [e["metadata"] for e in history] == [{"run_id": "r1", "reviewed": False}]
+
+
 async def test_signals_are_mirrored_through_notify(replicas: tuple[Server, Server]) -> None:
     ana, helper = await room(*replicas)
     await helper.call("signal.send", thread_id="t1", kind="working", label="Reading")

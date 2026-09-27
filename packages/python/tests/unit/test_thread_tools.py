@@ -21,7 +21,10 @@ async def test_four_tools_pinned_to_one_thread(server: Server) -> None:
     sent = await tools.dispatch("send", {"text": "The second charge is refunded."})
     assert isinstance(sent, dict) and sent["seq"] > 0
     message = await take(ana, Message)
-    assert (message.in_reply_to, message.triggered_by) == ("e1", ANA)
+    assert (message.in_reply_to, message.triggered_by, message.metadata) == ("e1", ANA, {})
+    assert all(
+        "metadata" not in d["input_schema"].get("properties", {}) for d in tools.definitions()
+    )
     assert await tools.dispatch("working", {"label": "Checking the invoice"}) == "ok"
     assert (await take(ana, Working)).label == "Checking the invoice"
     assert await tools.dispatch("idle", {}) == "ok"

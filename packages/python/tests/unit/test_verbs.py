@@ -148,6 +148,30 @@ async def test_events_are_validated_before_they_are_stored(
         await ana.call("event.send", thread_id="t1", kind="message", client_id="c5")
 
 
+async def test_a_message_carries_metadata_set_once_and_bounded(server: Server) -> None:
+    ana = await room(server)
+    sent = await say(ana, "t1", "hello", metadata={"run_id": "r1", "nested": {"ok": True}})
+    assert sent["metadata"] == {"run_id": "r1", "nested": {"ok": True}}
+    assert (await say(ana, "t1", "plain"))["metadata"] == {}
+    await ana.call(
+        "event.send",
+        thread_id="t1",
+        kind="edit",
+        client_id="e1",
+        target=sent["id"],
+        content=[{"type": "text", "text": "hello!"}],
+        metadata={"run_id": "forged"},
+    )
+    history = (await ana.call("thread.history", thread_id="t1", kinds=["message"]))["events"]
+    assert history[0]["metadata"] == {"run_id": "r1", "nested": {"ok": True}}
+    assert (await say(ana, "t1", "at the limit", metadata={"x": "y" * 8183}))["metadata"]
+    with pytest.raises(InputError, match="^server: message metadata is at most 8192 bytes$"):
+        await say(ana, "t1", "over", metadata={"x": "y" * 8184})
+    for wrong in (["run_id"], "r1", 7, None):
+        with pytest.raises(InputError, match="^server: invalid message event"):
+            await say(ana, "t1", "not an object", metadata=wrong)
+
+
 async def test_only_the_author_edits_or_retracts_and_only_what_can_be(server: Server) -> None:
     ana = await room(server, HELPER)
     helper = await Peer.open(server, HELPER)

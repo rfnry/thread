@@ -95,6 +95,35 @@ describe('client', () => {
     expect(sent.in_reply_to).toBe('e0')
   })
 
+  it('sends metadata with a message and with the message a stream ends in, and reads it back', async () => {
+    const { client, items } = await joined()
+    const plain = await client.send('t1', 'Charged twice?')
+    const sent = await client.send('t1', 'Refunded.', {
+      inReplyTo: plain.id,
+      metadata: { runId: 'r1' },
+    })
+    const reply = client.stream('t1', { inReplyTo: plain.id, metadata: { runId: 'r2' } })
+    reply.write('Refunded in full.')
+    const streamed = await reply.finish()
+    await client.step('t1', { name: 'Read' })
+    const payloads = server.sent('event.send').map((frame) => frame.payload)
+    expect(payloads.map((payload) => payload.metadata)).toEqual([
+      {},
+      { runId: 'r1' },
+      { runId: 'r2' },
+      undefined,
+    ])
+    expect([plain.metadata, sent.metadata, streamed.metadata]).toEqual([
+      {},
+      { runId: 'r1' },
+      { runId: 'r2' },
+    ])
+    server.push('event', { ...message(9, 'from elsewhere'), metadata: { runId: 'r9' } })
+    await vi.waitFor(() => expect(items.some((item) => 'seq' in item && item.seq === 9)).toBe(true))
+    const pushed = items.find((item) => 'seq' in item && item.seq === 9)
+    expect(pushed && 'metadata' in pushed ? pushed.metadata : null).toEqual({ runId: 'r9' })
+  })
+
   it('stores a caller-supplied clientId once and returns the stored event both times', async () => {
     const { client } = await joined()
     const first = await client.send('t1', 'Your plan renews Friday.', {

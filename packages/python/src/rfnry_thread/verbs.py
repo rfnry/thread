@@ -37,6 +37,7 @@ from rfnry_thread.storage import Storage
 Authorize = Callable[[Identity, str, Thread], Awaitable[bool]]
 
 CUSTOM_LIMIT = 64 * 1024
+METADATA_LIMIT = 8 * 1024
 LABEL_LIMIT = 1000
 PAGE_LIMIT = 500
 
@@ -253,6 +254,8 @@ class Verbs:
                 )
         if isinstance(event, Custom) and len(json.dumps(event.payload).encode()) > CUSTOM_LIMIT:
             raise InputError(f"server: a custom payload is at most {CUSTOM_LIMIT} bytes")
+        if isinstance(event, Message) and len(json.dumps(event.metadata).encode()) > METADATA_LIMIT:
+            raise InputError(f"server: message metadata is at most {METADATA_LIMIT} bytes")
         if isinstance(event, Edit | Retract):
             verb = "edit" if isinstance(event, Edit) else "retract"
             target = await self._storage.get_event(scope, event.thread_id, event.target)

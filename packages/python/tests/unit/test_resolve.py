@@ -35,6 +35,13 @@ def test_the_latest_edit_wins_and_edits_leave_the_view() -> None:
     assert (view[0].id, view[0].content) == ("e1", [Text(text="hello!")])
 
 
+def test_an_edited_message_keeps_its_metadata() -> None:
+    original = message(1, "hello").model_copy(update={"metadata": {"run_id": "r1"}})
+    view = resolve([original, edit(2, "e1", "hello!")])
+    assert isinstance(view[0], Message)
+    assert (view[0].content, view[0].metadata) == ([Text(text="hello!")], {"run_id": "r1"})
+
+
 def test_a_retracted_event_and_the_retraction_leave_the_view() -> None:
     step = Step(
         id="e2", thread_id="t1", seq=2, author=HELPER, created_at=AT, client_id="c2", name="Read"

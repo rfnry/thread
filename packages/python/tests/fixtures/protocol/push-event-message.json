@@ -24,6 +24,7 @@
     "id": "e1",
     "in_reply_to": null,
     "kind": "message",
+    "metadata": {},
     "seq": 1,
     "thread_id": "t1",
     "triggered_by": null

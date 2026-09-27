@@ -30,10 +30,14 @@ type Payload = Record<string, unknown>
 export type Protocols = string | string[]
 export type ConnectOptions = { url: string; protocols?: Protocols | (() => Promise<Protocols>) }
 export type Listener = (item: Item) => void
-export type StreamOptions = { inReplyTo?: string; triggeredBy?: Identity }
+export type StreamOptions = {
+  inReplyTo?: string
+  triggeredBy?: Identity
+  metadata?: Record<string, unknown>
+}
 export type SendOptions = StreamOptions & { clientId?: string }
 export type WriteOptions = { clientId?: string }
-export type StepOptions = SendOptions & {
+export type StepOptions = Omit<SendOptions, 'metadata'> & {
   name: string
   input?: Record<string, unknown>
   output?: Part[]
@@ -374,6 +378,7 @@ export class Client {
       content: parts(content),
       in_reply_to: options.inReplyTo ?? null,
       triggered_by: options.triggeredBy ?? null,
+      metadata: options.metadata ?? {},
     }
     return (await this.event(threadId, fields, clientId)) as Message
   }

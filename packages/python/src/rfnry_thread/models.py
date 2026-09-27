@@ -114,6 +114,7 @@ class _Envelope(BaseModel):
 class Message(_Envelope):
     kind: Literal["message"] = "message"
     content: list[Part]
+    metadata: dict[str, Any] = {}
 
 
 class Step(_Envelope):

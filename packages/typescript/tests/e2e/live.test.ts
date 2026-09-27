@@ -21,7 +21,9 @@ describe.skipIf(!url)('a live server', () => {
     const thread = await client.createThread({ threadId: 'e2e-turn' })
     await client.addMember(thread.id, helper)
     await client.join(thread.id, { since: 0 })
-    const question = await client.send(thread.id, 'My invoice was charged twice.')
+    const question = await client.send(thread.id, 'My invoice was charged twice.', {
+      metadata: { ticket: 't-1' },
+    })
     await until(() => items.some((item) => 'kind' in item && item.kind === 'stream.end'))
     const kinds = items.flatMap((item) => ('kind' in item ? [item.kind] : []))
     expect(kinds).toContain('working')
@@ -32,6 +34,11 @@ describe.skipIf(!url)('a live server', () => {
       .filter((event) => event.in_reply_to === question.id)
       .map((event) => event.kind)
     expect(underQuestion).toEqual(['step', 'message'])
+    const answer = view.find((event) => event.kind === 'message' && event.in_reply_to)
+    expect(view.find((event) => event.id === question.id)).toMatchObject({
+      metadata: { ticket: 't-1' },
+    })
+    expect(answer).toMatchObject({ metadata: { run_id: 'run-1' } })
     await client.close()
   })
 

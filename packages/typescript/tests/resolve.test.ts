@@ -17,6 +17,7 @@ const message = (seq: number, text: string): Event => ({
   ...base(seq),
   kind: 'message',
   content: [{ type: 'text', text }],
+  metadata: { runId: `r${seq}` },
 })
 
 describe('resolve', () => {
@@ -30,6 +31,9 @@ describe('resolve', () => {
       { ...base(6), kind: 'retract', target: 'e2' },
     ])
     expect(view.map((event) => event.seq)).toEqual([1, 3])
-    expect(view[0]).toMatchObject({ content: [{ type: 'text', text: 'A!' }] })
+    expect(view[0]).toMatchObject({
+      content: [{ type: 'text', text: 'A!' }],
+      metadata: { runId: 'r1' },
+    })
   })
 })

@@ -67,7 +67,9 @@ async def assistant(server: Server, open_sockets: list[Socket]) -> None:
                 duration_ms=3,
                 in_reply_to=item.id,
             )
-            async with me.stream(item.thread_id, in_reply_to=item.id) as reply:
+            async with me.stream(
+                item.thread_id, in_reply_to=item.id, metadata={"run_id": "run-1"}
+            ) as reply:
                 for chunk in ["Refunded ", "in full."]:
                     await reply.write(chunk)
             await me.idle(item.thread_id)

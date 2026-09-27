@@ -76,7 +76,7 @@ id) and `triggered_by` (the identity that caused it, as the sender declares). Th
 
 | event | fields | meaning |
 | --- | --- | --- |
-| `Message` | `content` | the conversation itself |
+| `Message` | `content`, `metadata` | the conversation itself; the metadata is yours |
 | `Step` | `name`, `input`, `output`, `is_error`, `duration_ms` | one thing an assistant did |
 | `Edit` | `target`, `content` | a correction of the author's own message |
 | `Retract` | `target` | "unsend": the log keeps its `seq` |
@@ -218,6 +218,15 @@ Only an event's author edits or retracts it; only messages are edited. `in_reply
 event to the one it answers and `triggered_by=` names who caused it — a scheduled assistant can say
 which person set it up, or leave it out.
 
+`metadata=` on `send` and `stream` is yours, stored on the message: a JSON object of at most 8 KiB
+— the engine run that wrote a reply, say, so a mark on the reply can be filed against the run. It
+is set once, when the message is written; an edit changes the content, never the metadata, and
+`resolve` keeps it. The library never reads it:
+
+```python
+answer = await helper.send(thread.id, "Refunded in full.", in_reply_to=message.id, metadata={"run_id": "9f2c"})
+```
+
 `client_id=` on `send`, `step`, `edit`, `retract` and `custom` (`clientId` in TypeScript) is the
 write's idempotency key, generated when you leave it out; name it yourself and the same write sent
 twice — a scheduled job that runs again, a retry after a crash — is stored once, and the second call
@@ -256,9 +265,9 @@ async with helper.stream(thread.id, in_reply_to=message.id) as reply:
         await reply.write(chunk)
 ```
 
-Leaving the block stores the text written as one message; `await reply.finish(content)` stores
-something else instead — the text and an image, say. An exception inside the block abandons the
-stream: `StreamEnd` arrives and nothing is stored. The finishing message always arrives before
+Leaving the block stores the text written as one message, with the stream's `metadata=`;
+`await reply.finish(content)` stores something else instead — the text and an image, say. An
+exception inside the block abandons the stream: `StreamEnd` arrives and nothing is stored. The finishing message always arrives before
 `StreamEnd`, so a `StreamEnd` with no message before it means the stream was abandoned. Only text
 streams; media arrives in the message.
 
@@ -282,8 +291,9 @@ steps stay in the log. A UI folds the steps under the reply that shares their `i
 steps to show — every tool call, only the ones a person would care about, none — is yours.
 
 Showing an engine run's work is a few lines of your code: an `on_event` callback that turns a text
-delta into `reply.write` and a finished tool call into `client.step`. A senses pipeline does the
-same with what it hears and sees. The libraries never import each other.
+delta into `reply.write` and a finished tool call into `client.step`. Open the stream on the first
+delta with `metadata={"run_id": delta.run_id}` and the reply is tied to its run. A senses pipeline
+does the same with what it hears and sees. The libraries never import each other.
 
 ### Signals and presence
 
@@ -411,9 +421,10 @@ The verbs are the Python ones in camelCase — `createThread`, `getThread`, `lis
 `updateThread`, `deleteThread`, `join`, `leave`, `history`, `present`, `addMember`, `removeMember`,
 `listMembers`, `send`, `stream`, `step`, `edit`, `retract`, `read`, `custom`, `working`, `idle`,
 `cancel`, `close` — with the same outbox, reconnect and resume. Events and signals are the wire
-shapes, fields as they travel (`thread_id`, `in_reply_to`); options are camelCase. A browser cannot
-set headers on a WebSocket, so the upgrade carries your session cookie — check its `Origin` — or a
-token in `protocols`, the subprotocol list; an endpoint that reads a token there accepts with one of
+shapes, fields as they travel (`thread_id`, `in_reply_to`); options are camelCase, and `send` and
+`stream` take `metadata` beside `inReplyTo`. A browser cannot set headers on a WebSocket, so the
+upgrade carries your session cookie — check its `Origin` — or a token in `protocols`, the
+subprotocol list; an endpoint that reads a token there accepts with one of
 the offered subprotocols (`await websocket.accept(subprotocol="thread")`). Listeners get
 what arrives after they subscribe, so subscribe before joining. A UI usually wants its own messages
 too, echoed from other tabs, hence `includeOwn`. Streaming:
@@ -443,7 +454,8 @@ recent = await tools.dispatch("read_recent", {"limit": 20})
 await tools.dispatch("idle", {})
 ```
 
-Four tools: `send(text)` posts a message with the bound `in_reply_to` and `triggered_by`;
+Four tools: `send(text)` posts a message with the bound `in_reply_to` and `triggered_by`, and no
+metadata — what a message is tied to is your code's to say, not the model's;
 `read_recent(limit)` returns the latest messages and steps, resolved, as parts — for each event a
 `Text` with its `seq`, author and kind as JSON, then its content as it was sent, images included;
 `working(label)` and `idle()` show what the assistant is doing. The thread is fixed when the tools
@@ -521,8 +533,8 @@ by a non-member, an `authorize` that says no, an edit or retraction of someone e
 signal from a connection that has not joined the thread, and on a client, an upgrade refused with
 HTTP 401 or 403 or a `headers` or `protocols` function that raised. `InputError` for a request the
 library refuses: an empty scope or id, an identity whose fields do not fit, a media part with both or neither of `data` and `url`, inline
-media over the cap, a custom payload over 64 KiB, an edit of anything but a message, an unknown
-event or signal kind, a malformed frame. `ConfigurationError` for a server that cannot work: a limit
+media over the cap, a custom payload over 64 KiB, message metadata over 8 KiB or not a JSON
+object, an edit of anything but a message, an unknown event or signal kind, a malformed frame. `ConfigurationError` for a server that cannot work: a limit
 that is not positive, a `system` identity given to `serve` or `server.connect`. `StorageError` for
 the database. `TransportError` for the socket: a write not acknowledged within its deadline, a client used after `close()`, a connection
 that cannot be opened. On a client, an error the server raised is raised again with its class and

@@ -191,6 +191,39 @@ async def test_finish_stores_other_content_and_an_exception_abandons(server: Ser
     assert [e.client_id for e in history] == [reply.id]
 
 
+async def test_a_message_carries_its_metadata_through_send_stream_and_history(
+    server: Server,
+) -> None:
+    ana, helper = await pair(server)
+    question = await ana.send("t1", "Charged twice?")
+    assert question.metadata == {}
+    sent = await helper.send("t1", "Refunded.", in_reply_to=question.id, metadata={"run_id": "r1"})
+    assert sent.metadata == {"run_id": "r1"}
+    async with helper.stream("t1", in_reply_to=question.id, metadata={"run_id": "r2"}) as reply:
+        await reply.write("Refunded ")
+        await reply.write("in full.")
+    async with helper.stream("t1", metadata={"run_id": "r3"}) as other:
+        finished = await other.finish([Text(text="Here it is")])
+    assert finished.metadata == {"run_id": "r3"}
+    received = [i for i in await drain(ana, include_own=False) if isinstance(i, Message)]
+    assert [m.metadata for m in received] == [{"run_id": "r1"}, {"run_id": "r2"}, {"run_id": "r3"}]
+    await helper.edit("t1", sent.id, "Refunded in full.")
+    view = [e for e in resolve(await ana.history("t1")) if isinstance(e, Message)]
+    assert [(m.content, m.metadata) for m in view] == [
+        ([Text(text="Charged twice?")], {}),
+        ([Text(text="Refunded in full.")], {"run_id": "r1"}),
+        ([Text(text="Refunded in full.")], {"run_id": "r2"}),
+        ([Text(text="Here it is")], {"run_id": "r3"}),
+    ]
+
+
+def test_metadata_is_keyword_only_at_the_end() -> None:
+    for verb in (Client.send, Client.stream):
+        parameters = list(inspect.signature(verb).parameters.values())
+        assert parameters[-1].name == "metadata"
+        assert parameters[-1].kind is inspect.Parameter.KEYWORD_ONLY
+
+
 async def test_signals_arrive_typed(server: Server) -> None:
     ana, helper = await pair(server)
     await helper.working("t1", label="Checking the invoice")

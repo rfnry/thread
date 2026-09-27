@@ -1,0 +1,39 @@
+{
+  "name": "event",
+  "payload": {
+    "author": {
+      "id": "helper",
+      "metadata": {},
+      "name": "Helper",
+      "role": "assistant"
+    },
+    "client_id": "s1",
+    "content": [
+      {
+        "text": "Refunded in full.",
+        "type": "text"
+      }
+    ],
+    "created_at": "2026-01-01T12:00:00Z",
+    "id": "e10",
+    "in_reply_to": "e1",
+    "kind": "message",
+    "metadata": {
+      "attempt": 2,
+      "reviewed": false,
+      "run_id": "r1",
+      "tags": [
+        "refund"
+      ]
+    },
+    "seq": 10,
+    "thread_id": "t1",
+    "triggered_by": {
+      "id": "ana",
+      "metadata": {},
+      "name": "Ana",
+      "role": "user"
+    }
+  },
+  "type": "push"
+}

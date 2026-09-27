@@ -101,7 +101,12 @@ def _own(item: Item, identity: Identity) -> bool:
 
 class Stream:
     def __init__(
-        self, client: Client, thread_id: str, in_reply_to: str | None, triggered_by: Identity | None
+        self,
+        client: Client,
+        thread_id: str,
+        in_reply_to: str | None,
+        triggered_by: Identity | None,
+        metadata: dict[str, Any] | None,
     ) -> None:
         self.id = uuid.uuid4().hex
         self.text = ""
@@ -109,6 +114,7 @@ class Stream:
         self._thread_id = thread_id
         self._in_reply_to = in_reply_to
         self._triggered_by = triggered_by
+        self._metadata = metadata
         self._index = 0
         self._ended = False
 
@@ -148,6 +154,7 @@ class Stream:
             self._in_reply_to,
             self._triggered_by,
             self.id,
+            self._metadata,
         )
         await self._end()
         return message
@@ -382,6 +389,7 @@ class Client:
         in_reply_to: str | None,
         triggered_by: IdentityLike | None,
         client_id: str | None = None,
+        metadata: dict[str, Any] | None = None,
     ) -> Message:
         event = await self._send(
             thread_id,
@@ -390,6 +398,7 @@ class Client:
                 "content": _wire(content),
                 "in_reply_to": in_reply_to,
                 "triggered_by": _who(triggered_by),
+                "metadata": metadata or {},
             },
             client_id,
         )
@@ -477,20 +486,27 @@ class Client:
         in_reply_to: str | None = None,
         triggered_by: IdentityLike | None = None,
         client_id: str | None = None,
+        *,
+        metadata: dict[str, Any] | None = None,
     ) -> Message:
-        return await self._message(thread_id, content, in_reply_to, triggered_by, client_id)
+        return await self._message(
+            thread_id, content, in_reply_to, triggered_by, client_id, metadata
+        )
 
     def stream(
         self,
         thread_id: str,
         in_reply_to: str | None = None,
         triggered_by: IdentityLike | None = None,
+        *,
+        metadata: dict[str, Any] | None = None,
     ) -> Stream:
         return Stream(
             self,
             thread_id,
             in_reply_to,
             None if triggered_by is None else as_identity(triggered_by),
+            metadata,
         )
 
     async def step(

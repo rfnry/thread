@@ -159,6 +159,20 @@ def golden() -> dict[str, Frame]:
         frames[f"push-event-{event.kind.replace('_', '-')}"] = Push(
             name="event", payload=event.model_dump(mode="json")
         )
+    frames["push-event-message-metadata"] = Push(
+        name="event",
+        payload=Message(
+            id="e10",
+            seq=10,
+            author=HELPER,
+            client_id="s1",
+            content=[Text(text="Refunded in full.")],
+            in_reply_to="e1",
+            triggered_by=ANA,
+            metadata={"run_id": "r1", "attempt": 2, "tags": ["refund"], "reviewed": False},
+            **base,
+        ).model_dump(mode="json"),
+    )
     for signal in signals:
         frames[f"push-signal-{signal.kind.replace('.', '-')}"] = Push(
             name="signal", payload=signal.model_dump(mode="json")

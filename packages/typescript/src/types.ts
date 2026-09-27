@@ -33,7 +33,11 @@ type Envelope = {
   triggered_by: Identity | null
 }
 
-export type Message = Envelope & { kind: 'message'; content: Part[] }
+export type Message = Envelope & {
+  kind: 'message'
+  content: Part[]
+  metadata: Record<string, unknown>
+}
 export type Step = Envelope & {
   kind: 'step'
   name: string

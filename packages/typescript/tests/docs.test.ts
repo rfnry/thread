@@ -13,6 +13,8 @@ const NOT_VERBS = new Set([
   'thread_id',
   'in_reply_to',
   'includeOwn',
+  'inReplyTo',
+  'metadata',
   'null',
   'protocols',
 ])

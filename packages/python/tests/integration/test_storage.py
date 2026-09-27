@@ -121,6 +121,18 @@ async def test_seq_is_thread_local_gapless_and_dedup_answers_with_the_stored_eve
         await storage.append_event("acme", say("ghost", "c1"))
 
 
+async def test_a_message_keeps_its_metadata(storage: Storage) -> None:
+    await room(storage)
+    metadata = {"run_id": "r1", "attempt": 2, "reviewed": False, "tags": ["refund"]}
+    sent = say("t1", "c1").model_copy(update={"metadata": metadata})
+    stored, _ = await storage.append_event("acme", sent)
+    assert isinstance(stored, Message) and stored.metadata == metadata
+    listed = (await storage.list_events("acme", "t1"))[0]
+    fetched = await storage.get_event("acme", "t1", stored.id)
+    assert isinstance(listed, Message) and listed.metadata == metadata
+    assert isinstance(fetched, Message) and fetched.metadata == metadata
+
+
 async def test_concurrent_duplicates_store_one_event_and_seq_stays_gapless(
     storage: Storage,
 ) -> None:
