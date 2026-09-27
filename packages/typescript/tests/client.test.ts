@@ -193,6 +193,25 @@ describe('client', () => {
     expect(server.sent('event.send')).toHaveLength(1)
   })
 
+  it('raises a refused stream start from finish and stores nothing', async () => {
+    server.handlers.set('signal.send', (payload) => {
+      if (payload.kind === 'stream.start')
+        throw new ForbiddenError("server: signals need a join; 'ana' has not joined thread 't1'")
+      return {}
+    })
+    const client = await connect({ url: 'ws://fake' })
+    const reply = client.stream('t1')
+    reply.write('half ')
+    const refused = reply.finish()
+    await expect(refused).rejects.toBeInstanceOf(ForbiddenError)
+    await expect(refused).rejects.toThrow(
+      "server: signals need a join; 'ana' has not joined thread 't1'"
+    )
+    expect(server.sent().map((frame) => frame.payload.kind ?? frame.method)).toEqual([
+      'stream.start',
+    ])
+  })
+
   it('reconnects with fresh protocols, says hello again, and re-joins from the cursor', async () => {
     const protocols = vi.fn(async () => ['thread', 'tok'])
     const client = await connect({ url: 'ws://fake', protocols })

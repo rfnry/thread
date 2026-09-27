@@ -143,7 +143,7 @@ export class Stream {
   async finish(content?: Content): Promise<Message> {
     if (this.ended) throw new InputError(`client: stream '${this.id}' has already ended`)
     this.ended = true
-    await this.started.catch(() => undefined)
+    await this.started
     try {
       return await this.wire.message(this.threadId, content ?? this.text, this.options, this.id)
     } finally {
