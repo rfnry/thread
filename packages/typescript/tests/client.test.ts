@@ -209,6 +209,27 @@ describe('client', () => {
     expect(joins).toEqual([0, 4])
   })
 
+  it('follows a thread made again under the same id from the head the server gives', async () => {
+    const { items } = await joined()
+    server.push('event', message(8, 'old'))
+    await vi.waitFor(() => expect(items).toHaveLength(1))
+    server.handlers.set('thread.join', (payload) => ({
+      thread: {
+        id: payload.thread_id,
+        scope: 'acme',
+        metadata: {},
+        created_at: '2026-01-01T12:00:00Z',
+      },
+      seq: 2,
+      truncated: true,
+    }))
+    server.drop()
+    await vi.waitFor(() => expect(items.some((item) => 'truncated' in item)).toBe(true))
+    server.push('event', message(3, 'new'))
+    await vi.waitFor(() => expect(items.at(-1)).toMatchObject({ seq: 3 }))
+    expect(server.sent('thread.join').map((frame) => frame.payload.since)).toEqual([0, 8])
+  })
+
   it('stores a write whose ack was lost exactly once', async () => {
     const { client } = await joined()
     server.dropAck = true

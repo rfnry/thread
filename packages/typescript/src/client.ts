@@ -390,7 +390,10 @@ export class Client {
       thread_id: threadId,
       since,
     })) as unknown as Joined
-    this.cursors.set(threadId, Math.max(this.cursors.get(threadId) ?? 0, joined.seq))
+    this.cursors.set(
+      threadId,
+      joined.seq < (since ?? 0) ? joined.seq : Math.max(this.cursors.get(threadId) ?? 0, joined.seq)
+    )
     return joined
   }
 

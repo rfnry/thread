@@ -410,7 +410,10 @@ class Client:
         self._cursors[thread_id] = since or 0
         reply = await self._request("thread.join", {"thread_id": thread_id, "since": since})
         joined = Joined.model_validate(reply)
-        self._cursors[thread_id] = max(self._cursors.get(thread_id, 0), joined.seq)
+        if joined.seq < (since or 0):
+            self._cursors[thread_id] = joined.seq
+        else:
+            self._cursors[thread_id] = max(self._cursors.get(thread_id, 0), joined.seq)
         return joined
 
     async def create_thread(

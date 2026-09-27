@@ -55,6 +55,15 @@ async def test_a_join_since_replays_what_followed_and_truncates_to_the_latest_pa
     assert joined.truncated is True and second.joined["t1"] == 5
 
 
+async def test_a_join_since_past_the_head_replays_nothing_and_says_truncated() -> None:
+    _, hub, thread = await setup(events=3)
+    session, recorder = open_session(HELPER)
+    joined = await hub.join(session, thread, 8)
+    assert (joined.seq, joined.truncated) == (3, True)
+    assert kinds(await pushes(session, recorder)) == ["present"]
+    assert session.joined == {"t1": 3}
+
+
 async def test_delivery_drops_repeats_and_fills_gaps_from_storage() -> None:
     storage, hub, thread = await setup(events=1)
     session, recorder = open_session(HELPER)

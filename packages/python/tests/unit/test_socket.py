@@ -207,6 +207,25 @@ async def test_a_resume_beyond_the_replay_limit_says_truncated(storage: InMemory
         assert isinstance(items[-1], Joined) and items[-1].truncated is True
 
 
+async def test_a_resume_into_a_thread_made_again_says_truncated_and_follows_it(
+    live: Live,
+) -> None:
+    ana, bruno = await room(live)
+    for n in range(5):
+        await bruno.send("t1", f"old {n}")
+    await drain(ana)
+    live.paused = True
+    await live.drop()
+    await live.server.delete_thread("acme", "t1")
+    await bruno.create_thread(thread_id="t1")
+    await bruno.add_member("t1", ana.identity)
+    live.paused = False
+    items = await until_joined(ana)
+    assert isinstance(items[-1], Joined) and (items[-1].seq, items[-1].truncated) == (2, True)
+    await bruno.send("t1", "new")
+    assert [first_text(m) for m in await drain(ana) if isinstance(m, Message)] == ["new"]
+
+
 async def test_a_write_whose_ack_was_lost_is_stored_exactly_once(live: Live) -> None:
     ana, _ = await room(live)
     live.drop_ack = True

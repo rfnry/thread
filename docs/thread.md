@@ -202,7 +202,9 @@ await helper.leave(thread.id)
 Without `since`, a join is live from now. With `since`, the events after that `seq` arrive first —
 `since=0` for the whole log — then what is happening right now, then live traffic. A join replays
 at most 500 events (`Server(replay_limit=)`); beyond that you get the latest 500 and
-`truncated=True`, and `history(thread.id, before=seq)` pages back when you want more.
+`truncated=True`, and `history(thread.id, before=seq)` pages back when you want more. A `since`
+past the thread's last `seq` — it was deleted and made again under the same id — replays nothing
+and says `truncated=True` too, and the client follows the thread from `joined.seq`.
 
 ### Sending and streaming
 

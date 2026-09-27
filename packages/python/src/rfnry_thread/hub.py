@@ -95,7 +95,7 @@ class Hub:
                     f"server: {session.identity.id!r} is not a member of thread {thread_id!r}"
                 )
             replay: list[Event] = []
-            truncated = False
+            truncated = since is not None and since > head
             if since is not None and since < head:
                 if head - since > self.replay_limit:
                     replay = await self.storage.list_events(
