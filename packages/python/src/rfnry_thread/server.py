@@ -31,7 +31,7 @@ from rfnry_thread.state import REFRESH
 from rfnry_thread.storage import Stop, Storage
 from rfnry_thread.verbs import Authorize, Redact, Verbs
 
-log = logging.getLogger("rfnry_thread")
+logger = logging.getLogger(__name__)
 
 IN_FLIGHT = 64
 
@@ -217,7 +217,7 @@ class Server:
         except asyncio.CancelledError:
             raise
         except Exception as exc:
-            log.warning("server: %s failed: %s", frame.method, exc)
+            logger.warning("server: %s failed: %s", frame.method, exc)
             session.outbound.put(failure(frame.id, ThreadException("server: request failed")))
         else:
             session.outbound.put(Response(id=frame.id, payload=payload))

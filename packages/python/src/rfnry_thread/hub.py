@@ -32,7 +32,7 @@ from rfnry_thread.protocol import Push
 from rfnry_thread.state import LatestState
 from rfnry_thread.storage import Storage
 
-log = logging.getLogger("rfnry_thread")
+logger = logging.getLogger(__name__)
 
 NOTIFY_LIMIT = 7000
 PIECE = 500
@@ -171,7 +171,7 @@ class Hub:
             for session in cut:
                 await self.leave(session, thread_id)
         except ThreadException as error:
-            log.warning("hub: a notice for thread %r failed: %s", thread_id, error)
+            logger.warning("hub: a notice for thread %r failed: %s", thread_id, error)
 
     async def signal(self, session: Session, signal: Signal) -> None:
         key = (signal.thread_id, getattr(signal, "stream_id", ""))
@@ -286,7 +286,7 @@ class Hub:
             await self._publish(scope, signal.thread_id, payload)
             return
         if not isinstance(signal, StreamDelta):
-            log.warning(
+            logger.warning(
                 "hub: a %s signal of %d bytes is too large to mirror", signal.kind, _size(payload)
             )
             return
@@ -300,7 +300,7 @@ class Hub:
         try:
             await self.storage.publish(scope, thread_id, {"o": self.origin, **payload})
         except ThreadException as error:
-            log.warning("hub: mirroring to other replicas failed: %s", error)
+            logger.warning("hub: mirroring to other replicas failed: %s", error)
 
     async def on_signal(self, scope: str, thread_id: str, payload: dict[str, Any]) -> None:
         origin = payload.pop("o", None)
@@ -328,4 +328,4 @@ class Hub:
                 return
             await self._fanout(scope, signal, str(origin))
         except Exception as error:
-            log.warning("hub: a notice from replica %s failed: %s", origin, error)
+            logger.warning("hub: a notice from replica %s failed: %s", origin, error)

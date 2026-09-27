@@ -7,7 +7,7 @@ SRC = Path(rfnry_thread.__file__).parent
 
 LOG_CALLS = {"debug", "info", "warning", "error", "exception", "critical", "log"}
 
-LOGGERS = {"log", "logger", "logging"}
+LOGGERS = {"logger", "logging"}
 
 PREFIXES = {"verbs.py": "server", "hub.py": "server"}
 
