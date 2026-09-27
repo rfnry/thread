@@ -1,5 +1,7 @@
+import json
 from typing import Any
 
+import pytest
 from until import until
 
 from rfnry_thread.hub import Hub
@@ -245,14 +247,16 @@ async def test_linked_hubs_mirror_signals_and_drop_their_own() -> None:
     )
 
 
-async def test_a_long_delta_is_mirrored_in_pieces_under_the_notify_limit() -> None:
+@pytest.mark.parametrize("text", ["x" * 20000, "\U0001f600" * 5000])
+async def test_a_long_delta_is_mirrored_in_pieces_under_the_notify_limit(text: str) -> None:
     storage, near, thread = await setup()
     far = Hub(storage, 500)
     published: list[int] = []
     original = storage.publish
 
     async def measured(scope: str, thread_id: str, payload: dict[str, Any]) -> None:
-        published.append(len(str(payload)))
+        notice = {"s": scope, "t": thread_id, "p": payload}
+        published.append(len(json.dumps(notice).encode()))
         await original(scope, thread_id, payload)
 
     storage.publish = measured  # type: ignore[method-assign]
@@ -267,10 +271,10 @@ async def test_a_long_delta_is_mirrored_in_pieces_under_the_notify_limit() -> No
     await near.signal(speaker, StreamStart(thread_id="t1", sender=HELPER, stream_id="s1"))
     await near.signal(
         speaker,
-        StreamDelta(thread_id="t1", sender=HELPER, stream_id="s1", index=0, text="x" * 20000),
+        StreamDelta(thread_id="t1", sender=HELPER, stream_id="s1", index=0, text=text),
     )
     received = await pushes(listener, recorder)
-    assert "".join(p.get("text", "") for p in received) == "x" * 20000
+    assert "".join(p.get("text", "") for p in received) == text
     assert max(published) < 7900
 
 

@@ -35,7 +35,7 @@ from rfnry_thread.storage import Storage
 log = logging.getLogger("rfnry_thread")
 
 NOTIFY_LIMIT = 7000
-PIECE = 1000
+PIECE = 500
 
 
 @dataclass(eq=False)
