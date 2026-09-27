@@ -75,12 +75,13 @@ def test_every_named_block_is_in_the_docs_and_first_lines_are_unique() -> None:
 @pytest.mark.parametrize("block", runnable())
 async def test_the_block_runs(block: str) -> None:
     namespace = await context()
+    opened = [namespace["ana"], namespace["helper"]]
     code = compile(block, "<docs/thread.md>", "exec", flags=ast.PyCF_ALLOW_TOP_LEVEL_AWAIT)
     result = eval(code, namespace)
     if inspect.iscoroutine(result):
         await result
-    for name in ("ana", "helper"):
-        await namespace[name].close()
+    for client in [*opened, namespace["ana"], namespace["helper"]]:
+        await client.close()
 
 
 @pytest.mark.parametrize(
