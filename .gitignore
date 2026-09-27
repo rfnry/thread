@@ -3,8 +3,9 @@ __pycache__/
 .pytest_cache/
 .mypy_cache/
 .ruff_cache/
+.coverage
 dist/
-node_modules/
 .env*
 examples/**/uv.lock
+node_modules/
 examples/**/package-lock.json
