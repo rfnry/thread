@@ -35,6 +35,7 @@ class Live:
         self.open: list[Served] = []
         self.paused = False
         self.drop_ack = False
+        self.drop_join = False
         self.url = ""
 
     async def drop(self) -> None:
@@ -55,6 +56,10 @@ class Served:
     async def send_text(self, data: str) -> None:
         if self.live.drop_ack and data.startswith('{"type":"response"') and '"event":' in data:
             self.live.drop_ack = False
+            await self.socket.close()
+            return
+        if self.live.drop_join and data.startswith('{"type":"response"') and '"truncated":' in data:
+            self.live.drop_join = False
             await self.socket.close()
             return
         await self.socket.send(data)
@@ -172,6 +177,18 @@ async def test_a_dropped_socket_resumes_every_joined_thread_in_order_once(live: 
     assert [first_text(i) for i in items if isinstance(i, Message)] == [f"m{n}" for n in range(5)]
     assert isinstance(items[-1], Joined) and items[-1].truncated is False
     assert len(calls) >= 2
+    await bruno.send("t1", "live")
+    after = [i for i in await drain(ana) if isinstance(i, Message)]
+    assert [first_text(m) for m in after] == ["live"]
+
+
+async def test_a_socket_dropped_during_the_rejoin_reconnects_again(live: Live) -> None:
+    ana, bruno = await room(live)
+    live.drop_join = True
+    await live.drop()
+    await bruno.send("t1", "while away")
+    items = await until_joined(ana)
+    assert [first_text(i) for i in items if isinstance(i, Message)] == ["while away"]
     await bruno.send("t1", "live")
     after = [i for i in await drain(ana) if isinstance(i, Message)]
     assert [first_text(m) for m in after] == ["live"]

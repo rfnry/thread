@@ -302,7 +302,8 @@ class Client:
                 except ThreadException:
                     continue
                 await self._rejoin()
-                return
+                if self._connection is not None:
+                    return
         finally:
             self._reconnector = None
 
