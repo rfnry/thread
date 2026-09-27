@@ -8,7 +8,7 @@ import weakref
 from dataclasses import dataclass, field
 from typing import Any
 
-from rfnry_thread.errors import ThreadException
+from rfnry_thread.errors import ForbiddenError, ThreadException
 from rfnry_thread.models import (
     SIGNALS,
     Event,
@@ -90,6 +90,10 @@ class Hub:
         async with self._lock(scope, thread_id):
             latest = await self.storage.list_events(scope, thread_id, limit=1)
             head = latest[-1].seq if latest else 0
+            if not await self.storage.is_member(scope, thread_id, session.identity.id):
+                raise ForbiddenError(
+                    f"server: {session.identity.id!r} is not a member of thread {thread_id!r}"
+                )
             replay: list[Event] = []
             truncated = False
             if since is not None and since < head:

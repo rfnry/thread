@@ -1,3 +1,4 @@
+import asyncio
 from typing import Any
 
 import pytest
@@ -262,6 +263,37 @@ async def test_a_removed_member_stops_receiving_over_the_server(server: Server) 
     assert [
         p["kind"] for p in await bruno.quiet() if p["kind"] in ("member_removed", "message")
     ] == ["member_removed"]
+
+
+class HeldAtTheDoor(InMemoryStorage):
+    def __init__(self, who: str) -> None:
+        super().__init__()
+        self.who: str | None = who
+        self.waiting = asyncio.Event()
+        self.release = asyncio.Event()
+
+    async def is_member(self, scope: str, thread_id: str, identity_id: str) -> bool:
+        answer = await super().is_member(scope, thread_id, identity_id)
+        if identity_id == self.who:
+            self.who = None
+            self.waiting.set()
+            await self.release.wait()
+        return answer
+
+
+async def test_a_member_removed_while_joining_is_refused_and_receives_nothing() -> None:
+    storage = HeldAtTheDoor("bruno")
+    server = Server(storage)
+    ana = await room(server, BRUNO)
+    bruno = await Peer.open(server, BRUNO)
+    joining = asyncio.create_task(bruno.call("thread.join", thread_id="t1"))
+    await storage.waiting.wait()
+    await ana.call("member.remove", thread_id="t1", identity_id="bruno")
+    storage.release.set()
+    with pytest.raises(ForbiddenError, match="^server: 'bruno' is not a member of thread 't1'$"):
+        await joining
+    await say(ana, "t1", "after")
+    assert [p for p in await bruno.quiet() if p["kind"] == "message"] == []
 
 
 async def test_nothing_crosses_scopes(server: Server) -> None:
