@@ -55,7 +55,8 @@ same source. The values are validated as strictly as an `Identity`'s; one that d
 `InputError`.
 
 **Parts** are the content of a message — the family's one vocabulary, shared byte for byte with
-rfnry-engine and rfnry-memory, so a message's parts reach a model without translation:
+rfnry-engine, rfnry-memory and rfnry-senses, so a message's parts reach a model without
+translation:
 
 ```python
 Text(text="Is this invoice charged twice?")
@@ -507,7 +508,8 @@ await tools.dispatch("idle", {})
 Four tools: `send(text)` posts a message with the bound `in_reply_to` and `triggered_by`, and no
 metadata — what a message is tied to is your code's to say, not the model's;
 `read_recent(limit)` returns the latest messages and steps, resolved, as parts — for each event a
-`Text` with its `seq`, author and kind as JSON, then its content as it was sent, images included;
+`Text` with its `seq`, kind, author and `in_reply_to` as JSON, and for a step its `name`, `input`
+and `is_error` too, then its content as it was sent (a step's output), images included;
 `working(label)` and `idle()` show what the assistant is doing. The thread is fixed when the tools
 are built and a model cannot name another.
 
@@ -598,5 +600,6 @@ All under `ThreadException` — the root takes the `Exception` suffix, every chi
 and the names avoid Python's `PermissionError` and `ConnectionError`. Every message names the
 module that raised it, then says what went wrong in lowercase: `server: thread 'support-ana' was not
 found`, `server: 'bruno' is not a member of thread 'support-ana'`, `server: inline media is 300000
-bytes; the cap is 262144 — upload it and send a url`. The library logs nothing but unexpected
-failures inside `serve`, as warnings.
+bytes; the cap is 262144 — upload it and send a url`. The library logs only warnings, for what no
+caller is there to receive: an unexpected failure inside `serve`, a failure between replicas —
+mirroring to them or handling their notices — and a signal too large to mirror.
