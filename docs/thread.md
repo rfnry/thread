@@ -509,12 +509,13 @@ await tools.dispatch("idle", {})
 ```
 
 Four tools: `send(text)` posts a message with the bound `in_reply_to` and `triggered_by`, and no
-metadata — what a message is tied to is your code's to say, not the model's;
-`read_recent(limit)` returns the latest messages and steps, resolved, as parts — for each event a
-`Text` with its `seq`, kind, author and `in_reply_to` as JSON, and for a step its `name`, `input`
-and `is_error` too, then its content as it was sent (a step's output), images included;
-`working(label)` and `idle()` show what the assistant is doing. The thread is fixed when the tools
-are built and a model cannot name another.
+metadata — what a message is tied to is your code's to say, not the model's; `read_recent(limit)`
+returns the latest messages and steps, resolved, as parts — for each event a `Text` with its `seq`,
+kind, author and `in_reply_to` as JSON, and for a step its `name`, `input` and `is_error` too, then
+its content as it was sent (a step's output), images included; `working(label)` and `idle()` show
+what the assistant is doing. `read_recent` reads the latest 200 messages, steps, edits and
+retractions and resolves them, so a thread with many edits or retractions can return fewer than
+`limit`. The thread is fixed when the tools are built and a model cannot name another.
 
 `Tool` and `Tools` are the family's tool block, copied byte for byte from rfnry-engine: a tool is a
 name, a description, an input schema and a body; a `Tools` combines with `+` and narrows with

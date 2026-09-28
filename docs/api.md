@@ -1015,7 +1015,8 @@ class ThreadTools(Tools):
 
 A `Tools` pinned to one client, one thread and one cause: `send(text)` posts a message with the
 bound `in_reply_to` and `triggered_by`, `read_recent(limit)` returns the latest messages and steps,
-resolved, as parts, and `working(label)` and `idle()` show what the assistant is doing. Raises
+resolved, as parts, from the latest 200 messages, steps, edits and retractions, so many edits can
+leave fewer than `limit`, and `working(label)` and `idle()` show what the assistant is doing. Raises
 `ConfigurationError` when `thread_id` is empty, `InputError` when `triggered_by` does not fit.
 
 ### `Tool`

@@ -52,6 +52,22 @@ async def test_read_recent_returns_resolved_events_as_parts(server: Server) -> N
     assert headers[1]["name"] == "Read" and headers[1]["input"] == {"path": "rules/refunds.md"}
 
 
+async def test_read_recent_reads_the_latest_200_events_so_many_edits_leave_fewer_messages(
+    server: Server,
+) -> None:
+    ana, helper = await pair(server)
+    first = await ana.send("t1", "one")
+    await ana.send("t1", "two")
+    third = await ana.send("t1", "three")
+    for n in range(198):
+        await ana.edit("t1", third.id, f"three, take {n}")
+    recent = await ThreadTools(helper, thread_id="t1").dispatch("read_recent", {"limit": 20})
+    assert isinstance(recent, list)
+    texts = [p.text for p in recent if isinstance(p, Text) and not p.text.startswith("{")]
+    assert texts == ["two", "three, take 197"]
+    assert first.id not in json.dumps([p.model_dump() for p in recent])
+
+
 async def test_arguments_are_validated_and_the_thread_is_required(server: Server) -> None:
     _, helper = await pair(server)
     with pytest.raises(ConfigurationError, match="^tools: a thread_id is required$"):
