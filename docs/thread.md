@@ -186,8 +186,9 @@ await ana.list_members(thread.id)
 await ana.remove_member(thread.id, Identity(role="user", id="bruno"))
 ```
 
-The id is yours: `create_thread` with an id that exists returns that thread, so creating is safe to
-repeat; without one the server picks it. The creator is the first member. `list_threads` returns
+The id is yours: `create_thread` with an id that exists returns that thread when you are a member
+and may `read` it, so creating is safe to repeat, and raises `ForbiddenError` when you are not or
+may not; without one the server picks it. The creator is the first member. `list_threads` returns
 the threads you are a member of, newest first, `before=` a thread id for the next page; with an
 `authorize`, the threads it refuses to `read` are skipped, a page still holds up to `limit` threads
 you may read, and an empty page means there are no more. Adding and removing members and updating

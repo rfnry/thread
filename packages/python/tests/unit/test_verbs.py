@@ -539,3 +539,24 @@ async def test_an_empty_thread_id_names_no_thread_except_where_a_thread_is_creat
     with pytest.raises(ConfigurationError, match="^tools: a thread_id is required$"):
         ThreadTools(ana, thread_id="")
     await ana.close()
+
+
+async def test_creating_an_existing_thread_returns_it_only_to_a_member_who_may_read_it(
+    storage: InMemoryStorage,
+) -> None:
+    async def authorize(identity: Identity, action: str, thread: Thread) -> bool:
+        return not (identity.id == "helper" and action == "read")
+
+    server = Server(storage, authorize=authorize)
+    ana = await server.connect(identity=ANA, scope="acme")
+    bruno = await server.connect(identity=BRUNO, scope="acme")
+    helper = await server.connect(identity=HELPER, scope="acme")
+    first = await ana.create_thread(thread_id="t1", metadata={"topic": "billing"})
+    await ana.add_member("t1", HELPER)
+    assert await ana.create_thread(thread_id="t1", metadata={"topic": "ignored"}) == first
+    with pytest.raises(ForbiddenError, match="^server: 'bruno' is not a member of thread 't1'$"):
+        await bruno.create_thread(thread_id="t1")
+    with pytest.raises(ForbiddenError, match="^server: 'helper' may not read in thread 't1'$"):
+        await helper.create_thread(thread_id="t1")
+    for client in (ana, bruno, helper):
+        await client.close()
