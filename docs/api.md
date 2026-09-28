@@ -1264,8 +1264,8 @@ class ConfigurationError(ThreadException):
 ```
 
 A setup that cannot work: a limit that is not positive, a `system` identity given to `serve` or
-`Server.connect`, a `redact` that returns something other than parts, two tools of one name, a tool
-with no body, a `ThreadTools` with no `thread_id`.
+`Server.connect`, a `redact` that returns something other than parts, two tools with the same name
+in one `Tools`, a `Tool` with no body when it is called, a `ThreadTools` with an empty `thread_id`.
 
 ### `ForbiddenError`
 

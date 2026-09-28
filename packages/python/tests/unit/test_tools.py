@@ -33,3 +33,10 @@ async def test_dispatch_validates_arguments_and_names() -> None:
         await tools.dispatch("echo", {})
     with pytest.raises(InputError, match="^tools: unknown tool 'ghost'$"):
         await tools.dispatch("ghost", {})
+
+
+async def test_a_tool_with_no_body_is_a_configuration_error_when_called() -> None:
+    tools = Tools([Tool("described", "Only described")])
+    assert tools.definitions()[0]["name"] == "described"
+    with pytest.raises(ConfigurationError, match="^tools: tool 'described' has no body$"):
+        await tools.dispatch("described", {})

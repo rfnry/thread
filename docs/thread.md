@@ -596,10 +596,11 @@ payload over 64 KiB, message metadata over 8 KiB or not a JSON object, a message
 redaction leaves empty, an edit of anything but a message, a retraction of anything but a message or
 a step, an unknown event or signal kind, a malformed frame. `ConfigurationError` for a setup that
 cannot work: a limit that is not positive, a `system` identity given to `serve` or `server.connect`,
-a `redact` that returns something other than parts, a `ThreadTools` with an empty `thread_id`.
-`StorageError` for the database. `TransportError` for the socket: a write not acknowledged within
-its deadline, a client used after `close()`, a connection that cannot be opened. On a client, an
-error the server raised is raised again with its class and message.
+a `redact` that returns something other than parts, a `ThreadTools` with an empty `thread_id`, two
+tools with the same name in one `Tools`, a `Tool` with no body when it is called. `StorageError` for
+the database. `TransportError` for the socket: a write not acknowledged within its deadline, a
+client used after `close()`, a connection that cannot be opened. On a client, an error the server
+raised is raised again with its class and message.
 
 All under `ThreadException` — the root takes the `Exception` suffix, every child ends in `Error`,
 and the names avoid Python's `PermissionError` and `ConnectionError`. Every message names the
