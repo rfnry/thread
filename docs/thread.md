@@ -51,10 +51,10 @@ Identity(role="assistant", id="helper", name="Helper", metadata={"agent": "suppo
 ```
 
 Every verb that takes an identity — `serve`, `server.connect`, `add_member`, `remove_member`,
-`triggered_by`, `cancel(to=)`, `ThreadTools(triggered_by=)` — reads it by its fields: any object
-with `role`, `id`, `name` and `metadata` will do, such as rfnry-senses' `Identity`, which has the
-same source. The values are validated as strictly as an `Identity`'s; one that does not fit is an
-`InputError`.
+`triggered_by`, `cancel(to=)`, `ThreadTools(triggered_by=)` — takes an `IdentityLike` and reads it
+by its fields: any object with `role`, `id`, `name` and `metadata` will do, such as rfnry-senses'
+`Identity`, which has the same source. The values are validated as strictly as an `Identity`'s; one
+that does not fit is an `InputError`.
 
 **Parts** are the content of a message — the family's one vocabulary, shared byte for byte with
 rfnry-engine, rfnry-memory and rfnry-senses, so a message's parts reach a model without
@@ -572,7 +572,7 @@ Everything the package exports, by role.
 
 - **Serve:** `Server`, with your `authorize` and `redact`; `Connection`.
 - **Take part:** `Client`, `Stream`, `Joined`.
-- **Who and what:** `Identity`, `Thread`, `Member`; parts `Text`, `Image`, `Audio`, `Document`, `Part`, `Content`.
+- **Who and what:** `Identity`, `IdentityLike`, `Thread`, `Member`; parts `Text`, `Image`, `Audio`, `Document`, `Part`, `Content`.
 - **The log:** `Message`, `Step`, `Edit`, `Retract`, `Read`, `MemberAdded`, `MemberRemoved`, `ThreadUpdated`, `Custom`, `Event`; `resolve`.
 - **Right now:** `Working`, `Idle`, `StreamStart`, `StreamDelta`, `StreamEnd`, `Cancel`, `Present`, `Left`, `Invited`, `ThreadDeleted`, `Signal`.
 - **Give models a thread:** `ThreadTools`, `Tool`, `Tools`.

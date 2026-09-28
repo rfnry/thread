@@ -16,9 +16,28 @@ class Identity(BaseModel):
 ```
 
 Anyone who takes part; `role` tells them apart, and `"system"` is reserved for what the library
-itself authors. A verb that takes an identity takes an `IdentityLike`, a protocol: any object with
-`role`, `id`, `name` and `metadata` of these types, read by its fields and validated as strictly as
-an `Identity`. Raises `InputError`, from that verb, when the fields do not fit.
+itself authors. Every identity the library takes is an `IdentityLike`, read by these fields, and it
+comes back as an `Identity`.
+
+### `IdentityLike`
+
+```python
+class IdentityLike(Protocol):
+    @property
+    def role(self) -> Literal["user", "assistant", "system"]: ...
+    @property
+    def id(self) -> str: ...
+    @property
+    def name(self) -> str | None: ...
+    @property
+    def metadata(self) -> dict[str, Any]: ...
+```
+
+What everything that takes an identity accepts: `Server.serve` and `Server.connect`, the member
+verbs `add_member` and `remove_member` on the server and the client, a client's `cancel` and every
+`triggered_by`, and `ThreadTools`. Any object with these four fields will do, such as an `Identity`
+or rfnry-senses'; its values are validated as strictly as an `Identity`'s, and one that does not fit
+raises `InputError` from the call that took it.
 
 ### `Text`
 
