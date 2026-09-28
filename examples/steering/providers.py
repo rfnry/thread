@@ -1,7 +1,7 @@
 import asyncio
 import base64
 import os
-from collections.abc import Awaitable, Callable
+from collections.abc import Awaitable, Callable, Mapping
 from typing import Any
 from uuid import uuid4
 
@@ -21,7 +21,7 @@ from rfnry_engine import (
     Image,
     Message,
     Part,
-    Question,
+    QuestionLike,
     Reply,
     ScoreAnswer,
     State,
@@ -303,7 +303,7 @@ class TypeSafeProvider:
             timeout=60, headers={"Authorization": f"Bearer {os.environ['DECISION_API_KEY']}"}
         )
 
-    async def decide(self, state: State, questions: dict[str, Question]) -> Decided:
+    async def decide(self, state: State, questions: Mapping[str, QuestionLike]) -> Decided:
         body = {
             "state": state,
             "model": self.model,
@@ -323,7 +323,7 @@ class TypeSafeProvider:
             model=data.get("model"),
         )
 
-    def _question(self, question: Question) -> dict[str, Any]:
+    def _question(self, question: QuestionLike) -> dict[str, Any]:
         if question.type == "choice":
             return {
                 "type": "choice",
@@ -341,7 +341,7 @@ class TypeSafeProvider:
             body["criteria"] = {"true": question.yes or "Yes", "false": question.no or "No"}
         return body
 
-    def _answer(self, question: Question, raw: dict[str, Any]) -> Answer:
+    def _answer(self, question: QuestionLike, raw: dict[str, Any]) -> Answer:
         if question.type == "choice":
             probabilities = self._normalized(
                 {option: raw["probabilities"].get(option, 0.0) for option in question.options}
