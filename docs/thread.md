@@ -578,10 +578,11 @@ Everything the package exports, by role.
 - **Store:** `Storage`, `InMemoryStorage`, `PostgresStorage`.
 - **Fail loudly:** `ThreadException`, `NotFoundError`, `InputError`, `ConfigurationError`, `ForbiddenError`, `StorageError`, `TransportError`.
 
-The TypeScript package exports `connect`, `resolve`, the same error classes, and the types of
-everything above; `Item` is what a listener receives — an event, a signal or a re-join's `Joined` —
-and `ConnectOptions`, `Protocols`, `Listener`, `StreamOptions`, `SendOptions`, `WriteOptions` and
-`StepOptions` type the options.
+The TypeScript package is a client: it exports `connect`, the `Client` and `Stream` classes,
+`resolve`, the same error classes, and the types of the identity, parts, events, signals and records
+above, and nothing of the server, the storage or the tools; `Item` is what a listener receives — an
+event, a signal or a re-join's `Joined` — and `ConnectOptions`, `Protocols`, `Listener`,
+`StreamOptions`, `SendOptions`, `WriteOptions` and `StepOptions` type the options.
 
 ## Errors
 
