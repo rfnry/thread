@@ -1241,7 +1241,8 @@ class NotFoundError(ThreadException):
     code = "not_found"
 ```
 
-A thread, member or event the scope does not hold.
+A thread, member or event the scope does not hold; an empty thread id names none, except in
+`create_thread`, an `InputError`, and in a signal, which needs a join first.
 
 ### `InputError`
 
@@ -1250,9 +1251,10 @@ class InputError(ThreadException):
     code = "input"
 ```
 
-A request the library refuses: an empty scope or id, an identity whose fields do not fit, a media
-part with both or neither of `data` and `url`, a value over its limit, an edit or retraction of the
-wrong kind of event, an unknown event or signal kind, an unknown tool, arguments a tool rejects.
+A request the library refuses: an empty scope, an empty thread id given to `create_thread`, an
+identity whose fields do not fit, a media part with both or neither of `data` and `url`, a value
+over its limit, an edit or retraction of the wrong kind of event, an unknown event or signal kind,
+an unknown tool, arguments a tool rejects.
 
 ### `ConfigurationError`
 
@@ -2144,7 +2146,8 @@ class NotFoundError extends ThreadException {
 }
 ```
 
-A thread, member or event the scope does not hold.
+A thread, member or event the scope does not hold; an empty thread id names none, except in
+`createThread`, an `InputError`, and in a signal, which needs a join first.
 
 ### `InputError`
 
@@ -2154,8 +2157,9 @@ class InputError extends ThreadException {
 }
 ```
 
-A request the library refuses: an empty id, an identity whose fields do not fit, a value over its
-limit, an edit or retraction of the wrong kind of event, a stream finished twice.
+A request the library refuses: an empty thread id given to `createThread`, an identity whose fields
+do not fit, a value over its limit, an edit or retraction of the wrong kind of event, a stream
+finished twice.
 
 ### `ConfigurationError`
 

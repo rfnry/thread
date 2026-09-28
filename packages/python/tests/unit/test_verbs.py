@@ -1,12 +1,15 @@
 import asyncio
+from collections.abc import Awaitable, Callable
 from typing import Any
 
 import pytest
 
-from rfnry_thread.errors import ForbiddenError, InputError, NotFoundError
+from rfnry_thread.errors import ConfigurationError, ForbiddenError, InputError, NotFoundError
 from rfnry_thread.inmemory import InMemoryStorage
 from rfnry_thread.models import Identity, Thread
+from rfnry_thread.pipe import pipe
 from rfnry_thread.server import Server
+from rfnry_thread.tools import ThreadTools
 
 from .conftest import say
 from .factories import ANA, BRUNO, HELPER, lookalike
@@ -483,3 +486,56 @@ async def test_a_members_own_list_is_unchanged_and_takes_no_metadata(server: Ser
     with pytest.raises(InputError, match="^server: invalid thread.list payload"):
         await ana.call("thread.list", metadata={"elevated": True})
     assert [t.id for t in await server.list_threads("acme")] == ["t1", "elsewhere"]
+
+
+@pytest.mark.parametrize("scope", ["", " "])
+async def test_every_way_a_scope_enters_the_server_refuses_an_empty_one_and_stores_nothing(
+    storage: InMemoryStorage, server: Server, scope: str
+) -> None:
+    await server.create_thread("acme", thread_id="t1")
+    _, theirs = pipe()
+    calls: list[Callable[[], Awaitable[object]]] = [
+        lambda: server.serve(theirs, identity=ANA, scope=scope),
+        lambda: server.connect(identity=ANA, scope=scope),
+        lambda: server.create_thread(scope, thread_id="t1"),
+        lambda: server.list_threads(scope),
+        lambda: server.update_thread(scope, "t1", {}),
+        lambda: server.add_member(scope, "t1", BRUNO),
+        lambda: server.remove_member(scope, "t1", BRUNO),
+        lambda: server.delete_thread(scope, "t1"),
+        lambda: server.delete_scope(scope),
+        lambda: server.verify_absent(scope),
+    ]
+    for call in calls:
+        with pytest.raises(InputError, match="^server: a scope is required$"):
+            await call()
+    assert await storage.verify_absent(scope)
+    assert [t.id for t in await server.list_threads("acme")] == ["t1"]
+
+
+async def test_an_empty_thread_id_names_no_thread_except_where_a_thread_is_created(
+    server: Server,
+) -> None:
+    ana = await server.connect(identity=ANA, scope="acme")
+    calls: list[Callable[[], Awaitable[object]]] = [
+        lambda: ana.get_thread(""),
+        lambda: ana.join(""),
+        lambda: ana.history(""),
+        lambda: ana.list_members(""),
+        lambda: ana.send("", "hello"),
+        lambda: server.update_thread("acme", "", {}),
+        lambda: server.add_member("acme", "", BRUNO),
+        lambda: server.delete_thread("acme", ""),
+    ]
+    for call in calls:
+        with pytest.raises(NotFoundError, match="^server: thread '' was not found$"):
+            await call()
+    with pytest.raises(InputError, match="^server: a thread id cannot be empty$"):
+        await ana.create_thread(thread_id="")
+    with pytest.raises(InputError, match="^server: a thread id cannot be empty$"):
+        await server.create_thread("acme", thread_id="")
+    with pytest.raises(ForbiddenError, match="^server: signals need a join"):
+        await ana.working("")
+    with pytest.raises(ConfigurationError, match="^tools: a thread_id is required$"):
+        ThreadTools(ana, thread_id="")
+    await ana.close()

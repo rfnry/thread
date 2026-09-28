@@ -584,19 +584,22 @@ and `ConnectOptions`, `Protocols`, `Listener`, `StreamOptions`, `SendOptions`, `
 
 ## Errors
 
-`NotFoundError` for a thread, member or event the scope does not hold. `ForbiddenError` for a verb
-by a non-member, an `authorize` that says no, an edit or retraction of someone else's event, a
-signal from a connection that has not joined the thread, and on a client, an upgrade refused with
-HTTP 401 or 403 or a `headers` or `protocols` function that raised. `InputError` for a request the
-library refuses: an empty scope or id, an identity whose fields do not fit, a media part with both or neither of `data` and `url`, inline
-media over the cap, a custom payload over 64 KiB, message metadata over 8 KiB or not a JSON
-object, a message or edit that redaction leaves empty, an edit of anything but a message, a
-retraction of anything but a message or a step, an unknown event or signal kind, a malformed frame.
-`ConfigurationError` for a server that cannot work: a limit that is not positive, a `system`
-identity given to `serve` or `server.connect`, a `redact` that returns something other than parts.
-`StorageError` for the database. `TransportError` for the socket: a write not acknowledged within its deadline, a client used after `close()`, a connection
-that cannot be opened. On a client, an error the server raised is raised again with its class and
-message.
+`NotFoundError` for a thread, member or event the scope does not hold; an empty thread id names no
+thread, so it is a `NotFoundError` too, except in `create_thread`, which refuses it as an
+`InputError`, and in a signal, which needs a join first. `ForbiddenError` for a verb by a
+non-member, an `authorize` that says no, an edit or retraction of someone else's event, a signal
+from a connection that has not joined the thread, and on a client, an upgrade refused with HTTP 401
+or 403 or a `headers` or `protocols` function that raised. `InputError` for a request the library
+refuses: an empty scope, an empty thread id given to `create_thread`, an identity whose fields do
+not fit, a media part with both or neither of `data` and `url`, inline media over the cap, a custom
+payload over 64 KiB, message metadata over 8 KiB or not a JSON object, a message or edit that
+redaction leaves empty, an edit of anything but a message, a retraction of anything but a message or
+a step, an unknown event or signal kind, a malformed frame. `ConfigurationError` for a setup that
+cannot work: a limit that is not positive, a `system` identity given to `serve` or `server.connect`,
+a `redact` that returns something other than parts, a `ThreadTools` with an empty `thread_id`.
+`StorageError` for the database. `TransportError` for the socket: a write not acknowledged within
+its deadline, a client used after `close()`, a connection that cannot be opened. On a client, an
+error the server raised is raised again with its class and message.
 
 All under `ThreadException` — the root takes the `Exception` suffix, every child ends in `Error`,
 and the names avoid Python's `PermissionError` and `ConnectionError`. Every message names the
