@@ -121,7 +121,7 @@ async def test_events_are_validated_before_they_are_stored(
         await ana.call(
             "event.send", thread_id="t1", kind="message", client_id="c1", content=[image]
         )
-    with pytest.raises(InputError, match="^models: image carries data or url, not both$"):
+    with pytest.raises(InputError, match="^models: image carries exactly one of data or url$"):
         await ana.call(
             "event.send",
             thread_id="t1",

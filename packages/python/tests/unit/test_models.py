@@ -24,8 +24,8 @@ def test_parts_parse_by_their_type() -> None:
 
 
 @pytest.mark.parametrize("fields", [{}, {"data": b"x", "url": "https://x"}])
-def test_a_media_part_carries_data_or_url_not_both(fields: dict[str, object]) -> None:
-    with pytest.raises(InputError, match="^models: image carries data or url, not both$"):
+def test_a_media_part_carries_exactly_one_of_data_or_url(fields: dict[str, object]) -> None:
+    with pytest.raises(InputError, match="^models: image carries exactly one of data or url$"):
         Image.model_validate({"media_type": "image/png", **fields})
 
 

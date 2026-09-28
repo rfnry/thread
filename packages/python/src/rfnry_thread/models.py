@@ -33,7 +33,7 @@ class _Media(BaseModel):
     @model_validator(mode="after")
     def _data_or_url(self) -> Self:
         if (self.data is None) == (self.url is None):
-            raise InputError(f"models: {self.type} carries data or url, not both")
+            raise InputError(f"models: {self.type} carries exactly one of data or url")
         return self
 
     @field_serializer("data", when_used="json-unless-none")
