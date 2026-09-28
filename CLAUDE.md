@@ -8,7 +8,7 @@ It is a library, not a framework. The consumer brings authentication, the storag
 
 ## Documentation
 
-`docs/thread.md` is the library's contract with its consumers: description, philosophy, every public verb, minimal examples. It documents the API as designed and is updated in the same change as any change to the public surface. It is also the complexity gauge: if a change makes the documentation harder to write or an example longer, the design is wrong — rework the change, not the docs.
+`docs/thread.md` is the library's contract with its consumers: description, philosophy, every public verb, minimal examples. It documents the API as designed and is updated in the same change as any change to the public surface. It is also the complexity gauge: if a change makes the documentation harder to write or an example longer, the design is wrong — rework the change, not the docs. `docs/api.md` is the reference: every public name with its exact signature, what it returns and what it raises; a test keeps it in step with the code, and it changes in the same change as the public surface.
 
 ## Checklists
 

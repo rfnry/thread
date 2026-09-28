@@ -22,8 +22,7 @@ def test_every_client_verb_is_documented() -> None:
     assert [verb for verb in CLIENT if f".{verb}(" not in text and f"`{verb}`" not in text] == []
 
 
-def test_every_typescript_export_is_documented() -> None:
-    text = DOCS.read_text(encoding="utf-8")
+def typescript_exports() -> set[str]:
     index = TYPESCRIPT.read_text(encoding="utf-8")
     exported = re.findall(r"export (?:type )?\{([^}]*)\} from", index)
     names = {
@@ -35,5 +34,11 @@ def test_every_typescript_export_is_documented() -> None:
     for module in re.findall(r"export (?:type )?\* from '\./(\w+)\.js'", index):
         source = (TYPESCRIPT.parent / f"{module}.ts").read_text(encoding="utf-8")
         names |= set(re.findall(r"^export (?:type|const|function|class) (\w+)", source, re.M))
+    return names
+
+
+def test_every_typescript_export_is_documented() -> None:
+    text = DOCS.read_text(encoding="utf-8")
+    names = typescript_exports()
     assert names
     assert sorted(name for name in names if f"`{name}`" not in text) == []

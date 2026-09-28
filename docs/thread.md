@@ -11,6 +11,8 @@ never stored: someone is working, a reply is streaming, a member arrived or left
 participant sends, streams, signals and reads through one set of verbs, and any of them may speak
 first. One WebSocket protocol, a Python server and client, a TypeScript client.
 
+Every public name, with its signature, is in [the API reference](api.md).
+
 ## Philosophy
 
 **Everyone is a participant.** Nothing in the protocol distinguishes a person from an assistant:
