@@ -2,7 +2,7 @@
 
 ## Description
 
-A plant's maintenance assistant, a member of one channel per production line where people talk with each other. It shows an assistant among people: it answers only when a message says @maintenance, and reads the channel first so it builds on what people there said. Look at `server.list_threads(metadata=)` and `server.add_member` behind the endpoints, and at `run` in harness.py: `ThreadTools(...).only("read_recent")` passed to `engine.run(..., tools=)` and `me.send(..., triggered_by=)`.
+A plant's maintenance assistant, a member of one channel per production line where people talk with each other. It shows an assistant among people: it answers only when a message says @maintenance, and reads the channel first so it builds on what people there said. Look at `server.list_threads(metadata=)` and `server.add_member` behind the endpoints, and at `answer` in server.py: `ThreadTools(...).only("read_recent")` handed to `run` in harness.py for `engine.run(..., tools=)`, and `me.send(..., triggered_by=)`.
 
 ## Running
 

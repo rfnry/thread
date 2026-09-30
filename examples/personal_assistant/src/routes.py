@@ -3,7 +3,7 @@ from urllib.parse import unquote
 from fastapi import APIRouter, WebSocket, WebSocketException
 from pydantic import BaseModel
 
-import harness
+import server
 
 router = APIRouter()
 ORIGINS = {"http://localhost:8000", "http://127.0.0.1:8000"}
@@ -20,9 +20,9 @@ async def ws(websocket: WebSocket) -> None:
     if not name or websocket.headers.get("origin") not in ORIGINS:
         raise WebSocketException(code=1008)
     await websocket.accept()
-    await harness.serve(websocket, name)
+    await server.serve(websocket, name)
 
 
 @router.post("/nudge")
 async def nudge(body: Nudge) -> dict:
-    return await harness.nudge(body.to, body.about)
+    return await server.nudge(body.to, body.about)

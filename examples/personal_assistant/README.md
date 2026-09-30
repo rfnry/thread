@@ -2,7 +2,7 @@
 
 ## Description
 
-Jordan's personal assistant, which speaks first. POST /nudge has it open a thread, add the person and write before anyone has said anything, and the person's reply is answered with that conversation. Look at `nudge` in harness.py: `me.create_thread`, `me.add_member` and `me.send`, then `run` for the reply.
+Jordan's personal assistant, which speaks first. POST /nudge has it open a thread, add the person and write before anyone has said anything, and the person's reply is answered with that conversation. Look at `nudge` in server.py: `me.create_thread`, `me.add_member` and `me.send`, then `answer` for the reply; both call `run` in harness.py.
 
 ## Running
 

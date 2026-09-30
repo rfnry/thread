@@ -6,7 +6,7 @@ import uvicorn
 from fastapi import FastAPI
 from fastapi.staticfiles import StaticFiles
 
-import harness
+import server
 from routes import router
 
 ROOT = Path(__file__).resolve().parent.parent
@@ -14,7 +14,7 @@ ROOT = Path(__file__).resolve().parent.parent
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    listening = asyncio.create_task(harness.listen())
+    listening = asyncio.create_task(server.listen())
     yield
     listening.cancel()
 
