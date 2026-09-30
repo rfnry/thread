@@ -56,20 +56,20 @@ async def listen() -> None:
         if isinstance(item, Invited):
             await me.join(item.thread_id, since=0)
         elif isinstance(item, Message):
-            task = asyncio.create_task(answer(me, item))
+            task = asyncio.create_task(run(me, item))
             running.add(task)
             task.add_done_callback(running.discard)
 
 
-async def answer(me: Client, message: Message) -> None:
+async def run(me: Client, message: Message) -> None:
     await me.working(message.thread_id, label="Preparing the callback")
     said = "\n".join(part.text for part in message.content if part.type == "text")
-    run = await engine.run(
+    engine_run = await engine.run(
         "nurse_line",
         scope=SCOPE,
         input=f"{message.author.name}: {said}",
         history=conversations.get(message.thread_id, []),
     )
-    conversations[message.thread_id] = run.conversation
-    await me.send(message.thread_id, run.reply, in_reply_to=message.id)
+    conversations[message.thread_id] = engine_run.conversation
+    await me.send(message.thread_id, engine_run.reply, in_reply_to=message.id)
     await me.idle(message.thread_id)

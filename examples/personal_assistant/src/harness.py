@@ -32,36 +32,36 @@ async def nudge(name: str, about: str) -> dict:
     await me.add_member(thread.id, someone)
     await me.join(thread.id)
     await me.working(thread.id, label="Writing")
-    run = await engine.run(
+    engine_run = await engine.run(
         "assistant",
         scope=SCOPE,
         input=f"Write to {someone.name} first, opening a new conversation: {about}",
         context=f"Today is {date.today().isoformat()}.",
     )
-    conversations[thread.id] = run.conversation
-    await me.send(thread.id, run.reply)
+    conversations[thread.id] = engine_run.conversation
+    await me.send(thread.id, engine_run.reply)
     await me.idle(thread.id)
-    return {"thread_id": thread.id, "reply": run.reply, "run_id": run.run_id}
+    return {"thread_id": thread.id, "reply": engine_run.reply, "run_id": engine_run.run_id}
 
 
 async def listen() -> None:
     me = assistants[SCOPE] = await server.connect(identity=ASSISTANT, scope=SCOPE)
     async for item in me.events():
         if isinstance(item, Message):
-            task = asyncio.create_task(answer(me, item))
+            task = asyncio.create_task(run(me, item))
             running.add(task)
             task.add_done_callback(running.discard)
 
 
-async def answer(me: Client, message: Message) -> None:
+async def run(me: Client, message: Message) -> None:
     await me.working(message.thread_id, label="Thinking")
-    run = await engine.run(
+    engine_run = await engine.run(
         "assistant",
         scope=SCOPE,
         input=message.content,
         history=conversations.get(message.thread_id, []),
         context=f"Today is {date.today().isoformat()}.",
     )
-    conversations[message.thread_id] = run.conversation
-    await me.send(message.thread_id, run.reply, in_reply_to=message.id)
+    conversations[message.thread_id] = engine_run.conversation
+    await me.send(message.thread_id, engine_run.reply, in_reply_to=message.id)
     await me.idle(message.thread_id)

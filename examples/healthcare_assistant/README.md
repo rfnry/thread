@@ -1,3 +1,9 @@
+# healthcare_assistant
+
+## Description
+
+A clinic's nurse line assistant: the front desk opens a patient's thread from an intake note, a nurse joins, and the assistant prepares the callback. It shows redaction: `Server(redact=)` masks record numbers and phone numbers before anything is stored, so the note comes back masked. Look at `redact` in harness.py and `mask` in utils.py, then `open_thread` and `join` behind the endpoints.
+
 ## Running
 
 ```bash

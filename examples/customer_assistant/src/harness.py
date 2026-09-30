@@ -44,14 +44,14 @@ async def listen() -> None:
         if isinstance(item, Invited):
             await me.join(item.thread_id, since=0)
         elif isinstance(item, Message):
-            task = asyncio.create_task(answer(me, item))
+            task = asyncio.create_task(run(me, item))
             running.add(task)
             task.add_done_callback(running.discard)
         elif isinstance(item, Cancel) and item.to.id == ASSISTANT.id and item.thread_id in stops:
             stops[item.thread_id].now()
 
 
-async def answer(me: Client, message: Message) -> None:
+async def run(me: Client, message: Message) -> None:
     thread_id = message.thread_id
     async with turns.setdefault(thread_id, asyncio.Lock()):
         stop = stops[thread_id] = Stop()
@@ -63,7 +63,7 @@ async def answer(me: Client, message: Message) -> None:
                 elif isinstance(event, ToolCallStarted):
                     await me.working(thread_id, label=event.tool)
 
-            run = await engine.run(
+            engine_run = await engine.run(
                 "support",
                 scope=SCOPE,
                 input=message.content,
@@ -72,8 +72,8 @@ async def answer(me: Client, message: Message) -> None:
                 on_event=show,
                 stop=stop,
             )
-            conversations[thread_id] = run.conversation
-            for step in run.steps:
+            conversations[thread_id] = engine_run.conversation
+            for step in engine_run.steps:
                 await me.step(thread_id, name=step.tool, input=step.args, in_reply_to=message.id)
-            await reply.finish(run.reply or "Stopped.")
+            await reply.finish(engine_run.reply or "Stopped.")
         await me.idle(thread_id)

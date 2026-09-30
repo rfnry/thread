@@ -46,7 +46,7 @@ async def listen() -> None:
         if isinstance(item, Invited):
             await me.join(item.thread_id)
         elif isinstance(item, Message) and "@maintenance" in said(item).lower():
-            task = asyncio.create_task(answer(me, item))
+            task = asyncio.create_task(run(me, item))
             running.add(task)
             task.add_done_callback(running.discard)
 
@@ -55,18 +55,18 @@ def said(message: Message) -> str:
     return "\n".join(part.text for part in message.content if part.type == "text")
 
 
-async def answer(me: Client, message: Message) -> None:
+async def run(me: Client, message: Message) -> None:
     await me.working(message.thread_id, label="Reading the channel")
     channel = await me.get_thread(message.thread_id)
     tools = ThreadTools(
         me, thread_id=channel.id, triggered_by=message.author, in_reply_to=message.id
     )
-    run = await engine.run(
+    engine_run = await engine.run(
         "maintenance",
         scope=SCOPE,
         input=f"{message.author.name}: {said(message)}",
         context=f"{FACTS}\n\nThis channel is {channel.metadata['line']}.",
         tools=tools.only("read_recent"),
     )
-    await me.send(channel.id, run.reply, in_reply_to=message.id, triggered_by=message.author)
+    await me.send(channel.id, engine_run.reply, in_reply_to=message.id, triggered_by=message.author)
     await me.idle(channel.id)
