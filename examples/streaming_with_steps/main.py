@@ -2,21 +2,21 @@ import asyncio
 
 from rfnry_thread import (
     Identity,
-    InMemoryStorage,
     Message,
-    Server,
     Step,
     StreamDelta,
     StreamEnd,
     StreamStart,
-    Text,
     Working,
     resolve,
 )
 
+from client import helper_answers
+from server import build_server
+
 
 async def main() -> None:
-    server = Server(InMemoryStorage())
+    server = build_server()
     ana = await server.connect(identity=Identity(role="user", id="ana", name="Ana"), scope="demo")
     helper = await server.connect(
         identity=Identity(role="assistant", id="helper", name="Helper"), scope="demo"
@@ -27,22 +27,7 @@ async def main() -> None:
     await helper.join(thread.id)
 
     question = await ana.send(thread.id, "My invoice was charged twice.")
-    await helper.working(thread.id, label="Reading rules/refunds.md")
-    await helper.step(
-        thread.id,
-        name="Read",
-        input={"path": "rules/refunds.md"},
-        output=[Text(text="A double charge is refunded in full.")],
-        duration_ms=12,
-        in_reply_to=question.id,
-    )
-    answer = "The second charge is refunded in full, per the refunds rule."
-    async with helper.stream(thread.id, in_reply_to=question.id) as reply:
-        for word in answer.split(" "):
-            await reply.write(word + " ")
-            await asyncio.sleep(0.05)
-        await reply.finish(reply.text.strip())
-    await helper.idle(thread.id)
+    await helper_answers(helper, thread.id, question)
 
     async for item in ana.events():
         match item:

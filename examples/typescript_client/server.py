@@ -47,14 +47,12 @@ async def echo(server):
                     await asyncio.sleep(0.05)
 
 
-async def main() -> None:
-    server = Server(InMemoryStorage())
+def build_server():
+    return Server(InMemoryStorage())
 
+
+def listen(server):
     async def handler(socket):
         await server.serve(Socket(socket), identity=BROWSER, scope="demo")
 
-    async with serve(handler, "127.0.0.1", 8780, subprotocols=["thread"], process_request=upgrade):
-        await echo(server)
-
-
-asyncio.run(main())
+    return serve(handler, "127.0.0.1", 8780, subprotocols=["thread"], process_request=upgrade)

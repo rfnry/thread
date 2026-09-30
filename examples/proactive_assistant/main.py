@@ -1,43 +1,16 @@
 import asyncio
 
-from rfnry_thread import Client, Identity, InMemoryStorage, Invited, Message, Server, resolve
-from websockets.asyncio.server import serve
+from rfnry_thread import Identity, Invited, Message, resolve
 
-PEOPLE = {"ana-token": Identity(role="user", id="ana", name="Ana")}
-
-
-class Socket:
-    def __init__(self, socket):
-        self.socket = socket
-
-    async def receive_text(self):
-        return await self.socket.recv()
-
-    async def send_text(self, data):
-        await self.socket.send(data)
-
-    async def close(self, code=1000, reason=None):
-        await self.socket.close(code, reason or "")
-
-
-def who(request):
-    return PEOPLE.get(request.headers.get("Authorization", "").removeprefix("Bearer "))
-
-
-def upgrade(connection, request):
-    return None if who(request) else connection.respond(401, "who are you?\n")
+from client import connect_ana
+from server import build_server, listen
 
 
 async def main() -> None:
-    server = Server(InMemoryStorage())
+    server = build_server()
 
-    async def handler(socket):
-        await server.serve(Socket(socket), identity=who(socket.request), scope="demo")
-
-    async with serve(handler, "127.0.0.1", 8765, process_request=upgrade):
-        ana = await Client.connect(
-            "ws://127.0.0.1:8765", headers={"Authorization": "Bearer ana-token"}
-        )
+    async with listen(server):
+        ana = await connect_ana()
         reminders = await server.connect(
             identity=Identity(role="assistant", id="reminders", name="Reminders"), scope="demo"
         )
