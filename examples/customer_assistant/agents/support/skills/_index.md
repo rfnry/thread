@@ -1,0 +1,1 @@
+- goodwill_credit — offer a credit for a late order

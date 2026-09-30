@@ -1,6 +1,0 @@
-{
-  "name": "typescript_client",
-  "private": true,
-  "type": "module",
-  "dependencies": { "@rfnry/thread": "file:../../packages/typescript" }
-}

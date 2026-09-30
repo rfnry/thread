@@ -1,0 +1,45 @@
+{
+  "note": "Synthetic data for the example: Acme Plastics, its plants, people and machines are invented.",
+  "plants": {
+    "plant-reno": {
+      "name": "Acme Plastics Reno",
+      "lines": {
+        "line 1": "Molders M-11 to M-14: 200-ton hydraulic, caps and closures",
+        "line 2": "Molders M-21 and M-22: 350-ton hydraulic, crates"
+      },
+      "contacts": {
+        "shift lead": "Dana Ortiz, radio channel 3",
+        "electrician on call": "Luis Park, ext. 231"
+      },
+      "parts on hand": {
+        "heater band 60 mm (HB-60)": "4 in bin C-12",
+        "thermocouple type J (TCJ-2)": "6 in bin C-14",
+        "nozzle tip 3 mm (NT-3)": "2 in bin C-3"
+      },
+      "recent work": [
+        "2026-09-12: M-13 barrel zone 3 heater band replaced",
+        "2026-09-26: M-21 hydraulic oil changed to ISO VG 46"
+      ],
+      "notes": ["Lockout locks and tags are at the tool crib next to line 2"]
+    },
+    "plant-monterrey": {
+      "name": "Acme Plastics Monterrey",
+      "lines": {
+        "line A": "Molders MA-1 to MA-3: 150-ton all-electric, medical housings, clean room"
+      },
+      "contacts": {
+        "shift lead": "Rosa Villarreal, ext. 410",
+        "electrician on call": "Tomás Garza, ext. 415"
+      },
+      "parts on hand": {
+        "nozzle heater 25 mm (NH-25)": "3 in cabinet E-2",
+        "thermocouple type J (TCJ-2)": "2 in cabinet E-2"
+      },
+      "recent work": ["2026-09-20: MA-2 nozzle tip replaced after a leak"],
+      "notes": [
+        "All-electric machines: no hydraulics; servo drives are locked out at the main disconnect",
+        "Clean room: gown up before line A, and bag any tool that goes in"
+      ]
+    }
+  }
+}

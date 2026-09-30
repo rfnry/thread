@@ -1,0 +1,60 @@
+{
+  "note": "Synthetic data for the example: Acme Home and every customer, order and card here are invented.",
+  "orders": {
+    "A-1001": {
+      "customer": "Dana Whitfield",
+      "items": ["Oak side table", "Linen cushion cover x2"],
+      "total": 184.0,
+      "card": "visa ending 4242",
+      "placed": "2026-09-22",
+      "status": "in transit",
+      "carrier": "Acme Freight",
+      "tracking": "AF-5520-1187",
+      "promised": "2026-09-28",
+      "delivered": null,
+      "charges": [{"date": "2026-09-22", "amount": 184.0}]
+    },
+    "A-1002": {
+      "customer": "Sam Okafor",
+      "items": ["Stoneware dinner set"],
+      "total": 96.0,
+      "card": "mastercard ending 1005",
+      "placed": "2026-09-15",
+      "status": "delivered",
+      "carrier": "Acme Freight",
+      "tracking": "AF-5520-0934",
+      "promised": "2026-09-19",
+      "delivered": "2026-09-18",
+      "charges": [
+        {"date": "2026-09-15", "amount": 96.0},
+        {"date": "2026-09-15", "amount": 96.0}
+      ]
+    },
+    "A-1003": {
+      "customer": "Ines Laurent",
+      "items": ["Ceramic table lamp"],
+      "total": 58.0,
+      "card": "visa ending 7781",
+      "placed": "2026-09-29",
+      "status": "processing",
+      "carrier": null,
+      "tracking": null,
+      "promised": "2026-10-05",
+      "delivered": null,
+      "charges": [{"date": "2026-09-29", "amount": 58.0}]
+    },
+    "A-1004": {
+      "customer": "Priya Raman",
+      "items": ["Wool rug 160x230"],
+      "total": 420.0,
+      "card": "amex ending 3007",
+      "placed": "2026-09-05",
+      "status": "delivered",
+      "carrier": "Acme Freight",
+      "tracking": "AF-5520-0412",
+      "promised": "2026-09-10",
+      "delivered": "2026-09-16",
+      "charges": [{"date": "2026-09-05", "amount": 420.0}]
+    }
+  }
+}

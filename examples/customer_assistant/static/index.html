@@ -1,0 +1,36 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Acme Home support</title>
+    <style>
+      body { font: 15px/1.45 system-ui, sans-serif; max-width: 42rem; margin: 2rem auto; padding: 0 1rem; }
+      form { display: flex; gap: 0.5rem; }
+      input { flex: 1; padding: 0.5rem; }
+      .user, .assistant { white-space: pre-wrap; padding: 0.5rem 0.75rem; border-radius: 0.5rem; }
+      .user { background: #e8f0fe; margin-left: 4rem; }
+      .assistant { background: #f2f2f2; margin-right: 4rem; }
+      [data-who]::before { content: attr(data-who); display: block; font-size: 0.8em; color: #666; }
+      .step { font: 0.8em ui-monospace, monospace; color: #666; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+      #status { color: #666; min-height: 1.5em; }
+    </style>
+  </head>
+  <body>
+    <h1>Acme Home support</h1>
+    <form id="signin">
+      <input id="name" placeholder="Your name" required />
+      <button>Start</button>
+    </form>
+    <main id="chat" hidden>
+      <div id="log"></div>
+      <p id="status"></p>
+      <form id="say">
+        <input id="text" placeholder="Ask about an order, such as A-1001" autocomplete="off" required />
+        <button>Send</button>
+        <button id="stop" type="button" disabled>Stop</button>
+      </form>
+    </main>
+    <script type="module" src="/app.js"></script>
+  </body>
+</html>

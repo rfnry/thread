@@ -1,0 +1,19 @@
+date,account,counterparty,reference,amount
+2026-09-01,rent,Acme Properties,RENT-0926,-2400.00
+2026-09-02,sales,Acme Card Payments,BATCH-0902,1840.50
+2026-09-03,ingredients,Acme Flour Co.,INV-7710,-612.40
+2026-09-04,utilities,Acme Power,ELEC-0926,-388.15
+2026-09-05,software,Acme Cloud,INV-2291,-129.00
+2026-09-05,software,Acme Cloud,INV-2291,-129.00
+2026-09-08,ingredients,Acme Dairy,INV-3304,-274.80
+2026-09-09,sales,Acme Cafe Group,INV-S-118,2250.00
+2026-09-12,equipment,Acme Kitchen Supply,INV-5521,-845.00
+2026-09-15,payroll,Acme Payroll,PAY-0915,-3120.00
+2026-09-16,ingredients,Acme Flour Co.,INV-7788,-598.20
+2026-09-18,marketing,Acme Print,INV-0442,-160.00
+2026-09-20,sales,Acme Card Payments,BATCH-0920,2105.75
+2026-09-22,utilities,Acme Water,WATER-0926,-96.30
+2026-09-24,ingredients,Acme Dairy,INV-3379,-281.10
+2026-09-26,repairs,Acme Oven Service,INV-9003,-420.00
+2026-09-29,payroll,Acme Payroll,PAY-0929,-3120.00
+2026-09-30,bank fees,Acme Bank,FEE-0926,-18.00

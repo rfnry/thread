@@ -1,0 +1,48 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Matter threads</title>
+    <style>
+      body { font: 15px/1.45 system-ui, sans-serif; max-width: 48rem; margin: 2rem auto; padding: 0 1rem; }
+      form { display: flex; gap: 0.5rem; }
+      input { flex: 1; padding: 0.5rem; }
+      .user, .assistant { white-space: pre-wrap; padding: 0.5rem 0.75rem; border-radius: 0.5rem; }
+      .user { background: #e8f0fe; margin-left: 4rem; }
+      .assistant { background: #f2f2f2; margin-right: 4rem; }
+      [data-who]::before { content: attr(data-who); display: block; font-size: 0.8em; color: #666; }
+      .step { font: 0.8em ui-monospace, monospace; color: #666; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+      .review { display: block; margin-top: 0.5rem; font-size: 0.9em; color: #666; }
+      #status { color: #666; min-height: 1.5em; }
+    </style>
+  </head>
+  <body>
+    <h1>Matter threads</h1>
+    <form id="signin">
+      <input id="name" placeholder="Your name" required />
+      <select id="firm">
+        <option value="firm-acme">Acme LLP</option>
+        <option value="firm-brightline">Brightline LLP</option>
+      </select>
+      <button>Start</button>
+    </form>
+    <div id="app" hidden>
+      <form id="open">
+        <select id="contract"><option>northwind-msa</option></select>
+        <button>Open the matter</button>
+        <button id="export" type="button">Export datasets</button>
+      </form>
+      <pre id="exported"></pre>
+      <main id="thread" hidden>
+        <div id="log"></div>
+        <p id="status"></p>
+        <form id="say">
+          <input id="text" placeholder="Ask about the contract, such as: review it" autocomplete="off" required />
+          <button>Send</button>
+        </form>
+      </main>
+    </div>
+    <script type="module" src="/app.js"></script>
+  </body>
+</html>

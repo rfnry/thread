@@ -2,100 +2,124 @@ import asyncio
 import json
 from pathlib import Path
 
-import rfnry_memory
-from rfnry_engine import Engine
-from rfnry_memory import Memory, MemoryTools
-from rfnry_thread import Identity, Message, Text
+from rfnry_engine import Engine, ToolCallStarted
+from rfnry_thread import (
+    Client,
+    ForbiddenError,
+    Identity,
+    InMemoryStorage,
+    Invited,
+    Message,
+    Server,
+    Text,
+    Thread,
+    ThreadTools,
+)
 
-from providers import AnthropicProvider, TypeSafeProvider, VoyageProvider
+from providers import AnthropicProvider
 
-ASSISTANT = Identity(role="assistant", id="floor-assistant", name="Floor assistant")
-JUDGEMENTS = ("relevant", "evidence", "contradicts", "injection")
+PLANTS = json.loads(Path("data/plants.json").read_text())["plants"]
+ASSISTANT = Identity(role="assistant", id="maintenance", name="Maintenance assistant")
 
-
-def output(result):
-    if isinstance(result, list):
-        return result
-    if isinstance(result, str):
-        try:
-            result = json.loads(result)
-        except ValueError:
-            return [Text(text=result[:4000])]
-    if isinstance(result, dict) and "hits" in result:
-        lines = []
-        for hit in result["hits"]:
-            label = (hit.get("title") or hit["text"])[:80]
-            judge = hit.get("judge")
-            shown = " ".join(f"{k} {judge[k]:.2f}" for k in JUDGEMENTS) if judge else ""
-            lines.append(f"{label} | {shown}".rstrip(" |"))
-        return [Text(text="\n".join(lines))]
-    return [Text(text=json.dumps(result)[:4000])]
+server = Server(InMemoryStorage())
+engine = Engine("agents", generation=AnthropicProvider())
+assistants: dict[str, Client] = {}
+working: set[asyncio.Task] = set()
 
 
-class FloorAssistant:
-    def __init__(self, engine, memory, client):
-        self.engine, self.memory, self.client = engine, memory, client
-        self.corpora = {}
-
-    async def join(self, thread_id):
-        thread = await self.client.get_thread(thread_id)
-        machine = thread.metadata["machine"]
-        self.corpora[thread_id] = f"{self.client.scope}:{machine}"
-        await self.client.join(thread_id)
-
-    async def answer_next(self):
-        async for item in self.client.events():
-            if isinstance(item, Message):
-                return await self.answer(item)
-
-    async def answer(self, message):
-        thread, corpus = message.thread_id, self.corpora[message.thread_id]
-        machine = corpus.split(":", 1)[1]
-        await self.client.working(thread, label=f"Reading the {machine} manuals")
-        run = await self.engine.run(
-            "machinist",
-            scope=self.client.scope,
-            input=message.content,
-            context=f"The machine is {machine} at the {self.client.scope} factory.",
-            tools=MemoryTools(self.memory, corpus_id=corpus).only(
-                "search", "read_source", "ingest"
-            ),
-        )
-        for step in run.steps:
-            await self.client.step(
-                thread,
-                name=step.tool,
-                input=step.args,
-                output=output(step.result),
-                is_error=step.is_error,
-                duration_ms=step.duration_ms,
-                in_reply_to=message.id,
-            )
-        await self.client.send(thread, run.reply, in_reply_to=message.id)
-        await self.client.idle(thread)
+def person(name: str) -> Identity:
+    return Identity(role="user", id=name.lower(), name=name)
 
 
-async def build_memory(factories):
-    memory = Memory(
-        rfnry_memory.InMemoryStorage(),
-        embedding=VoyageProvider(),
-        generation=AnthropicProvider(),
-        decision=TypeSafeProvider(),
-        pillars={"text", "vector", "graph"},
-        relation_types=["PART_OF", "CONTACT_FOR", "SUPERSEDES"],
-    )
-    await memory.initialize()
-    manuals = [
-        (f"{factory}:{machine}", path)
-        for factory, machines in factories.items()
-        for machine in machines
-        for path in sorted(Path("manuals", factory).glob(f"{machine}*.md"))
+async def serve(socket, name: str, plant: str) -> None:
+    await server.serve(socket, identity=person(name), scope=plant)
+
+
+async def channels(plant: str) -> list[dict]:
+    return [
+        {
+            "line": line,
+            "machines": machines,
+            "elevated": [
+                thread.model_dump(mode="json")
+                for thread in await server.list_threads(
+                    plant, metadata={"line": line, "elevated": True}
+                )
+            ],
+        }
+        for line, machines in PLANTS[plant]["lines"].items()
     ]
-    await asyncio.gather(
-        *(memory.ingest(corpus, name=path.name, text=path.read_text()) for corpus, path in manuals)
+
+
+async def ask(plant: str, name: str, line: str, title: str, task: str | None) -> dict:
+    technician = person(name)
+    metadata = {"line": line, "title": title, "task": task, "technician": technician.id}
+    thread = await server.create_thread(plant, metadata=metadata | {"elevated": False})
+    await server.add_member(plant, thread.id, technician)
+    await server.add_member(plant, thread.id, ASSISTANT)
+    return thread.model_dump(mode="json")
+
+
+async def elevate(plant: str, name: str, thread_id: str) -> dict:
+    thread = await assistants[plant].get_thread(thread_id)
+    if thread.metadata["technician"] != person(name).id:
+        raise ForbiddenError(f"harness: only the technician who asked elevates {thread_id!r}")
+    elevated = await server.update_thread(plant, thread_id, thread.metadata | {"elevated": True})
+    return elevated.model_dump(mode="json")
+
+
+async def join(plant: str, name: str, thread_id: str) -> dict:
+    thread = await assistants[plant].get_thread(thread_id)
+    if not thread.metadata["elevated"]:
+        raise ForbiddenError(f"harness: thread {thread_id!r} is private until it is elevated")
+    await server.add_member(plant, thread_id, person(name))
+    return thread.model_dump(mode="json")
+
+
+async def listen() -> None:
+    await asyncio.gather(*(assist(plant) for plant in PLANTS))
+
+
+async def assist(plant: str) -> None:
+    me = assistants[plant] = await server.connect(identity=ASSISTANT, scope=plant)
+    async for item in me.events():
+        if isinstance(item, Invited):
+            await me.join(item.thread_id, since=0)
+        elif isinstance(item, Message):
+            thread = await me.get_thread(item.thread_id)
+            if item.author.id == thread.metadata["technician"]:
+                task = asyncio.create_task(answer(me, thread, item))
+                working.add(task)
+                task.add_done_callback(working.discard)
+
+
+async def answer(me: Client, thread: Thread, message: Message) -> None:
+    async def show(event) -> None:
+        if isinstance(event, ToolCallStarted):
+            await me.working(thread.id, label=event.tool)
+
+    tools = ThreadTools(
+        me, thread_id=thread.id, triggered_by=message.author, in_reply_to=message.id
     )
-    return memory
-
-
-def build_engine():
-    return Engine("agents", generation=AnthropicProvider(), tool_timeout=180)
+    facts = json.dumps(PLANTS[me.scope], indent=2, ensure_ascii=False)
+    run = await engine.run(
+        "maintenance",
+        scope=me.scope,
+        input=message.content,
+        task=thread.metadata["task"],
+        context=f"{facts}\n\nThis thread is about {thread.metadata['line']}.",
+        tools=tools.only("read_recent"),
+        on_event=show,
+    )
+    for step in run.steps:
+        await me.step(
+            thread.id,
+            name=step.tool,
+            input=step.args,
+            output=[Text(text=step.result)] if isinstance(step.result, str) else [],
+            is_error=step.is_error,
+            duration_ms=step.duration_ms,
+            in_reply_to=message.id,
+        )
+    await me.send(thread.id, run.reply, in_reply_to=message.id)
+    await me.idle(thread.id)

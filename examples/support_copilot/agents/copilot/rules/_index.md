@@ -1,3 +1,0 @@
-- rules/refunds.md — the refund window and matching receipts to invoices
-- rules/damaged-on-arrival.md — items that arrive broken, and the evidence they need
-- rules/escalation.md — what a support agent may not decide alone

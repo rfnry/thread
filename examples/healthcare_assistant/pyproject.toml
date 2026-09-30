@@ -1,0 +1,31 @@
+[project]
+name = "healthcare_assistant"
+version = "0"
+requires-python = ">=3.12"
+dependencies = [
+    "rfnry-thread",
+    "rfnry-engine",
+    "anthropic",
+    "httpx",
+    "fastapi",
+    "uvicorn",
+]
+
+[dependency-groups]
+dev = ["ruff"]
+
+[tool.uv]
+package = false
+
+[tool.uv.sources]
+rfnry-thread = { path = "../../packages/python", editable = true }
+rfnry-engine = { path = "../../../engine/packages/python", editable = true }
+
+[tool.ruff]
+line-length = 100
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "W", "B", "UP", "SIM"]
+
+[tool.ruff.lint.isort]
+known-local-folder = ["harness", "providers", "utils"]

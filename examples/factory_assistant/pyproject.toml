@@ -3,12 +3,11 @@ name = "factory_assistant"
 version = "0"
 requires-python = ">=3.12"
 dependencies = [
-    "anthropic",
-    "httpx",
-    "rfnry-engine",
-    "rfnry-memory",
     "rfnry-thread",
-    "voyageai",
+    "rfnry-engine",
+    "anthropic",
+    "fastapi",
+    "uvicorn",
 ]
 
 [dependency-groups]
@@ -20,7 +19,6 @@ package = false
 [tool.uv.sources]
 rfnry-thread = { path = "../../packages/python", editable = true }
 rfnry-engine = { path = "../../../engine/packages/python", editable = true }
-rfnry-memory = { path = "../../../memory/packages/python", editable = true }
 
 [tool.ruff]
 line-length = 100
@@ -29,4 +27,4 @@ line-length = 100
 select = ["E", "F", "I", "W", "B", "UP", "SIM"]
 
 [tool.ruff.lint.isort]
-known-local-folder = ["client", "harness", "providers", "server"]
+known-local-folder = ["harness", "providers"]

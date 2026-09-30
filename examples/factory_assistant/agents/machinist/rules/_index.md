@@ -1,1 +1,0 @@
-- rules/safety.md — what always comes first when someone works on a machine
