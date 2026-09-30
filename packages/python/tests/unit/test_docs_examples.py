@@ -78,7 +78,7 @@ def test_every_example_a_reason_names_exists() -> None:
         name for reason in ILLUSTRATIVE.values() for name in re.findall(r"examples/(\w+)", reason)
     ]
     assert named
-    assert all((EXAMPLES / name / "main.py").is_file() for name in named)
+    assert all((EXAMPLES / name / "src" / "main.py").is_file() for name in named)
 
 
 @pytest.mark.parametrize("block", runnable())

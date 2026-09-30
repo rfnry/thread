@@ -1,1 +1,0 @@
-- rules/ledger.md — what the ledger's columns mean, what a duplicate is, and how to total expenses

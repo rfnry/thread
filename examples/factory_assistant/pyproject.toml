@@ -27,4 +27,4 @@ line-length = 100
 select = ["E", "F", "I", "W", "B", "UP", "SIM"]
 
 [tool.ruff.lint.isort]
-known-local-folder = ["harness", "providers"]
+known-local-folder = ["harness", "providers", "routes"]

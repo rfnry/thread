@@ -15,7 +15,6 @@
       .user { background: #e8f0fe; margin-left: 4rem; }
       .assistant { background: #f2f2f2; margin-right: 4rem; }
       [data-who]::before { content: attr(data-who); display: block; font-size: 0.8em; color: #666; }
-      img { display: block; max-width: 16rem; margin-top: 0.5rem; }
       #status { color: #666; min-height: 1.5em; }
     </style>
   </head>
@@ -28,11 +27,11 @@
     <div id="app" hidden>
       <aside><ul id="threads"></ul></aside>
       <main>
+        <p id="waiting">Nothing yet: the assistant writes first.</p>
         <div id="log"></div>
         <p id="status"></p>
-        <form id="say">
-          <input id="text" placeholder="Ask, or send a photo" autocomplete="off" />
-          <input id="photo" type="file" accept="image/*" />
+        <form id="say" hidden>
+          <input id="text" autocomplete="off" required />
           <button>Send</button>
         </form>
       </main>

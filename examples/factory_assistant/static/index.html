@@ -3,44 +3,35 @@
   <head>
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1" />
-    <title>Acme Plastics maintenance</title>
+    <title>Acme Plastics Reno</title>
     <style>
-      body { font: 15px/1.45 system-ui, sans-serif; max-width: 64rem; margin: 2rem auto; padding: 0 1rem; }
+      body { font: 15px/1.45 system-ui, sans-serif; max-width: 56rem; margin: 2rem auto; padding: 0 1rem; }
       form { display: flex; gap: 0.5rem; }
       input { flex: 1; padding: 0.5rem; }
-      #app { display: grid; grid-template-columns: 18rem 1fr; gap: 2rem; }
-      aside h3 { margin-bottom: 0; }
-      aside small { color: #666; }
+      #app { display: grid; grid-template-columns: 12rem 1fr; gap: 2rem; }
       aside ul { padding-left: 1rem; }
       aside li button { all: unset; cursor: pointer; text-decoration: underline; }
       .user, .assistant { white-space: pre-wrap; padding: 0.5rem 0.75rem; border-radius: 0.5rem; }
       .user { background: #e8f0fe; }
       .assistant { background: #f2f2f2; }
       [data-who]::before { content: attr(data-who); display: block; font-size: 0.8em; color: #666; }
-      .step { font: 0.8em ui-monospace, monospace; color: #666; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
-      #here, #status { color: #666; min-height: 1.5em; }
+      .joined, #status { color: #666; font-size: 0.85em; min-height: 1.5em; }
     </style>
   </head>
   <body>
-    <h1>Acme Plastics maintenance</h1>
+    <h1>Acme Plastics Reno</h1>
     <form id="signin">
       <input id="name" placeholder="Your name" required />
-      <select id="plant">
-        <option value="plant-reno">Reno</option>
-        <option value="plant-monterrey">Monterrey</option>
-      </select>
       <button>Start</button>
     </form>
     <div id="app" hidden>
-      <aside id="channels"></aside>
-      <main id="thread" hidden>
+      <aside><h3>Channels</h3><ul id="channels"></ul></aside>
+      <main id="channel" hidden>
         <h2 id="title"></h2>
-        <p id="here"></p>
-        <button id="elevate">Elevate to the line</button>
         <div id="log"></div>
         <p id="status"></p>
         <form id="say">
-          <input id="text" autocomplete="off" required />
+          <input id="text" placeholder="Write @maintenance to ask the assistant" autocomplete="off" required />
           <button>Send</button>
         </form>
       </main>

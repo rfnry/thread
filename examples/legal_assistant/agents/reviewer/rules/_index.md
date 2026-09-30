@@ -1,1 +1,0 @@
-- rules/playbook.md — the positions the firm takes for a client buying services, clause by clause
