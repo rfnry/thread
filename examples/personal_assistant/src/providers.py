@@ -36,7 +36,7 @@ class AnthropicProvider:
     }
 
     def __init__(
-        self, model: str = "claude-sonnet-5", max_tokens: int = 4096, effort: str = "low"
+        self, model: str = "claude-sonnet-5", max_tokens: int = 4096, effort: str | None = "low"
     ) -> None:
         self.model = model
         self.max_tokens = max_tokens
@@ -62,7 +62,7 @@ class AnthropicProvider:
     def _request(
         self, system: str, messages: list[Message], tools: list[ToolSpec]
     ) -> dict[str, Any]:
-        return {
+        request: dict[str, Any] = {
             "model": self.model,
             "max_tokens": self.max_tokens,
             "system": system,
@@ -71,8 +71,10 @@ class AnthropicProvider:
                 {"name": t.name, "description": t.description, "input_schema": t.input_schema}
                 for t in tools
             ],
-            "output_config": {"effort": self.effort},
         }
+        if self.effort is not None:
+            request["output_config"] = {"effort": self.effort}
+        return request
 
     def _turns(self, messages: list[Message]) -> list[dict[str, Any]]:
         turns: list[dict[str, Any]] = []
