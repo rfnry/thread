@@ -1,6 +1,6 @@
 import asyncio
 
-from rfnry_engine import Stop, TextDelta, ToolCallStarted
+from rfnry_engine import Stop, TextDelta, ToolCallStarted, ToolResultReady
 from rfnry_thread import Cancel, Client, Identity, InMemoryStorage, Invited, Message, Server
 
 import harness
@@ -55,12 +55,15 @@ async def answer(me: Client, message: Message) -> None:
                     await reply.write(event.text)
                 elif isinstance(event, ToolCallStarted):
                     await me.working(thread_id, label=event.tool)
+                elif isinstance(event, ToolResultReady):
+                    step = event.step
+                    await me.step(
+                        thread_id, name=step.tool, input=step.args, in_reply_to=message.id
+                    )
 
             engine_run = await harness.run(
                 message.content, conversations.get(thread_id, []), on_event=show, stop=stop
             )
             conversations[thread_id] = engine_run.conversation
-            for step in engine_run.steps:
-                await me.step(thread_id, name=step.tool, input=step.args, in_reply_to=message.id)
             await reply.finish(engine_run.reply or "Stopped.")
         await me.idle(thread_id)
