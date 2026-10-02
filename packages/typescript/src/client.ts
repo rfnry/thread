@@ -22,6 +22,7 @@ import type {
   Part,
   Read,
   Retract,
+  Status,
   Step,
   Thread,
 } from './types.js'
@@ -185,6 +186,7 @@ export class Client {
   private readonly listeners = new Map<Listener, boolean>()
   private readonly cursors = new Map<string, number>()
   private stopped = false
+  private current: Status = 'open'
   private failure: ThreadException | null = null
   private waiting: Array<() => void> = []
   private readonly outbox: Outbox
@@ -294,13 +296,21 @@ export class Client {
     }
   }
 
+  private change(status: Status): void {
+    if (this.current === status || this.current === 'closed') return
+    this.current = status
+    this.emit({ kind: 'status', status })
+  }
+
   private lost(socket: WebSocket): void {
     if (this.socket !== socket) return
     this.socket = null
     for (const waiter of this.pending.values())
       waiter.reject(new TransportError('client: connection lost'))
     this.pending.clear()
-    if (!this.stopped) void this.reconnect()
+    if (this.stopped) return
+    this.change('reconnecting')
+    void this.reconnect()
   }
 
   private async reconnect(): Promise<void> {
@@ -319,6 +329,7 @@ export class Client {
         continue
       }
       await this.rejoin()
+      if (this.socket) this.change('open')
       return
     }
   }
@@ -337,6 +348,7 @@ export class Client {
   private fail(error: ThreadException): void {
     this.failure = error
     this.stopped = true
+    this.change('closed')
     this.settle(error)
   }
 
@@ -552,6 +564,10 @@ export class Client {
     await this.request('signal.send', { thread_id: threadId, kind: 'cancel', to })
   }
 
+  get status(): Status {
+    return this.current
+  }
+
   subscribe(listener: Listener, options: { includeOwn?: boolean } = {}): () => void {
     this.listeners.set(listener, options.includeOwn ?? false)
     return () => {
@@ -568,6 +584,7 @@ export class Client {
       waiter.reject(new TransportError('client: the client is closed'))
     this.pending.clear()
     socket?.close(1000, 'client: closed')
+    this.change('closed')
     this.settle(null)
   }
 }

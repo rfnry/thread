@@ -347,6 +347,12 @@ the upgrade), or whose `headers` function raises, stops the client, and `events(
 error. Items wait in the client until you read them, so an assistant that
 joins and then starts reading misses nothing.
 
+A client's `status` says where its connection is: `"open"`; `"reconnecting"` from the moment its
+socket drops until every thread it had joined is joined again; `"closed"` once it stops, by
+`close()` or a refused reconnect. Each change arrives in `events()` as a `StatusChanged` — `"open"`
+after the re-joins' `Joined` — the one item that names no thread. It is how a person's page says it
+is reconnecting.
+
 A connection that cannot keep up — its outbound queue over its bound with no write finishing for
 ten seconds — is closed, and its client resumes from its cursor. Stream deltas waiting for a slow
 connection are merged, never dropped.
@@ -490,10 +496,13 @@ reply.write('in full.')
 await reply.finish()
 ```
 
-`finish(content)` stores other content; `abort()` abandons. `client.closed` resolves when the
-client stops for good — `null` after `close()`, or the error when your `protocols` function throws
-on a reconnect, an expired session say. A browser cannot see why an upgrade failed, so a refused
-reconnect otherwise keeps retrying with backoff. Stores, hooks and rendering are your UI's.
+`finish(content)` stores other content; `abort()` abandons. `client.status` is the connection's —
+`'open'`, `'reconnecting'` or `'closed'` — and every listener hears each change as a
+`StatusChanged`, `{ kind: 'status', status }`: the one item without a thread, so a listener that
+follows one thread checks for it first. `client.closed` resolves when the client stops for good —
+`null` after `close()`, or the error when your `protocols` function throws on a reconnect, an
+expired session say. A browser cannot see why an upgrade failed, so a refused reconnect otherwise
+keeps retrying with backoff, `'reconnecting'` all along. Stores, hooks and rendering are your UI's.
 
 ## Tools
 
@@ -571,7 +580,7 @@ assert await server.verify_absent("acme")
 Everything the package exports, by role.
 
 - **Serve:** `Server`, with your `authorize` and `redact`; `Connection`.
-- **Take part:** `Client`, `Stream`, `Joined`.
+- **Take part:** `Client`, `Stream`, `Joined`, `StatusChanged`.
 - **Who and what:** `Identity`, `IdentityLike`, `Thread`, `Member`; parts `Text`, `Image`, `Audio`, `Document`, `Part`, `Content`.
 - **The log:** `Message`, `Step`, `Edit`, `Retract`, `Read`, `MemberAdded`, `MemberRemoved`, `ThreadUpdated`, `Custom`, `Event`; `resolve`.
 - **Right now:** `Working`, `Idle`, `StreamStart`, `StreamDelta`, `StreamEnd`, `Cancel`, `Present`, `Left`, `Invited`, `ThreadDeleted`, `Signal`.
@@ -582,8 +591,9 @@ Everything the package exports, by role.
 The TypeScript package is a client: it exports `connect`, the `Client` and `Stream` classes,
 `resolve`, the same error classes, and the types of the identity, parts, events, signals and records
 above, and nothing of the server, the storage or the tools; `Item` is what a listener receives — an
-event, a signal or a re-join's `Joined` — and `ConnectOptions`, `Protocols`, `Listener`,
-`StreamOptions`, `SendOptions`, `WriteOptions` and `StepOptions` type the options.
+event, a signal, a re-join's `Joined` or a `StatusChanged` — `Status` is what `client.status` holds,
+and `ConnectOptions`, `Protocols`, `Listener`, `StreamOptions`, `SendOptions`, `WriteOptions` and
+`StepOptions` type the options.
 
 ## Errors
 

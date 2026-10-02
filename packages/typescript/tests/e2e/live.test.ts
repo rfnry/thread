@@ -51,11 +51,17 @@ describe.skipIf(!url)('a live server', () => {
     await client.join(thread.id)
     await client.custom(thread.id, 'drop', {})
     await until(() => items.some((item) => 'truncated' in item))
+    await until(() => client.status === 'open')
+    expect(items.flatMap((item) => ('status' in item ? [item.status] : []))).toEqual([
+      'reconnecting',
+      'open',
+    ])
     const sent = await client.send(thread.id, 'after the drop')
     await until(() => items.some((item) => 'kind' in item && item.kind === 'stream.end'))
     const seqs = items.flatMap((item) => ('kind' in item && 'seq' in item ? [item.seq] : []))
     expect(new Set(seqs).size).toBe(seqs.length)
     expect(seqs).toContain(sent.seq)
     await client.close()
+    expect(client.status).toBe('closed')
   })
 })

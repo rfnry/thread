@@ -578,11 +578,24 @@ not joined the thread or `authorize` refuses `send`, `InputError` when `to` does
 async def events(self, include_own: bool = False) -> AsyncIterator[Item]: ...
 ```
 
-Yields, in order of arrival, each `Item`, which is `Event | Signal | Joined`: every event and signal
-of the threads joined, each `Invited`, and each re-join's `Joined`; the caller's own are left out
-unless `include_own`. Items wait in the client until read, and the iterator ends when the client
-closes. Raises the error that stopped the client: `ForbiddenError` when a reconnect was refused with
-HTTP 401 or 403 or the `headers` function raised.
+Yields, in order of arrival, each `Item`, which is `Event | Signal | Joined | StatusChanged`: every
+event and signal of the threads joined, each `Invited`, each re-join's `Joined`, and a
+`StatusChanged` each time `status` changes; the caller's own are left out unless `include_own`.
+Items wait in the client until read, and the iterator ends when the client closes. Raises the error
+that stopped the client: `ForbiddenError` when a reconnect was refused with HTTP 401 or 403 or the
+`headers` function raised.
+
+### `Client.status`
+
+```python
+@property
+def status(self) -> Status: ...
+```
+
+The connection's status, a `Status`, which is `Literal["open", "reconnecting", "closed"]`: `"open"`
+once connected, `"reconnecting"` from a dropped socket until it is back and every thread joined is
+joined again, and `"closed"` for good after `close()` or a refused reconnect. Each change arrives in
+`events()` as a `StatusChanged`.
 
 ### `Client.close`
 
@@ -590,8 +603,8 @@ HTTP 401 or 403 or the `headers` function raised.
 async def close(self) -> None: ...
 ```
 
-Closes the connection and stops reconnecting; pending verbs raise `TransportError` and `events()`
-ends. Closing again does nothing.
+Closes the connection and stops reconnecting; pending verbs raise `TransportError`, `status` becomes
+`"closed"` and `events()` ends. Closing again does nothing.
 
 ### `Stream`
 
@@ -1016,6 +1029,18 @@ class Joined(BaseModel):
 What a join returns: the thread, its last `seq` when the join happened, and whether the replay was
 cut short, or `since` was past that `seq`.
 
+### `StatusChanged`
+
+```python
+class StatusChanged(BaseModel):
+    kind: Literal["status"] = "status"
+    status: Status
+```
+
+What `events()` yields when the client's `status` changes: `"reconnecting"` when its socket drops,
+`"open"` after the re-joins that follow, `"closed"` when it stops. It names no thread and never
+travels on the wire.
+
 ## Tools
 
 ### `ThreadTools`
@@ -1407,18 +1432,21 @@ returns the connected client. Raises `ForbiddenError` when the `protocols` funct
 class Client {
   identity: Identity
   scope: string
+  readonly status: Status
   readonly closed: Promise<ThreadException | null>
   constructor(options: ConnectOptions)
 }
 ```
 
 A participant's connection, made by `connect`; the constructor alone opens no socket. `identity` and
-`scope` are as the server knows them, and `closed` resolves when the client stops for good: `null`
-after `close()`, or the error that stopped it, a `ForbiddenError` when the `protocols` function
-throws on a reconnect. Every method that talks to the server raises `TransportError` when the client
-is closed or not connected, except those that write an event, which retry across reconnects and
-raise it when not acknowledged within a minute, and raises again, with its class and message, an
-error the server raised.
+`scope` are as the server knows them. `status` is the connection's: `'open'` once connected,
+`'reconnecting'` from a dropped socket until it is back and every thread joined is joined again, and
+`'closed'` for good; listeners hear each change as a `StatusChanged`. `closed` resolves when the
+client stops for good: `null` after `close()`, or the error that stopped it, a `ForbiddenError` when
+the `protocols` function throws on a reconnect. Every method that talks to the server raises
+`TransportError` when the client is closed or not connected, except those that write an event,
+which retry across reconnects and raise it when not acknowledged within a minute, and raises again,
+with its class and message, an error the server raised.
 
 ### `Client.createThread`
 
@@ -1666,9 +1694,10 @@ not joined the thread or `authorize` refuses `send`, `InputError` when `to` does
 subscribe(listener: Listener, options: { includeOwn?: boolean } = {}): () => void
 ```
 
-Calls `listener` with every event and signal of the threads joined, each `Invited` and each
-re-join's `Joined` that arrive from now on; the caller's own are left out unless `includeOwn`.
-Returns the function that unsubscribes; a listener that throws does not stop the others.
+Calls `listener` with every event and signal of the threads joined, each `Invited`, each re-join's
+`Joined` and a `StatusChanged` each time `status` changes, from now on; the caller's own are left
+out unless `includeOwn`. Returns the function that unsubscribes; a listener that throws does not
+stop the others.
 
 ### `Client.close`
 
@@ -1676,8 +1705,8 @@ Returns the function that unsubscribes; a listener that throws does not stop the
 async close(): Promise<void>
 ```
 
-Closes the connection and stops reconnecting; pending methods raise `TransportError` and `closed`
-resolves with `null`. Closing again does nothing.
+Closes the connection and stops reconnecting; pending methods raise `TransportError`, `status`
+becomes `'closed'` and `closed` resolves with `null`. Closing again does nothing.
 
 ### `Stream`
 
@@ -2111,10 +2140,11 @@ and `sender`, stamped by the server.
 ### `Item`
 
 ```ts
-type Item = Event | Signal | Joined
+type Item = Event | Signal | Joined | StatusChanged
 ```
 
-What a listener receives: an event, a signal, or a re-join's `Joined`.
+What a listener receives: an event, a signal, a re-join's `Joined`, or a `StatusChanged`, the one
+item that names no thread.
 
 ### `Thread`
 
@@ -2145,6 +2175,24 @@ type Joined = { thread: Thread; seq: number; truncated: boolean }
 
 What a join returns, and what a listener receives after a re-join: the thread, its last `seq` when
 the join happened, and whether the replay was cut short, or `since` was past that `seq`.
+
+### `Status`
+
+```ts
+type Status = 'open' | 'reconnecting' | 'closed'
+```
+
+Where the client's connection is, as `client.status` says.
+
+### `StatusChanged`
+
+```ts
+type StatusChanged = { kind: 'status'; status: Status }
+```
+
+What a listener receives when the client's `status` changes: `'reconnecting'` when its socket drops,
+`'open'` after the re-joins that follow, `'closed'` when it stops. It names no thread and never
+travels on the wire.
 
 ### `ThreadException`
 

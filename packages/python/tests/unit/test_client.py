@@ -18,6 +18,7 @@ from rfnry_thread.models import (
     Present,
     Read,
     Retract,
+    StatusChanged,
     Step,
     StreamDelta,
     StreamEnd,
@@ -260,9 +261,15 @@ async def test_server_errors_are_raised_with_their_class_and_message(server: Ser
         await ana.working("t1")
 
 
-async def test_a_closed_client_ends_its_stream_and_refuses_calls(server: Server) -> None:
+async def test_a_closed_client_says_so_once_ends_its_stream_and_refuses_calls(
+    server: Server,
+) -> None:
     ana = await server.connect(identity=ANA, scope="acme")
+    opened = ana.status
     await ana.close()
+    await ana.close()
+    assert (opened, ana.status) == ("open", "closed")
+    assert [i async for i in ana.events()] == [StatusChanged(status="closed")]
     assert [i async for i in ana.events()] == []
     with pytest.raises(TransportError, match="^client: the client is closed$"):
         await ana.create_thread()

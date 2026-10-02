@@ -250,5 +250,13 @@ class Joined(BaseModel):
     truncated: bool = False
 
 
+Status = Literal["open", "reconnecting", "closed"]
+
+
+class StatusChanged(BaseModel):
+    kind: Literal["status"] = "status"
+    status: Status
+
+
 def parts(content: Content) -> list[Part]:
     return [Text(text=content)] if isinstance(content, str) else list(content)

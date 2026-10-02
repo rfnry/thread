@@ -97,4 +97,6 @@ export type Signal =
   | ThreadDeleted
 
 export type Joined = { thread: Thread; seq: number; truncated: boolean }
-export type Item = Event | Signal | Joined
+export type Status = 'open' | 'reconnecting' | 'closed'
+export type StatusChanged = { kind: 'status'; status: Status }
+export type Item = Event | Signal | Joined | StatusChanged

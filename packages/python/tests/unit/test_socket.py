@@ -4,6 +4,7 @@ from collections.abc import AsyncIterator
 from http import HTTPStatus
 
 import pytest
+from until import until
 from websockets.asyncio.server import ServerConnection, serve
 from websockets.http11 import Request, Response
 
@@ -11,7 +12,7 @@ from rfnry_thread import client as client_module
 from rfnry_thread.client import Client, Item
 from rfnry_thread.errors import ForbiddenError, TransportError
 from rfnry_thread.inmemory import InMemoryStorage
-from rfnry_thread.models import Identity, Joined, Message, Text
+from rfnry_thread.models import Identity, Joined, Message, StatusChanged, Text
 from rfnry_thread.server import Server
 
 from .factories import BRUNO
@@ -132,9 +133,9 @@ async def room(live: Live) -> tuple[Client, Client]:
     return ana, bruno
 
 
-async def read_to_the_end(client: Client) -> None:
-    async for _ in client.events():
-        pass
+async def read_to_the_end(client: Client, seen: list[Item]) -> None:
+    async for item in client.events():
+        seen.append(item)
 
 
 async def test_a_socket_client_is_the_same_client(live: Live) -> None:
@@ -192,6 +193,26 @@ async def test_a_socket_dropped_during_the_rejoin_reconnects_again(live: Live) -
     await bruno.send("t1", "live")
     after = [i for i in await drain(ana) if isinstance(i, Message)]
     assert [first_text(m) for m in after] == ["live"]
+
+
+async def test_a_dropped_socket_is_reconnecting_until_every_thread_is_resumed_then_open(
+    live: Live,
+) -> None:
+    ana, bruno = await room(live)
+    opened = ana.status
+    live.paused = True
+    await live.drop()
+    await until(lambda: ana.status == "reconnecting")
+    await bruno.send("t1", "while away")
+    await asyncio.sleep(0.1)
+    assert (opened, ana.status) == ("open", "reconnecting")
+    live.paused = False
+    await until(lambda: ana.status == "open", timeout=3.0)
+    told = [
+        item.status if isinstance(item, StatusChanged) else type(item).__name__
+        for item in await drain(ana, include_own=False)
+    ]
+    assert told == ["reconnecting", "Message", "Joined", "open"]
 
 
 async def test_a_resume_beyond_the_replay_limit_says_truncated(storage: InMemoryStorage) -> None:
@@ -268,10 +289,13 @@ async def test_an_upgrade_refused_on_reconnect_ends_the_stream_with_the_error(li
 
     ana = await Client.connect(live.url, headers=headers)
     await live.drop()
+    seen: list[Item] = []
     with pytest.raises(
         ForbiddenError, match="^websocket: the server refused the connection with http 401$"
     ):
-        await asyncio.wait_for(read_to_the_end(ana), 3.0)
+        await asyncio.wait_for(read_to_the_end(ana, seen), 3.0)
+    assert ana.status == "closed"
+    assert seen == [StatusChanged(status="reconnecting"), StatusChanged(status="closed")]
 
 
 async def test_a_headers_function_that_raises_on_reconnect_ends_the_stream_with_the_error(
@@ -287,7 +311,10 @@ async def test_a_headers_function_that_raises_on_reconnect_ends_the_stream_with_
 
     ana = await Client.connect(live.url, headers=headers)
     await live.drop()
+    seen: list[Item] = []
     with pytest.raises(
         ForbiddenError, match="^client: the headers function raised: session expired$"
     ):
-        await asyncio.wait_for(read_to_the_end(ana), 3.0)
+        await asyncio.wait_for(read_to_the_end(ana, seen), 3.0)
+    assert ana.status == "closed"
+    assert seen == [StatusChanged(status="reconnecting"), StatusChanged(status="closed")]

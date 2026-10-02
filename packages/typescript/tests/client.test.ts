@@ -228,6 +228,23 @@ describe('client', () => {
     expect(joins).toEqual([0, 4])
   })
 
+  it('is reconnecting from a dropped socket until every thread is resumed, then open', async () => {
+    const { client, items } = await joined()
+    expect(client.status).toBe('open')
+    server.push('event', message(4, 'before'))
+    await vi.waitFor(() => expect(items).toHaveLength(1))
+    server.down = true
+    server.drop()
+    await vi.waitFor(() => expect(client.status).toBe('reconnecting'))
+    await vi.waitFor(() => expect(server.sockets.length).toBeGreaterThan(3))
+    expect(client.status).toBe('reconnecting')
+    server.down = false
+    await vi.waitFor(() => expect(client.status).toBe('open'))
+    expect(
+      items.map((item) => ('status' in item ? item.status : 'truncated' in item ? 'joined' : 4))
+    ).toEqual([4, 'reconnecting', 'joined', 'open'])
+  })
+
   it('follows a thread made again under the same id from the head the server gives', async () => {
     const { items } = await joined()
     server.push('event', message(8, 'old'))
@@ -269,11 +286,18 @@ describe('client', () => {
         return ['thread', 'tok']
       },
     })
+    const items: Item[] = []
+    client.subscribe((item) => items.push(item))
     await client.join('t1', { since: 0 })
     expired = true
     server.drop()
     const reason = await client.closed
     expect(reason).toBeInstanceOf(ForbiddenError)
+    expect(client.status).toBe('closed')
+    expect(items).toEqual([
+      { kind: 'status', status: 'reconnecting' },
+      { kind: 'status', status: 'closed' },
+    ])
     await expect(client.send('t1', 'late')).rejects.toBeInstanceOf(ForbiddenError)
   })
 
@@ -303,6 +327,7 @@ describe('client', () => {
       expect(server.sockets.filter((socket) => socket.readyState === 1)).toEqual([])
     )
     expect(await client.closed).toBeNull()
+    expect(client.status).toBe('closed')
   })
 
   it('refuses calls after close', async () => {
@@ -310,5 +335,13 @@ describe('client', () => {
     await client.close()
     expect(await client.closed).toBeNull()
     await expect(client.getThread('t1')).rejects.toThrow('client: the client is closed')
+  })
+
+  it('is closed after close(), and listeners hear it once', async () => {
+    const { client, items } = await joined()
+    await client.close()
+    await client.close()
+    expect(client.status).toBe('closed')
+    expect(items).toEqual([{ kind: 'status', status: 'closed' }])
   })
 })

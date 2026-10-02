@@ -35,6 +35,8 @@ from rfnry_thread.models import (
     Read,
     Retract,
     Signal,
+    Status,
+    StatusChanged,
     Step,
     Thread,
     ThreadDeleted,
@@ -57,7 +59,7 @@ from rfnry_thread.websocket import open_socket
 
 Dial = Callable[[], Awaitable[Connection]]
 HeadersSource = dict[str, str] | Callable[[], Awaitable[dict[str, str]]]
-Item = Event | Signal | Joined
+Item = Event | Signal | Joined | StatusChanged
 
 HANDSHAKE = 10.0
 DEADLINE = 60.0
@@ -198,7 +200,12 @@ class Client:
         self._reader: asyncio.Task[None] | None = None
         self._reconnector: asyncio.Task[None] | None = None
         self._closed = False
+        self._status: Status = "open"
         self._failure: ThreadException | None = None
+
+    @property
+    def status(self) -> Status:
+        return self._status
 
     @classmethod
     async def connect(cls, url: str, *, headers: HeadersSource | None = None) -> Client:
@@ -276,6 +283,12 @@ class Client:
             self._cursors.pop(signal.thread_id, None)
         self._inbox.put_nowait(signal)
 
+    def _change(self, status: Status) -> None:
+        if self._status in (status, "closed"):
+            return
+        self._status = status
+        self._inbox.put_nowait(StatusChanged(status=status))
+
     def _lost(self, connection: Connection) -> None:
         if self._connection is not connection:
             return
@@ -284,7 +297,10 @@ class Client:
         for future in self._pending.values():
             if not future.done():
                 future.set_exception(TransportError("client: connection lost"))
-        if not self._closed and self._reconnector is None:
+        if self._closed:
+            return
+        self._change("reconnecting")
+        if self._reconnector is None:
             self._reconnector = asyncio.get_running_loop().create_task(self._reconnect())
 
     async def _reconnect(self) -> None:
@@ -303,6 +319,7 @@ class Client:
                     continue
                 await self._rejoin()
                 if self._connection is not None:
+                    self._change("open")
                     return
         finally:
             self._reconnector = None
@@ -321,6 +338,7 @@ class Client:
     def _fail(self, error: ThreadException) -> None:
         self._failure = error
         self._closed = True
+        self._change("closed")
         self._inbox.put_nowait(None)
 
     async def _request(self, method: str, payload: dict[str, Any]) -> dict[str, Any]:
@@ -608,4 +626,5 @@ class Client:
         for future in self._pending.values():
             if not future.done():
                 future.set_exception(TransportError("client: the client is closed"))
+        self._change("closed")
         self._inbox.put_nowait(None)

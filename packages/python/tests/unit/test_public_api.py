@@ -13,6 +13,7 @@ EXPECTED = {
     "Client",
     "Stream",
     "Joined",
+    "StatusChanged",
     "Identity",
     "IdentityLike",
     "Thread",
@@ -85,6 +86,7 @@ CLIENT = {
     "idle",
     "cancel",
     "events",
+    "status",
     "close",
 }
 
