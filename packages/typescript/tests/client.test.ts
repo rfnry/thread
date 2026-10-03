@@ -644,6 +644,37 @@ describe('client', () => {
     await client.close()
   })
 
+  it('keeps the cursor of a followed thread when a join of it fails', async () => {
+    const thread = (id: string) => ({
+      id,
+      scope: 'acme',
+      metadata: {},
+      created_at: '2026-01-01T12:00:00Z',
+    })
+    server.handlers.set('thread.follow', () => ({
+      joined: [{ thread: thread('t1'), seq: 3, truncated: false }],
+    }))
+    server.handlers.set('thread.join', ({ thread_id }) => {
+      throw { code: 'forbidden', message: `server: 'ana' may not read in thread '${thread_id}'` }
+    })
+    const client = await connect({ url: 'ws://fake', protocols: ['thread', 'tok'] })
+    const items: Item[] = []
+    client.subscribe((item) => items.push(item))
+    await client.follow()
+    const cursors = (client as unknown as { cursors: Map<string, number> }).cursors
+    for (const since of [undefined, 0]) {
+      await expect(client.join('t1', { since })).rejects.toBeInstanceOf(ForbiddenError)
+      expect(cursors.get('t1')).toBe(3)
+      server.push('event', message(3, 'repeat'))
+    }
+    await expect(client.join('t2')).rejects.toBeInstanceOf(ForbiddenError)
+    expect(cursors.has('t2')).toBe(false)
+    server.push('event', message(4, 'live'))
+    await vi.waitFor(() => expect(items.at(-1)).toMatchObject({ seq: 4 }))
+    expect(items.flatMap((item) => ('author' in item ? [item.seq] : []))).toEqual([4])
+    await client.close()
+  })
+
   it('forgets a leave once the server delivers that thread again from a new add', async () => {
     const t1 = { id: 't1', scope: 'acme', metadata: {}, created_at: '2026-01-01T12:00:00Z' }
     server.handlers.set('thread.follow', () => ({

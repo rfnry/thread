@@ -457,8 +457,8 @@ export class Client {
       since !== null && held !== undefined && since < held
         ? { since, held, taken: new Set<number>() }
         : null
+    if (held === undefined) this.cursors.set(threadId, since ?? 0)
     if (rewind) this.rewinds.set(threadId, rewind)
-    else this.cursors.set(threadId, since ?? 0)
     let joined: Joined
     try {
       joined = (await this.request('thread.join', {
@@ -516,12 +516,13 @@ export class Client {
   async join(threadId: string, options: { since?: number } = {}): Promise<Joined> {
     this.left.delete(threadId)
     this.leaving.delete(threadId)
+    const known = this.cursors.has(threadId)
     try {
       const joined = await this.joinFrom(threadId, options.since ?? null)
       this.held.add(threadId)
       return joined
     } catch (error) {
-      this.cursors.delete(threadId)
+      if (!known) this.cursors.delete(threadId)
       throw error
     }
   }

@@ -8,11 +8,13 @@ from until import until
 
 from rfnry_thread.client import Client, Item
 from rfnry_thread.errors import ConfigurationError, ForbiddenError, InputError, TransportError
+from rfnry_thread.inmemory import InMemoryStorage
 from rfnry_thread.models import (
     SYSTEM,
     Cancel,
     Custom,
     Edit,
+    Identity,
     Image,
     Invited,
     Marked,
@@ -27,8 +29,10 @@ from rfnry_thread.models import (
     StreamEnd,
     StreamStart,
     Text,
+    Thread,
     Working,
 )
+from rfnry_thread.protocol import Push
 from rfnry_thread.resolve import resolve
 from rfnry_thread.server import Server
 
@@ -417,6 +421,37 @@ async def test_a_follower_joining_since_a_seq_while_a_live_event_lands_gets_each
     assert page._cursors["t1"] == 6
     await ana.send("t1", "after")
     assert [item.seq for item in await drain(page) if isinstance(item, Message)] == [7]
+
+
+async def test_a_failed_join_keeps_the_cursor_of_a_thread_the_client_follows(
+    storage: InMemoryStorage,
+) -> None:
+    refusing = False
+
+    async def authorize(actor: Identity, action: str, thread: Thread) -> bool:
+        return not (refusing and actor.id == HELPER.id)
+
+    server = Server(storage, authorize=authorize)
+    ana = await server.connect(identity=ANA, scope="acme")
+    for thread_id in ("t1", "t2"):
+        await ana.create_thread(thread_id=thread_id)
+    await ana.add_member("t1", HELPER)
+    old = await ana.send("t1", "old")
+    page = await server.connect(identity=HELPER, scope="acme")
+    await page.follow()
+    await drain(page)
+    refusing = True
+    for since in (None, 0):
+        with pytest.raises(ForbiddenError):
+            await page.join("t1", since=since)
+        assert page._cursors["t1"] == old.seq
+        page._receive(Push(name="event", payload=old.model_dump(mode="json")))
+        assert [item for item in await drain(page) if isinstance(item, Message)] == []
+    with pytest.raises(ForbiddenError):
+        await page.join("t2")
+    assert "t2" not in page._cursors
+    live = await ana.send("t1", "live")
+    assert [item.seq for item in await drain(page) if isinstance(item, Message)] == [live.seq]
 
 
 async def test_history_and_list_threads_leave_out_the_new_fields_at_their_defaults(

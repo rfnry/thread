@@ -476,10 +476,10 @@ class Client:
     async def _join(self, thread_id: str, since: int | None) -> Joined:
         held = self._cursors.get(thread_id)
         rewind: tuple[range, set[int]] | None = None
-        if since is not None and held is not None and since < held:
-            rewind = self._rewinds[thread_id] = (range(since + 1, held + 1), set())
-        else:
+        if held is None:
             self._cursors[thread_id] = since or 0
+        elif since is not None and since < held:
+            rewind = self._rewinds[thread_id] = (range(since + 1, held + 1), set())
         try:
             reply = await self._request("thread.join", {"thread_id": thread_id, "since": since})
         finally:
@@ -531,10 +531,12 @@ class Client:
     async def join(self, thread_id: str, since: int | None = None) -> Joined:
         self._left.discard(thread_id)
         self._leaving.discard(thread_id)
+        known = thread_id in self._cursors
         try:
             joined = await self._join(thread_id, since)
         except ThreadException:
-            self._cursors.pop(thread_id, None)
+            if not known:
+                self._cursors.pop(thread_id, None)
             raise
         self._present.add(thread_id)
         return joined
