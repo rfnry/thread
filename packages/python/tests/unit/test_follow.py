@@ -344,7 +344,11 @@ async def test_a_mark_never_moves_back_and_must_name_a_seq_in_the_thread(server:
         await bruno.call("thread.mark", thread_id="t1", seq=0)
 
 
-async def test_a_mark_reaches_the_markers_own_connections_on_every_replica(
+def marks(pushes: list[dict[str, Any]]) -> list[tuple[str, int, int]]:
+    return [(p["thread_id"], p["seq"], p["unread"]) for p in pushes if p["kind"] == "marked"]
+
+
+async def test_a_mark_that_moves_reaches_only_the_markers_other_connections_on_every_replica(
     storage: InMemoryStorage,
 ) -> None:
     near, far = Server(storage), Server(storage)
@@ -352,18 +356,67 @@ async def test_a_mark_reaches_the_markers_own_connections_on_every_replica(
     await far.start()
     try:
         ana = await threads(near, "t1")
-        message = await say(ana, "t1", "hi")
+        first = await say(ana, "t1", "hi")
         phone = await Peer.open(near, HELPER)
+        tablet = await Peer.open(near, HELPER)
         laptop = await Peer.open(far, HELPER)
+        stranger = await Peer.open(far, ANA)
         await ana.quiet()
-        reply = await phone.call("thread.mark", thread_id="t1", seq=message["seq"])
-        assert reply == {"seq": message["seq"], "unread": 0}
+        reply = await phone.call("thread.mark", thread_id="t1", seq=first["seq"])
+        assert reply == {"seq": first["seq"], "unread": 0}
         told = await laptop.push("marked")
-        assert (told["thread_id"], told["seq"], told["unread"]) == ("t1", message["seq"], 0)
-        assert [p["kind"] for p in await ana.quiet()] == []
+        assert (told["thread_id"], told["seq"], told["unread"]) == ("t1", first["seq"], 0)
+        assert marks(await laptop.quiet()) == []
+        assert marks(await tablet.quiet()) == [("t1", first["seq"], 0)]
+        assert await phone.quiet() == [] and await stranger.quiet() == []
+        for seq in (first["seq"], first["seq"] - 1):
+            stays = await phone.call("thread.mark", thread_id="t1", seq=seq)
+            assert stays["seq"] == first["seq"]
+        second = await say(ana, "t1", "again")
+        await tablet.call("thread.mark", thread_id="t1", seq=second["seq"])
+        assert (await laptop.push("marked"))["seq"] == second["seq"]
+        heard = [marks(await peer.quiet()) for peer in (phone, tablet, laptop, stranger, ana)]
+        assert heard == [[("t1", second["seq"], 0)], [], [], [], []]
     finally:
         await near.stop()
         await far.stop()
+
+
+async def test_joining_a_followed_thread_since_a_seq_replays_up_to_where_it_is_once(
+    server: Server,
+) -> None:
+    ana = await threads(server, "t1")
+    for n in range(3):
+        await say(ana, "t1", f"m{n}")
+    helper = await Peer.open(server, HELPER)
+    [followed] = (await helper.call("thread.follow"))["joined"]
+    assert followed["seq"] == 5
+    joined = await helper.call("thread.join", thread_id="t1", since=0)
+    assert (joined["seq"], joined["truncated"]) == (5, False)
+    pushes = await helper.quiet()
+    assert [p["seq"] for p in pushes if "seq" in p] == [1, 2, 3, 4, 5]
+    assert texts(pushes) == ["m0", "m1", "m2"]
+    await say(ana, "t1", "live")
+    assert texts(await helper.quiet()) == ["live"]
+    again = await helper.call("thread.join", thread_id="t1", since=6)
+    assert (again["seq"], again["truncated"]) == (6, False)
+    assert await helper.quiet() == []
+
+
+async def test_joining_a_followed_thread_from_beyond_the_replay_limit_is_the_latest_and_truncated(
+    storage: InMemoryStorage,
+) -> None:
+    server = Server(storage, replay_limit=2)
+    ana = await threads(server, "t1")
+    for n in range(3):
+        await say(ana, "t1", f"m{n}")
+    helper = await Peer.open(server, HELPER)
+    await helper.call("thread.follow")
+    joined = await helper.call("thread.join", thread_id="t1", since=0)
+    assert (joined["seq"], joined["truncated"]) == (5, True)
+    assert texts(await helper.quiet()) == ["m1", "m2"]
+    await say(ana, "t1", "live")
+    assert texts(await helper.quiet()) == ["live"]
 
 
 async def test_history_reads_forward_after_a_seq_and_within_a_range(server: Server) -> None:

@@ -106,7 +106,7 @@ A **signal** is ephemeral. Every signal carries `thread_id` and `sender`, stampe
 | `Cancel` | `to` | asks an assistant to stop; what stopping means is its own |
 | `Present` / `Left` | — | the sender opened or closed the thread |
 | `Invited` | `thread` | you were added to a thread you have not joined |
-| `Marked` | `seq`, `unread` | your read position in the thread moved; only your own connections hear it |
+| `Marked` | `seq`, `unread` | your read position in the thread moved; only your other connections hear it |
 | `ThreadDeleted` | — | the thread is gone |
 
 `Signal` is any of them. `Thread` (`id`, `scope`, `metadata`, `created_at`) and `Member`

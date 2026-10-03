@@ -253,10 +253,11 @@ class Verbs:
         head = latest[-1].seq if latest else 0
         if not 0 <= seq <= head:
             raise InputError(f"server: seq must be between 0 and {head}")
-        stored, unread = await self._storage.mark(scope, thread_id, actor.id, seq)
-        await self._hub.marked(
-            scope, Marked(thread_id=thread_id, sender=actor, seq=stored, unread=unread)
-        )
+        stored, unread, moved = await self._storage.mark(scope, thread_id, actor.id, seq)
+        if moved:
+            await self._hub.marked(
+                session, Marked(thread_id=thread_id, sender=actor, seq=stored, unread=unread)
+            )
         return stored, unread
 
     async def join(self, session: Session, thread_id: str, since: int | None) -> Joined:

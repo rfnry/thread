@@ -304,16 +304,18 @@ async def test_initialize_backfills_the_latest_message_time_on_an_existing_datab
         await pool.close()
 
 
-async def test_a_mark_moves_forward_only_and_counts_what_others_said_after_it(
+async def test_a_mark_moves_forward_only_counts_what_others_said_after_it_and_says_if_it_moved(
     storage: Storage,
 ) -> None:
     await room(storage, "t1", "acme", ANA, BRUNO)
     for n in range(3):
         await storage.append_event("acme", say("t1", f"b{n}", author=BRUNO))
     await storage.append_event("acme", say("t1", "a0", author=ANA))
-    assert await storage.mark("acme", "t1", "ana", 1) == (1, 2)
-    assert await storage.mark("acme", "t1", "ana", 0) == (1, 2)
-    assert await storage.mark("acme", "t1", "ana", 4) == (4, 0)
+    assert await storage.mark("acme", "t1", "ana", 1) == (1, 2, True)
+    assert await storage.mark("acme", "t1", "ana", 0) == (1, 2, False)
+    assert await storage.mark("acme", "t1", "ana", 1) == (1, 2, False)
+    assert await storage.mark("acme", "t1", "ana", 4) == (4, 0, True)
+    assert await storage.mark("acme", "t1", "bruno", 0) == (0, 1, True)
 
 
 async def test_a_mark_needs_a_membership_and_leaves_with_it(storage: Storage) -> None:
@@ -324,12 +326,12 @@ async def test_a_mark_needs_a_membership_and_leaves_with_it(storage: Storage) ->
         "acme", Member(thread_id="t1", identity=BRUNO, added_at=AT, added_by=SYSTEM)
     )
     await storage.append_event("acme", say("t1", "b1", author=BRUNO))
-    assert await storage.mark("acme", "t1", "ana", 1) == (1, 0)
+    assert await storage.mark("acme", "t1", "ana", 1) == (1, 0, True)
     await storage.remove_member("acme", "t1", "ana")
     await storage.add_member(
         "acme", Member(thread_id="t1", identity=ANA, added_at=AT, added_by=SYSTEM)
     )
-    assert await storage.mark("acme", "t1", "ana", 0) == (0, 1)
+    assert await storage.mark("acme", "t1", "ana", 0) == (0, 1, True)
 
 
 async def test_baseline_marks_set_the_last_seq_only_where_there_is_no_mark(

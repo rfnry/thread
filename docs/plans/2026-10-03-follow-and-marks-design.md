@@ -110,9 +110,9 @@ There is no `unfollow`; closing the client ends following.
   apart from the pointer.
 - **Checks:** it requires membership and `authorize` `read`. A `seq` must be between 0 and the
   thread's last `seq` (`InputError`).
-- **Your other connections:** the participant's own other connections, on every replica, receive
-  `Marked(thread_id, seq, unread)`. `unread` is the count still unread after the mark, so they
-  don't recount.
+- **Your other connections:** when the mark moved, the participant's own other connections, on
+  every replica, receive `Marked(thread_id, seq, unread)`; the connection that marked does not.
+  `unread` is the count still unread after the mark, so they don't recount.
 
 **The handling pattern.** Handle, then mark. With concurrent handling, mark only up to the lowest
 event not yet handled. Resume is at-least-once: an event handled just before a crash arrives again,
@@ -233,8 +233,8 @@ The golden protocol fixtures, shared by the Python and TypeScript suites, cover 
 **Pushes:**
 - **`joined`:** server-initiated, sent when a following connection starts receiving a thread it
   was just added to. Only following connections receive it.
-- **A new signal, `Marked {thread_id, sender, seq, unread}`:** received only by the sender
-  identity's own connections. It joins the item union in both clients.
+- **A new signal, `Marked {thread_id, sender, seq, unread}`:** received, when the mark moved, only
+  by the sender identity's other connections. It joins the item union in both clients.
 
 **Both clients:**
 - **`follow`:** `follow(resume=False)` (TS `follow({ resume })`) records that the client follows,
@@ -271,7 +271,7 @@ consumer with an exhaustive switch over item kinds sees the new `marked` kind.
   - follow, live and resuming;
   - a membership added on one of two linked servers reaching a follower on the other;
   - the first mark at the add, and a membership from before starting at "now";
-  - marks moving forward only, and `Marked` reaching only the identity's own connections;
+  - marks moving forward only, and `Marked` reaching only the identity's other connections;
   - `unread` capped at 100;
   - activity order;
   - the preview with an edited, and with a retracted, last message;

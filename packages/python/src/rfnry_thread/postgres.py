@@ -415,17 +415,22 @@ class PostgresStorage:
             )
         return None if body is None else _event(body)
 
-    async def mark(self, scope: str, thread_id: str, identity_id: str, seq: int) -> tuple[int, int]:
+    async def mark(
+        self, scope: str, thread_id: str, identity_id: str, seq: int
+    ) -> tuple[int, int, bool]:
         async with self._guard("mark"), self._pool.acquire() as conn:
             row = await conn.fetchrow(
-                "WITH stored AS (INSERT INTO thread_marks (scope, thread_id, identity_id, seq, at) "
+                "WITH old AS (SELECT seq FROM thread_marks "
+                "WHERE scope = $1 AND thread_id = $2 AND identity_id = $3), "
+                "stored AS (INSERT INTO thread_marks (scope, thread_id, identity_id, seq, at) "
                 "SELECT $1, $2, $3, $4, now() WHERE EXISTS (SELECT 1 FROM thread_members "
                 "WHERE scope = $1 AND thread_id = $2 AND identity_id = $3) "
                 "ON CONFLICT (scope, thread_id, identity_id) DO UPDATE "
                 "SET seq = GREATEST(thread_marks.seq, EXCLUDED.seq), at = EXCLUDED.at RETURNING seq) "
                 "SELECT s.seq, (SELECT count(*) FROM (SELECT 1 FROM thread_events e "
                 "WHERE e.scope = $1 AND e.thread_id = $2 AND e.seq > s.seq AND e.kind = 'message' "
-                "AND e.author_id <> $3 LIMIT $5) u) AS unread FROM stored s",
+                "AND e.author_id <> $3 LIMIT $5) u) AS unread, "
+                "s.seq IS DISTINCT FROM (SELECT seq FROM old) AS moved FROM stored s",
                 scope,
                 thread_id,
                 identity_id,
@@ -436,7 +441,7 @@ class PostgresStorage:
             raise NotFoundError(
                 f"postgres: {identity_id!r} is not a member of thread {thread_id!r}"
             )
-        return int(row["seq"]), int(row["unread"])
+        return int(row["seq"]), int(row["unread"]), bool(row["moved"])
 
     async def baseline_marks(self, scope: str, identity_id: str) -> int:
         async with self._guard("baseline_marks"), self._pool.acquire() as conn:

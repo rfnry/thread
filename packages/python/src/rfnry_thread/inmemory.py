@@ -148,15 +148,18 @@ class InMemoryStorage:
     async def is_member(self, scope: str, thread_id: str, identity_id: str) -> bool:
         return identity_id in self._members.get((scope, thread_id), {})
 
-    async def mark(self, scope: str, thread_id: str, identity_id: str, seq: int) -> tuple[int, int]:
+    async def mark(
+        self, scope: str, thread_id: str, identity_id: str, seq: int
+    ) -> tuple[int, int, bool]:
         if identity_id not in self._members.get((scope, thread_id), {}):
             raise NotFoundError(
                 f"inmemory: {identity_id!r} is not a member of thread {thread_id!r}"
             )
         key = (scope, thread_id, identity_id)
-        stored = max(self._marks.get(key, seq), seq)
+        old = self._marks.get(key)
+        stored = seq if old is None else max(old, seq)
         self._marks[key] = stored
-        return stored, self._unread(scope, thread_id, identity_id, stored)
+        return stored, self._unread(scope, thread_id, identity_id, stored), stored != old
 
     def _unread(self, scope: str, thread_id: str, identity_id: str, after: int) -> int:
         count = 0

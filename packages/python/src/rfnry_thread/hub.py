@@ -113,7 +113,7 @@ class Hub:
             if session.dropped:
                 return Joined(thread=thread, seq=session.joined.get(thread_id, 0)), False
             if thread_id in session.joined:
-                return Joined(thread=thread, seq=session.joined[thread_id]), False
+                return await self._rewind(session, thread, since), False
             latest = await self.storage.list_events(scope, thread_id, limit=1)
             head = latest[-1].seq if latest else 0
             if not await self.storage.is_member(scope, thread_id, session.identity.id):
@@ -141,6 +141,24 @@ class Hub:
             for signal in self.state.snapshot(scope, thread_id):
                 session.push_signal(signal.model_dump(mode="json"))
         return Joined(thread=thread, seq=head, truncated=truncated), True
+
+    async def _rewind(self, session: Session, thread: Thread, since: int | None) -> Joined:
+        cursor = session.joined[thread.id]
+        if since is None or since >= cursor:
+            return Joined(thread=thread, seq=cursor)
+        truncated = cursor - since > self.replay_limit
+        replay = await self.storage.list_events(
+            session.scope,
+            thread.id,
+            since=None if truncated else since,
+            before=cursor + 1,
+            limit=self.replay_limit,
+        )
+        if session.dropped or session.joined.get(thread.id) != cursor:
+            return Joined(thread=thread, seq=cursor)
+        for event in replay:
+            session.outbound.put(Push(name="event", payload=event.model_dump(mode="json")))
+        return Joined(thread=thread, seq=cursor, truncated=truncated)
 
     async def follow(
         self, session: Session, threads: list[tuple[Thread, int | None]]
@@ -359,14 +377,18 @@ class Hub:
             piece = signal.model_copy(update={"text": signal.text[start : start + PIECE]})
             await self._publish(scope, signal.thread_id, piece.model_dump(mode="json"))
 
-    async def marked(self, scope: str, signal: Marked) -> None:
-        self._marked_here(scope, signal)
-        await self._publish(scope, signal.thread_id, signal.model_dump(mode="json"))
+    async def marked(self, origin: Session, signal: Marked) -> None:
+        self._marked_here(origin.scope, signal, origin)
+        await self._publish(origin.scope, signal.thread_id, signal.model_dump(mode="json"))
 
-    def _marked_here(self, scope: str, signal: Marked) -> None:
+    def _marked_here(self, scope: str, signal: Marked, origin: Session | None = None) -> None:
         payload = signal.model_dump(mode="json")
         for session in list(self.sessions):
-            if session.scope == scope and session.identity.id == signal.sender.id:
+            if (
+                session is not origin
+                and session.scope == scope
+                and session.identity.id == signal.sender.id
+            ):
                 session.push_signal(payload)
 
     async def _publish(self, scope: str, thread_id: str, payload: dict[str, Any]) -> None:

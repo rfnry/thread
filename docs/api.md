@@ -377,9 +377,11 @@ async def join(self, thread_id: str, since: int | None = None) -> Joined: ...
 
 Receives the thread live from now and returns a `Joined`. With `since`, the events after that `seq`
 arrive first (`since=0` for the whole log, at most the server's `replay_limit`, beyond which the
-latest and `truncated=True`), then the current state, then live traffic. Raises `InputError` when
-`since` is negative, `NotFoundError` when the scope holds no such thread, `ForbiddenError` when the
-caller is not a member or `authorize` refuses `read`.
+latest and `truncated=True`), then the current state, then live traffic. A thread the connection
+already receives, by following, keeps arriving live, and `since` hands its events after that `seq`
+up to where the connection is, once. Raises `InputError` when `since` is negative, `NotFoundError`
+when the scope holds no such thread, `ForbiddenError` when the caller is not a member or
+`authorize` refuses `read`.
 
 ### `Client.leave`
 
@@ -412,7 +414,8 @@ async def mark(self, thread_id: str, seq: int) -> int: ...
 ```
 
 Stores the caller's private read position in the thread, never lowering it, and returns the stored
-`seq`; the caller's other connections receive `Marked`. Raises `InputError` when `seq` is not
+`seq`; when the mark moved, the caller's other connections receive `Marked`. Raises `InputError`
+when `seq` is not
 between 0 and the thread's last `seq`, `NotFoundError` when the scope holds no such thread,
 `ForbiddenError` when the caller is not a member or `authorize` refuses `read`.
 
@@ -1012,8 +1015,8 @@ class Marked(BaseModel):
 ```
 
 Your private read position in the thread moved to `seq`, with `unread` messages by others still
-after it (at most 100); sent to every connection of the identity that marked, never to anyone
-else.
+after it (at most 100); sent, only when the mark moved, to the marking identity's other
+connections, never to the one that marked or to anyone else.
 
 ### `ThreadDeleted`
 
@@ -1269,7 +1272,7 @@ class Storage(Protocol):
 
     async def mark(
         self, scope: str, thread_id: str, identity_id: str, seq: int
-    ) -> tuple[int, int]: ...
+    ) -> tuple[int, int, bool]: ...
 
     async def baseline_marks(self, scope: str, identity_id: str) -> int: ...
 
@@ -1317,7 +1320,8 @@ listener is back; it returns a `Stop`, `stop()`, that ends it, and all four are 
 returning `None`. Raises `NotFoundError`, from `add_member` and `append_event`, when the scope holds
 no such thread, and `StorageError`, from `create_thread`, when the thread's scope is not `scope`.
 `mark` stores the identity's private read position in the thread, never lowering it, and returns
-it with the count of `message` events by others after it, at most 100; `baseline_marks` stores each
+it with the count of `message` events by others after it, at most 100, and whether it moved (a
+first mark, or a higher one); `baseline_marks` stores each
 thread's last `seq` as the mark of every membership of `identity_id` that has none, and returns how
 many it stored. `mark` raises `NotFoundError` when the identity is not a member of the thread.
 
@@ -1597,9 +1601,11 @@ async join(threadId: string, options: { since?: number } = {}): Promise<Joined>
 ```
 
 Receives the thread live from now and returns a `Joined`. With `since`, the events after that `seq`
-arrive first (`since: 0` for the whole log), then the current state, then live traffic. Raises
-`InputError` when `since` is negative, `NotFoundError` when the scope holds no such thread,
-`ForbiddenError` when the caller is not a member or `authorize` refuses `read`.
+arrive first (`since: 0` for the whole log), then the current state, then live traffic. A thread
+the connection already receives, by following, keeps arriving live, and `since` hands its events
+after that `seq` up to where the connection is, once. Raises `InputError` when `since` is negative,
+`NotFoundError` when the scope holds no such thread, `ForbiddenError` when the caller is not a
+member or `authorize` refuses `read`.
 
 ### `Client.leave`
 
@@ -1632,7 +1638,8 @@ async mark(threadId: string, seq: number): Promise<number>
 ```
 
 Stores the caller's private read position in the thread, never lowering it, and returns the stored
-`seq`; the caller's other connections receive `Marked`. Raises `InputError` when `seq` is not
+`seq`; when the mark moved, the caller's other connections receive `Marked`. Raises `InputError`
+when `seq` is not
 between 0 and the thread's last `seq`, `NotFoundError` when the scope holds no such thread,
 `ForbiddenError` when the caller is not a member or `authorize` refuses `read`.
 
@@ -2234,8 +2241,8 @@ type Marked = { kind: 'marked'; thread_id: string; sender: Identity; seq: number
 ```
 
 Your private read position in the thread moved to `seq`, with `unread` messages by others still
-after it (at most 100); sent to every connection of the identity that marked, never to anyone
-else.
+after it (at most 100); sent, only when the mark moved, to the marking identity's other
+connections, never to the one that marked or to anyone else.
 
 ### `ThreadDeleted`
 
