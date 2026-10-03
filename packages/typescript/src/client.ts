@@ -256,8 +256,9 @@ export class Client {
     try {
       return await protocols()
     } catch (error) {
+      if (error instanceof ForbiddenError) throw error
       const reason = error instanceof Error ? error.message : String(error)
-      throw new ForbiddenError(`client: the protocols function threw: ${reason}`)
+      throw new TransportError(`client: the protocols function threw: ${reason}`)
     }
   }
 

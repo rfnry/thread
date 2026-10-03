@@ -93,7 +93,7 @@ async def _headers(source: HeadersSource | None) -> dict[str, str] | None:
     except ThreadException:
         raise
     except Exception as exc:
-        raise ForbiddenError(f"client: the headers function raised: {exc}") from exc
+        raise TransportError(f"client: the headers function raised: {exc}") from exc
 
 
 def _own(item: Item, identity: Identity) -> bool:

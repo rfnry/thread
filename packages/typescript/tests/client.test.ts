@@ -36,18 +36,27 @@ describe('client', () => {
     expect(server.hellos).toEqual([{ type: 'hello', protocol: 1 }])
   })
 
-  it('raises an unreachable server and a protocols function that throws', async () => {
+  it('raises an unreachable server, a protocols function that refuses and one that fails', async () => {
     server.down = true
     await expect(connect({ url: 'ws://fake' })).rejects.toBeInstanceOf(TransportError)
     server.down = false
+    const refusing = connect({
+      url: 'ws://fake',
+      protocols: async () => {
+        throw new ForbiddenError('app: session expired')
+      },
+    })
+    await expect(refusing).rejects.toBeInstanceOf(ForbiddenError)
+    await expect(refusing).rejects.toThrow('app: session expired')
     const failing = connect({
       url: 'ws://fake',
       protocols: async () => {
-        throw new Error('session expired')
+        throw new TypeError('Failed to fetch')
       },
     })
-    await expect(failing).rejects.toBeInstanceOf(ForbiddenError)
-    await expect(failing).rejects.toThrow('client: the protocols function threw: session expired')
+    await expect(failing).rejects.toBeInstanceOf(TransportError)
+    await expect(failing).rejects.toThrow('client: the protocols function threw: Failed to fetch')
+    expect(server.sockets).toHaveLength(1)
   })
 
   it('speaks the protocol verb for verb', async () => {
@@ -277,12 +286,12 @@ describe('client', () => {
     expect(sent.seq).toBe(1)
   })
 
-  it('stops for good when the protocols function throws on a reconnect', async () => {
+  it('stops for good when the protocols function refuses on a reconnect', async () => {
     let expired = false
     const client = await connect({
       url: 'ws://fake',
       protocols: async () => {
-        if (expired) throw new Error('session expired')
+        if (expired) throw new ForbiddenError('app: session expired')
         return ['thread', 'tok']
       },
     })
@@ -298,48 +307,27 @@ describe('client', () => {
       { kind: 'status', status: 'reconnecting' },
       { kind: 'status', status: 'closed' },
     ])
-    await expect(client.send('t1', 'late')).rejects.toBeInstanceOf(ForbiddenError)
   })
 
-  it('raises a connection closed as a policy violation before its hello as a refusal', async () => {
-    server.refusing = true
-    const refused = connect({ url: 'ws://fake', protocols: ['thread', 'tok'] })
-    await expect(refused).rejects.toBeInstanceOf(ForbiddenError)
-    await expect(refused).rejects.toThrow(
-      'client: the server refused the connection with code 1008: session expired'
-    )
-  })
-
-  it('stops for good when a reconnect is closed as a policy violation before its hello', async () => {
-    const client = await connect({ url: 'ws://fake', protocols: ['thread', 'tok'] })
+  it('keeps reconnecting while the protocols function fails with anything but a refusal', async () => {
+    let failures = 2
+    const protocols = vi.fn(async () => {
+      if (protocols.mock.calls.length > 1 && failures > 0) {
+        failures -= 1
+        throw new TypeError('Failed to fetch')
+      }
+      return ['thread', 'tok']
+    })
+    const client = await connect({ url: 'ws://fake', protocols })
     const items: Item[] = []
     client.subscribe((item) => items.push(item))
     await client.join('t1', { since: 0 })
-    server.refusing = true
     server.drop()
-    const reason = await client.closed
-    expect(reason).toBeInstanceOf(ForbiddenError)
-    expect(reason?.message).toBe(
-      'client: the server refused the connection with code 1008: session expired'
-    )
-    expect(client.status).toBe('closed')
-    expect(server.hellos).toHaveLength(2)
-    expect(items).toEqual([
+    await vi.waitFor(() => expect(protocols).toHaveBeenCalledTimes(4))
+    await vi.waitFor(() => expect(client.status).toBe('open'))
+    expect(items.filter((item) => 'status' in item)).toEqual([
       { kind: 'status', status: 'reconnecting' },
-      { kind: 'status', status: 'closed' },
-    ])
-    await expect(client.send('t1', 'late')).rejects.toBeInstanceOf(ForbiddenError)
-  })
-
-  it('reconnects a socket closed as a policy violation after its hello', async () => {
-    const { client, items } = await joined()
-    server.current?.close(1008, 'token rotated')
-    await vi.waitFor(() => expect(items).toContainEqual({ kind: 'status', status: 'open' }))
-    expect(client.status).toBe('open')
-    expect(items.map((item) => ('status' in item ? item.status : 'joined'))).toEqual([
-      'reconnecting',
-      'joined',
-      'open',
+      { kind: 'status', status: 'open' },
     ])
     await client.close()
   })

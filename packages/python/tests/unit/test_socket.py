@@ -161,6 +161,36 @@ async def test_a_refused_upgrade_and_an_unreachable_server_raise(live: Live) -> 
         await Client.connect("ws://127.0.0.1:1", headers=ANA_HEADERS)
 
 
+async def test_a_headers_function_that_refuses_and_one_that_fails_raise_apart(live: Live) -> None:
+    async def refusing() -> dict[str, str]:
+        raise ForbiddenError("app: session expired")
+
+    async def failing() -> dict[str, str]:
+        raise OSError("network is unreachable")
+
+    with pytest.raises(ForbiddenError, match="^app: session expired$"):
+        await Client.connect(live.url, headers=refusing)
+    with pytest.raises(
+        TransportError, match="^client: the headers function raised: network is unreachable$"
+    ):
+        await Client.connect(live.url, headers=failing)
+
+
+async def test_a_headers_function_that_fails_on_a_reconnect_is_called_again(live: Live) -> None:
+    calls: list[int] = []
+
+    async def headers() -> dict[str, str]:
+        calls.append(1)
+        if len(calls) in (2, 3):
+            raise OSError("network is unreachable")
+        return ANA_HEADERS
+
+    ana = await Client.connect(live.url, headers=headers)
+    await live.drop()
+    await until(lambda: len(calls) >= 4 and ana.status == "open", timeout=3.0)
+    await ana.close()
+
+
 async def test_a_dropped_socket_resumes_every_joined_thread_in_order_once(live: Live) -> None:
     calls: list[int] = []
 
@@ -350,7 +380,7 @@ async def test_a_socket_closed_as_a_policy_violation_after_its_hello_reconnects(
     await ana.close()
 
 
-async def test_a_headers_function_that_raises_on_reconnect_ends_the_stream_with_the_error(
+async def test_a_headers_function_that_refuses_on_reconnect_ends_the_stream_with_the_error(
     live: Live,
 ) -> None:
     calls: list[int] = []
@@ -358,15 +388,13 @@ async def test_a_headers_function_that_raises_on_reconnect_ends_the_stream_with_
     async def headers() -> dict[str, str]:
         calls.append(1)
         if len(calls) > 1:
-            raise RuntimeError("session expired")
+            raise ForbiddenError("app: session expired")
         return ANA_HEADERS
 
     ana = await Client.connect(live.url, headers=headers)
     await live.drop()
     seen: list[Item] = []
-    with pytest.raises(
-        ForbiddenError, match="^client: the headers function raised: session expired$"
-    ):
+    with pytest.raises(ForbiddenError, match="^app: session expired$"):
         await asyncio.wait_for(read_to_the_end(ana, seen), 3.0)
     assert ana.status == "closed"
     assert seen == [StatusChanged(status="reconnecting"), StatusChanged(status="closed")]

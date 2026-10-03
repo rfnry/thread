@@ -351,8 +351,9 @@ with fresh `headers`; a following client follows again from the last `seq` it sa
 (and joins each one instead when that fails), and every client re-joins every thread it had joined
 from there; the missed events arrive before anything new. A re-follow's or re-join's `Joined` also
 arrives in `events()`, and when it says `truncated`, redraw from the latest page. A reconnect your endpoint refuses (HTTP 401 or 403 on
-the upgrade, or 1008 before the hello is answered), or whose `headers` function raises, stops the
-client, and `events()` raises that error. Items wait in the client until you read them, so an
+the upgrade, or 1008 before the hello is answered), or whose `headers` function raises
+`ForbiddenError`, stops the client, and `events()` raises that error; any other error from `headers`
+is a failed attempt, retried with backoff and the function called again. Items wait in the client until you read them, so an
 assistant that joins and then starts reading misses nothing.
 
 A client's `status` says where its connection is: `"open"`; `"reconnecting"` from the moment its
@@ -539,7 +540,9 @@ Securing the upgrade is yours, like the rest of authentication. A short checklis
   so without the check any page the person visits could speak as them (cross-site WebSocket
   hijacking).
 - Prefer short-lived tokens. `headers` in Python and `protocols` in TypeScript may be async
-  functions, called on every reconnect, so a fresh token goes with each attempt.
+  functions, called on every reconnect, so a fresh token goes with each attempt. Raise
+  `ForbiddenError` from one to refuse the connection for good; any other error, a failed token fetch
+  while the network is down say, counts as a failed attempt and the client keeps reconnecting.
 
 ### The TypeScript client
 
@@ -581,8 +584,8 @@ await reply.finish()
 `'open'`, `'reconnecting'` or `'closed'` — and every listener hears each change as a
 `StatusChanged`, `{ kind: 'status', status }`: the one item without a thread, so a listener that
 follows one thread checks for it first. `client.closed` resolves when the client stops for good —
-`null` after `close()`, or the error when your `protocols` function throws on a reconnect or your
-endpoint refuses it, an expired session say. A browser cannot see why an upgrade failed, so an
+`null` after `close()`, or the error when your `protocols` function throws `ForbiddenError` on a
+reconnect or your endpoint refuses it, an expired session say. A browser cannot see why an upgrade failed, so an
 upgrade refused with HTTP 401 or 403 keeps retrying with backoff, `'reconnecting'` all along; a
 connection accepted and closed with 1008 is the refusal it sees. Stores, hooks and rendering are
 your UI's.
@@ -686,7 +689,7 @@ thread, so it is a `NotFoundError` too, except in `create_thread`, which refuses
 non-member, an `authorize` that says no, an edit or retraction of someone else's event, a signal
 from a connection that has not joined the thread, and on a client, an upgrade refused with HTTP 401
 or 403, a connection closed with 1008 before its hello is answered, or a `headers` or `protocols`
-function that raised. `InputError` for a request the library
+function that raised `ForbiddenError`. `InputError` for a request the library
 refuses: an empty scope, an empty thread id given to `create_thread`, an identity whose fields do
 not fit, a `system` identity added as a member, a `limit` outside 1 to 500 on `list_threads` or
 `history`, a join given both `since` and `resume`, a `working` label over 1000 characters, a media
