@@ -9,8 +9,9 @@ from contextlib import asynccontextmanager
 from typing import Any
 
 from rfnry_thread.errors import NotFoundError, StorageError, ThreadException
-from rfnry_thread.models import EVENTS, Event, Member, Thread
-from rfnry_thread.storage import UNREAD_CAP, OnEvent, OnResume, OnSignal, Stop
+from rfnry_thread.models import EVENTS, Event, Member, Order, Thread
+from rfnry_thread.resolve import last_message
+from rfnry_thread.storage import PREVIEW_DEPTH, UNREAD_CAP, OnEvent, OnResume, OnSignal, Stop
 
 EVENTS_CHANNEL = "thread_events"
 SIGNALS_CHANNEL = "thread_signals"
@@ -24,10 +25,14 @@ _DDL = [
     CREATE TABLE IF NOT EXISTS thread_threads (
         scope TEXT NOT NULL, id TEXT NOT NULL, metadata JSONB NOT NULL,
         created_at TIMESTAMPTZ NOT NULL, last_seq BIGINT NOT NULL DEFAULT 0,
+        last_message_at TIMESTAMPTZ,
         PRIMARY KEY (scope, id))
     """,
+    "ALTER TABLE thread_threads ADD COLUMN IF NOT EXISTS last_message_at TIMESTAMPTZ",
     "CREATE INDEX IF NOT EXISTS ix_thread_threads_created ON thread_threads (scope, created_at DESC, id DESC)",
     "CREATE INDEX IF NOT EXISTS ix_thread_threads_metadata ON thread_threads USING GIN (metadata)",
+    "CREATE INDEX IF NOT EXISTS ix_thread_threads_activity ON thread_threads "
+    "(scope, (COALESCE(last_message_at, created_at)) DESC, id DESC)",
     """
     CREATE TABLE IF NOT EXISTS thread_members (
         scope TEXT NOT NULL, thread_id TEXT NOT NULL, identity_id TEXT NOT NULL,
@@ -55,6 +60,12 @@ _DDL = [
     """,
 ]
 
+_BACKFILL = (
+    "UPDATE thread_threads t SET last_message_at = m.at FROM (SELECT scope, thread_id, "
+    "max((body->>'created_at')::timestamptz) AS at FROM thread_events WHERE kind = 'message' "
+    "GROUP BY scope, thread_id) m WHERE t.scope = m.scope AND t.id = m.thread_id"
+)
+
 _THREAD = "scope, id, metadata, created_at"
 
 
@@ -68,6 +79,17 @@ def _thread(row: Any) -> Thread:
         scope=row["scope"],
         metadata=_json(row["metadata"]),
         created_at=row["created_at"],
+    )
+
+
+def _listed(row: Any) -> Thread:
+    return _thread(row).model_copy(
+        update={
+            "last_seq": int(row["last_seq"]),
+            "last_message_at": row["last_message_at"],
+            "marked": None if row["marked"] is None else int(row["marked"]),
+            "unread": None if row["unread"] is None else int(row["unread"]),
+        }
     )
 
 
@@ -95,8 +117,16 @@ class PostgresStorage:
     async def initialize(self) -> None:
         async with self._guard("initialize"), self._pool.acquire() as conn, conn.transaction():
             await conn.execute("SELECT pg_advisory_xact_lock($1)", _LOCK)
+            existed = await conn.fetchval("SELECT to_regclass('thread_threads') IS NOT NULL")
+            had = await conn.fetchval(
+                "SELECT EXISTS (SELECT 1 FROM information_schema.columns WHERE "
+                "table_schema = current_schema() AND table_name = 'thread_threads' "
+                "AND column_name = 'last_message_at')"
+            )
             for ddl in _DDL:
                 await conn.execute(ddl)
+            if existed and not had:
+                await conn.execute(_BACKFILL)
 
     async def create_thread(self, scope: str, thread: Thread) -> tuple[Thread, bool]:
         if thread.scope != scope:
@@ -135,33 +165,72 @@ class PostgresStorage:
         before: str | None = None,
         limit: int = 50,
         metadata: dict[str, Any] | None = None,
+        order: Order = "created",
+        preview: bool = False,
     ) -> list[Thread]:
-        join = ""
-        where = ["t.scope = $1"]
         args: list[Any] = [scope]
+        join = ""
+        marks = "NULL::bigint AS marked, NULL::bigint AS unread"
         if member_id is not None:
             args.append(member_id)
+            who = f"${len(args)}"
+            args.append(UNREAD_CAP)
             join = (
                 "JOIN thread_members m ON m.scope = t.scope AND m.thread_id = t.id "
-                f"AND m.identity_id = ${len(args)} "
+                f"AND m.identity_id = {who} LEFT JOIN thread_marks k ON k.scope = m.scope "
+                "AND k.thread_id = m.thread_id AND k.identity_id = m.identity_id "
             )
+            marks = (
+                "k.seq AS marked, CASE WHEN k.seq IS NULL THEN NULL ELSE (SELECT count(*) FROM "
+                "(SELECT 1 FROM thread_events e WHERE e.scope = t.scope AND e.thread_id = t.id "
+                f"AND e.seq > k.seq AND e.kind = 'message' AND e.author_id <> {who} "
+                f"LIMIT ${len(args)}) u) END AS unread"
+            )
+        where = ["t.scope = $1"]
         if metadata:
             args.append(json.dumps(metadata))
             where.append(f"t.metadata @> ${len(args)}::jsonb")
+        key = "t.created_at" if order == "created" else "COALESCE(t.last_message_at, t.created_at)"
+        anchor = (
+            "a.created_at" if order == "created" else "COALESCE(a.last_message_at, a.created_at)"
+        )
         if before is not None:
             args.append(before)
             where.append(
-                "(t.created_at, t.id) < (SELECT a.created_at, a.id FROM thread_threads a "
+                f"({key}, t.id) < (SELECT {anchor}, a.id FROM thread_threads a "
                 f"WHERE a.scope = $1 AND a.id = ${len(args)})"
             )
         args.append(max(limit, 0))
         async with self._guard("list_threads"), self._pool.acquire() as conn:
             rows = await conn.fetch(
-                f"SELECT t.scope, t.id, t.metadata, t.created_at FROM thread_threads t {join}"
-                f"WHERE {' AND '.join(where)} ORDER BY t.created_at DESC, t.id DESC LIMIT ${len(args)}",
+                f"SELECT t.scope, t.id, t.metadata, t.created_at, t.last_seq, t.last_message_at, "
+                f"{marks} FROM thread_threads t {join}WHERE {' AND '.join(where)} "
+                f"ORDER BY {key} DESC, t.id DESC LIMIT ${len(args)}",
                 *args,
             )
-        return [_thread(row) for row in rows]
+            threads = [_listed(row) for row in rows]
+            if preview and threads:
+                threads = await self._previewed(conn, scope, threads)
+        return threads
+
+    async def _previewed(self, conn: Any, scope: str, threads: list[Thread]) -> list[Thread]:
+        rows = await conn.fetch(
+            "SELECT p.id AS thread_id, e.body FROM unnest($2::text[]) AS p(id) CROSS JOIN LATERAL "
+            "(SELECT x.body FROM thread_events x WHERE x.scope = $1 AND x.thread_id = p.id "
+            "AND x.kind IN ('message', 'edit', 'retract') AND x.seq >= COALESCE((SELECT min(y.seq) "
+            "FROM (SELECT seq FROM thread_events WHERE scope = $1 AND thread_id = p.id "
+            "AND kind = 'message' ORDER BY seq DESC LIMIT $3) y), 0)) e",
+            scope,
+            [thread.id for thread in threads],
+            PREVIEW_DEPTH,
+        )
+        found: dict[str, list[Event]] = {}
+        for row in rows:
+            found.setdefault(row["thread_id"], []).append(_event(row["body"]))
+        return [
+            t.model_copy(update={"last_message": last_message(found.get(t.id, []))})
+            for t in threads
+        ]
 
     async def update_thread(
         self, scope: str, thread_id: str, metadata: dict[str, Any]
@@ -268,12 +337,22 @@ class PostgresStorage:
                 stored.client_id,
                 stored.model_dump_json(),
             )
-            await conn.execute(
-                "UPDATE thread_threads SET last_seq = $3 WHERE scope = $1 AND id = $2",
-                scope,
-                stored.thread_id,
-                stored.seq,
-            )
+            if stored.kind == "message":
+                await conn.execute(
+                    "UPDATE thread_threads SET last_seq = $3, last_message_at = $4 "
+                    "WHERE scope = $1 AND id = $2",
+                    scope,
+                    stored.thread_id,
+                    stored.seq,
+                    stored.created_at,
+                )
+            else:
+                await conn.execute(
+                    "UPDATE thread_threads SET last_seq = $3 WHERE scope = $1 AND id = $2",
+                    scope,
+                    stored.thread_id,
+                    stored.seq,
+                )
             await conn.execute(
                 "SELECT pg_notify($1, $2)",
                 EVENTS_CHANNEL,

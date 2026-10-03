@@ -7,7 +7,17 @@ from unit.factories import ANA, AT, BRUNO, HELPER
 from until import until
 
 from rfnry_thread.errors import NotFoundError
-from rfnry_thread.models import SYSTEM, Event, Member, Message, Read, Text, Thread
+from rfnry_thread.models import (
+    SYSTEM,
+    Edit,
+    Event,
+    Member,
+    Message,
+    Read,
+    Retract,
+    Text,
+    Thread,
+)
 from rfnry_thread.storage import Storage
 
 from .conftest import fresh, postgres_pool
@@ -228,9 +238,7 @@ async def test_the_same_thread_id_in_two_scopes_is_two_threads(storage: Storage)
     await storage.append_event("tenant-a", say("t1", "c1", "MARKER-A"))
     assert await storage.list_events("tenant-b", "t1") == []
     assert await storage.get_event("tenant-b", "t1", "id-c1-MARKER-A") is None
-    assert await storage.list_threads("tenant-b", "ana") == [
-        await storage.get_thread("tenant-b", "t1")
-    ]
+    assert [t.id for t in await storage.list_threads("tenant-b", "ana")] == ["t1"]
     assert await storage.delete_scope("tenant-a") == 3
     assert await storage.verify_absent("tenant-a")
     assert not await storage.verify_absent("tenant-b")
@@ -277,6 +285,23 @@ async def test_initialize_adds_the_metadata_index_to_an_existing_database() -> N
         )
     await pool.close()
     assert definition is not None and "USING gin (metadata)" in definition
+
+
+@pytest.mark.postgres
+async def test_initialize_backfills_the_latest_message_time_on_an_existing_database() -> None:
+    pool = await postgres_pool()
+    try:
+        storage = await fresh(pool)
+        await room(storage, "t1")
+        await storage.append_event("acme", say("t1", "c1"))
+        async with pool.acquire() as conn:
+            await conn.execute("DROP INDEX IF EXISTS ix_thread_threads_activity")
+            await conn.execute("ALTER TABLE thread_threads DROP COLUMN last_message_at")
+        await storage.initialize()
+        [listed] = await storage.list_threads("acme", None)
+        assert listed.last_message_at == AT
+    finally:
+        await pool.close()
 
 
 async def test_a_mark_moves_forward_only_and_counts_what_others_said_after_it(
@@ -328,3 +353,92 @@ async def test_a_deleted_scope_takes_its_marks_along(storage: Storage) -> None:
     await storage.mark("acme", "t1", "ana", 0)
     assert await storage.delete_scope("acme") == 3
     assert await storage.verify_absent("acme")
+
+
+async def test_a_member_listing_carries_its_mark_and_what_others_said_after_it(
+    storage: Storage,
+) -> None:
+    await room(storage, "t1", "acme", ANA, BRUNO)
+    await storage.append_event("acme", say("t1", "b1", author=BRUNO))
+    await storage.append_event("acme", say("t1", "a1", author=ANA))
+    await storage.append_event("acme", say("t1", "b2", author=BRUNO))
+    [before] = await storage.list_threads("acme", "ana")
+    assert (before.last_seq, before.marked, before.unread) == (3, None, None)
+    await storage.mark("acme", "t1", "ana", 1)
+    [after] = await storage.list_threads("acme", "ana")
+    assert (after.marked, after.unread) == (1, 1)
+    [anyone] = await storage.list_threads("acme", None)
+    assert (anyone.last_seq, anyone.marked, anyone.unread) == (3, None, None)
+
+
+async def test_unread_is_counted_up_to_100(storage: Storage) -> None:
+    await room(storage, "t1", "acme", ANA, BRUNO)
+    await storage.mark("acme", "t1", "ana", 0)
+    for n in range(105):
+        await storage.append_event("acme", say("t1", f"b{n}", author=BRUNO))
+    [listed] = await storage.list_threads("acme", "ana")
+    assert listed.unread == 100
+
+
+async def test_activity_order_follows_the_latest_message_and_pages(storage: Storage) -> None:
+    for minutes, thread_id in enumerate(["a", "b", "c"]):
+        await storage.create_thread("acme", thread(thread_id, minutes=minutes))
+        await storage.add_member(
+            "acme", Member(thread_id=thread_id, identity=ANA, added_at=AT, added_by=SYSTEM)
+        )
+    late = say("a", "late").model_copy(update={"created_at": AT + timedelta(hours=1)})
+    await storage.append_event("acme", late)
+    read = Read(
+        id="r1",
+        thread_id="b",
+        author=ANA,
+        created_at=AT + timedelta(hours=2),
+        client_id="r1",
+        up_to_seq=1,
+    )
+    await storage.append_event("acme", read)
+
+    async def listed(**query: Any) -> list[str]:
+        threads = await storage.list_threads("acme", "ana", order="activity", **query)
+        return [t.id for t in threads]
+
+    assert await listed() == ["a", "c", "b"]
+    assert await listed(before="a") == ["c", "b"]
+    assert await listed(before="c", limit=1) == ["b"]
+    assert [t.id for t in await storage.list_threads("acme", "ana")] == ["c", "b", "a"]
+    [first] = await storage.list_threads("acme", "ana", order="activity", limit=1)
+    assert first.last_message_at == AT + timedelta(hours=1)
+
+
+async def test_a_preview_shows_the_latest_message_with_its_edit_and_skips_a_retracted_one(
+    storage: Storage,
+) -> None:
+    await room(storage, "t1", "acme", ANA)
+    first, _ = await storage.append_event("acme", say("t1", "c1", "first"))
+    second, _ = await storage.append_event("acme", say("t1", "c2", "second"))
+    edit = Edit(
+        id="ed",
+        thread_id="t1",
+        author=ANA,
+        created_at=AT,
+        client_id="c3",
+        target=first.id,
+        content=[Text(text="first, edited")],
+    )
+    await storage.append_event("acme", edit)
+    [plain] = await storage.list_threads("acme", "ana")
+    assert plain.last_message is None
+    assert "last_message" not in plain.model_dump(mode="json")
+    [shown] = await storage.list_threads("acme", "ana", preview=True)
+    assert shown.last_message is not None
+    assert shown.last_message.content == [Text(text="second")]
+    retract = Retract(
+        id="rt", thread_id="t1", author=ANA, created_at=AT, client_id="c4", target=second.id
+    )
+    await storage.append_event("acme", retract)
+    [after] = await storage.list_threads("acme", "ana", preview=True)
+    assert after.last_message is not None
+    assert (after.last_message.id, after.last_message.content) == (
+        first.id,
+        [Text(text="first, edited")],
+    )

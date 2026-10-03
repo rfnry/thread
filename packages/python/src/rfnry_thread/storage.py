@@ -3,7 +3,7 @@ from __future__ import annotations
 from collections.abc import Awaitable, Callable, Sequence
 from typing import Any, Protocol, runtime_checkable
 
-from rfnry_thread.models import Event, Member, Thread
+from rfnry_thread.models import Event, Member, Order, Thread
 
 OnEvent = Callable[[str, str, int], Awaitable[None]]
 OnSignal = Callable[[str, str, dict[str, Any]], Awaitable[None]]
@@ -11,6 +11,7 @@ OnResume = Callable[[], Awaitable[None]]
 Stop = Callable[[], Awaitable[None]]
 
 UNREAD_CAP = 100
+PREVIEW_DEPTH = 5
 
 
 @runtime_checkable
@@ -28,6 +29,8 @@ class Storage(Protocol):
         before: str | None = None,
         limit: int = 50,
         metadata: dict[str, Any] | None = None,
+        order: Order = "created",
+        preview: bool = False,
     ) -> list[Thread]: ...
 
     async def update_thread(

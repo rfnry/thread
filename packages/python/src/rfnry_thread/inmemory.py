@@ -2,11 +2,13 @@ from __future__ import annotations
 
 import json
 from collections.abc import Sequence
+from datetime import datetime
 from typing import Any
 
 from rfnry_thread.errors import NotFoundError, StorageError
-from rfnry_thread.models import Event, Member, Thread
-from rfnry_thread.storage import UNREAD_CAP, OnEvent, OnResume, OnSignal, Stop
+from rfnry_thread.models import Event, Member, Order, Thread
+from rfnry_thread.resolve import last_message
+from rfnry_thread.storage import PREVIEW_DEPTH, UNREAD_CAP, OnEvent, OnResume, OnSignal, Stop
 
 Key = tuple[str, str]
 
@@ -30,6 +32,7 @@ class InMemoryStorage:
         self._events: dict[Key, list[Event]] = {}
         self._keys: dict[tuple[str, str, str, str], Event] = {}
         self._marks: dict[tuple[str, str, str], int] = {}
+        self._last_message_at: dict[Key, datetime] = {}
         self._listeners: list[tuple[OnEvent, OnSignal]] = []
 
     async def initialize(self) -> None:
@@ -56,7 +59,13 @@ class InMemoryStorage:
         before: str | None = None,
         limit: int = 50,
         metadata: dict[str, Any] | None = None,
+        order: Order = "created",
+        preview: bool = False,
     ) -> list[Thread]:
+        def key(thread: Thread) -> tuple[datetime, str]:
+            moment = self._last_message_at.get((scope, thread.id)) if order == "activity" else None
+            return (moment or thread.created_at, thread.id)
+
         threads = [
             thread
             for (owner, thread_id), thread in self._threads.items()
@@ -64,13 +73,36 @@ class InMemoryStorage:
             and (member_id is None or member_id in self._members[(owner, thread_id)])
             and _contains(thread.metadata, metadata or {})
         ]
-        threads.sort(key=lambda t: (t.created_at, t.id), reverse=True)
+        threads.sort(key=key, reverse=True)
         if before is not None:
             anchor = self._threads.get((scope, before))
             if anchor is None:
                 return []
-            threads = [t for t in threads if (t.created_at, t.id) < (anchor.created_at, anchor.id)]
-        return threads[: max(limit, 0)]
+            threads = [t for t in threads if key(t) < key(anchor)]
+        return [self._listed(scope, t, member_id, preview) for t in threads[: max(limit, 0)]]
+
+    def _listed(self, scope: str, thread: Thread, member_id: str | None, preview: bool) -> Thread:
+        log = self._events[(scope, thread.id)]
+        marked = None if member_id is None else self._marks.get((scope, thread.id, member_id))
+        unread = (
+            None
+            if member_id is None or marked is None
+            else self._unread(scope, thread.id, member_id, marked)
+        )
+        return thread.model_copy(
+            update={
+                "last_seq": len(log),
+                "last_message_at": self._last_message_at.get((scope, thread.id)),
+                "marked": marked,
+                "unread": unread,
+                "last_message": last_message(self._window(log)) if preview else None,
+            }
+        )
+
+    def _window(self, log: list[Event]) -> list[Event]:
+        seqs = [event.seq for event in log if event.kind == "message"][-PREVIEW_DEPTH:]
+        start = seqs[0] if seqs else 0
+        return [e for e in log if e.seq >= start and e.kind in ("message", "edit", "retract")]
 
     async def update_thread(
         self, scope: str, thread_id: str, metadata: dict[str, Any]
@@ -88,6 +120,7 @@ class InMemoryStorage:
             return False
         self._members.pop(key, None)
         self._events.pop(key, None)
+        self._last_message_at.pop(key, None)
         self._marks = {k: v for k, v in self._marks.items() if k[:2] != key}
         self._keys = {k: v for k, v in self._keys.items() if k[:2] != key}
         return True
@@ -153,6 +186,8 @@ class InMemoryStorage:
             return existing, False
         stored = event.model_copy(update={"seq": len(log) + 1})
         log.append(stored)
+        if stored.kind == "message":
+            self._last_message_at[(scope, stored.thread_id)] = stored.created_at
         self._keys[dedup] = stored
         for on_event, _ in list(self._listeners):
             await on_event(scope, stored.thread_id, stored.seq)

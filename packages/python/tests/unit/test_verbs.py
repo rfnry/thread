@@ -274,9 +274,11 @@ async def test_listing_skips_what_authorize_refuses_and_reads_on_to_fill_the_pag
         before: str | None = None,
         limit: int = 50,
         metadata: dict[str, Any] | None = None,
+        order: Any = "created",
+        preview: bool = False,
     ) -> list[Thread]:
         reads.append(before)
-        return await original(scope, member_id, before, limit, metadata)
+        return await original(scope, member_id, before, limit, metadata, order, preview)
 
     storage.list_threads = counted  # type: ignore[method-assign]
 

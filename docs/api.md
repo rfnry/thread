@@ -1001,9 +1001,18 @@ class Thread(BaseModel):
     scope: str
     metadata: dict[str, Any] = {}
     created_at: datetime
+    last_seq: int | None = None
+    last_message_at: datetime | None = None
+    marked: int | None = None
+    unread: int | None = None
+    last_message: Message | None = None
 ```
 
-A conversation: `id` yours or the server's, `scope` its tenant, `metadata` yours.
+A conversation: `id` yours or the server's, `scope` its tenant, `metadata` yours. A listed thread
+also carries `last_seq` and `last_message_at` (when its latest message was written); listed for a
+member, `marked` (the member's private read position, `None` without one) and `unread` (messages by
+others after it, at most 100); with `preview`, `last_message` (the latest message not retracted,
+with its edits). Fields without a value are left out on the wire.
 
 ### `Member`
 
@@ -1183,6 +1192,8 @@ class Storage(Protocol):
         before: str | None = None,
         limit: int = 50,
         metadata: dict[str, Any] | None = None,
+        order: Order = "created",
+        preview: bool = False,
     ) -> list[Thread]: ...
 
     async def update_thread(
@@ -1240,7 +1251,9 @@ writes a row, and the log is append-only: an event is removed only with its thre
 existing thread, membership, or event of the same author and `client_id` comes back with `False`,
 and a new event gets the thread's next `seq`); the getters return `None` for what the scope does not
 hold, `list_threads` returns threads newest first and `list_events` events in `seq` order, with
-`since` the first after it and without it the latest. `listen` takes an `OnEvent`, `on_event(scope,
+`since` the first after it and without it the latest. `order="activity"` lists by the latest message
+instead, a thread without messages by its creation; `preview=True` fills each thread's
+`last_message`. `listen` takes an `OnEvent`, `on_event(scope,
 thread_id, seq)`, and an `OnSignal`, `on_signal(scope, thread_id, payload)`, called for what any
 server on the storage appends or publishes, and an `OnResume`, `on_resume()`, called once a dropped
 listener is back; it returns a `Stop`, `stop()`, that ends it, and all four are async functions
@@ -2164,10 +2177,19 @@ type Thread = {
   scope: string
   metadata: Record<string, unknown>
   created_at: string
+  last_seq?: number
+  last_message_at?: string
+  marked?: number
+  unread?: number
+  last_message?: Message
 }
 ```
 
-A conversation: `id` yours or the server's, `scope` its tenant, `metadata` yours.
+A conversation: `id` yours or the server's, `scope` its tenant, `metadata` yours. A listed thread
+also carries `last_seq` and `last_message_at` (when its latest message was written); listed for a
+member, `marked` (the member's private read position, `None` without one) and `unread` (messages by
+others after it, at most 100); with `preview`, `last_message` (the latest message not retracted,
+with its edits). Fields without a value are left out on the wire.
 
 ### `Member`
 

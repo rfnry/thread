@@ -8,9 +8,11 @@ from pydantic import (
     BaseModel,
     ConfigDict,
     Field,
+    SerializerFunctionWrapHandler,
     TypeAdapter,
     ValidationError,
     field_serializer,
+    model_serializer,
     model_validator,
 )
 
@@ -86,11 +88,25 @@ def as_identity(value: IdentityLike) -> Identity:
 SYSTEM = Identity(role="system", id="system", name="system")
 
 
+LISTED = frozenset({"last_seq", "last_message_at", "marked", "unread", "last_message"})
+Order = Literal["created", "activity"]
+
+
 class Thread(BaseModel):
     id: str
     scope: str
     metadata: dict[str, Any] = {}
     created_at: datetime
+    last_seq: int | None = None
+    last_message_at: datetime | None = None
+    marked: int | None = None
+    unread: int | None = None
+    last_message: Message | None = None
+
+    @model_serializer(mode="wrap")
+    def _listed(self, handler: SerializerFunctionWrapHandler) -> dict[str, Any]:
+        data: dict[str, Any] = handler(self)
+        return {key: value for key, value in data.items() if key not in LISTED or value is not None}
 
 
 class Member(BaseModel):
@@ -168,6 +184,7 @@ Event = Annotated[
     Field(discriminator="kind"),
 ]
 EVENTS: TypeAdapter[Event] = TypeAdapter(Event)
+Thread.model_rebuild()
 CLIENT_EVENTS = frozenset({"message", "step", "edit", "retract", "read", "custom"})
 
 
