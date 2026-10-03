@@ -1,6 +1,6 @@
 from urllib.parse import unquote
 
-from fastapi import APIRouter, WebSocket, WebSocketException
+from fastapi import APIRouter, WebSocket
 from pydantic import BaseModel
 
 import server
@@ -17,9 +17,10 @@ class Nudge(BaseModel):
 @router.websocket("/ws")
 async def ws(websocket: WebSocket) -> None:
     name = unquote(websocket.cookies.get("name", "")).strip()
-    if not name or websocket.headers.get("origin") not in ORIGINS:
-        raise WebSocketException(code=1008)
     await websocket.accept()
+    if not name or websocket.headers.get("origin") not in ORIGINS:
+        await websocket.close(code=1008)
+        return
     await server.serve(websocket, name)
 
 

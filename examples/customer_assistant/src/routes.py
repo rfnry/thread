@@ -1,7 +1,7 @@
 from typing import Annotated
 from urllib.parse import unquote
 
-from fastapi import APIRouter, Cookie, Depends, WebSocket, WebSocketException
+from fastapi import APIRouter, Cookie, Depends, WebSocket
 
 import server
 
@@ -17,10 +17,12 @@ Name = Annotated[str, Depends(signed_in)]
 
 
 @router.websocket("/ws")
-async def ws(websocket: WebSocket, name: Name) -> None:
-    if not name or websocket.headers.get("origin") not in ORIGINS:
-        raise WebSocketException(code=1008)
+async def ws(websocket: WebSocket) -> None:
+    name = unquote(websocket.cookies.get("name", "")).strip()
     await websocket.accept()
+    if not name or websocket.headers.get("origin") not in ORIGINS:
+        await websocket.close(code=1008)
+        return
     await server.serve(websocket, name)
 
 
