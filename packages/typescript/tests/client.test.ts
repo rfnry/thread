@@ -1,6 +1,6 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { type Client, connect } from '../src/client.js'
-import { ForbiddenError, InputError, TransportError } from '../src/errors.js'
+import { ConfigurationError, ForbiddenError, InputError, TransportError } from '../src/errors.js'
 import { timing } from '../src/timing.js'
 import type { Item } from '../src/types.js'
 import { FakeServer, helper, message } from './fakes.js'
@@ -303,6 +303,35 @@ describe('client', () => {
     const reason = await client.closed
     expect(reason).toBeInstanceOf(ForbiddenError)
     expect(client.status).toBe('closed')
+    expect(items).toEqual([
+      { kind: 'status', status: 'reconnecting' },
+      { kind: 'status', status: 'closed' },
+    ])
+  })
+
+  it('raises a library error from the protocols function as it is, and stops on one on a reconnect', async () => {
+    const misconfigured = connect({
+      url: 'ws://fake',
+      protocols: async () => {
+        throw new ConfigurationError('app: no token endpoint')
+      },
+    })
+    await expect(misconfigured).rejects.toBeInstanceOf(ConfigurationError)
+    await expect(misconfigured).rejects.toThrow('app: no token endpoint')
+    let broken = false
+    const protocols = vi.fn(async () => {
+      if (broken) throw new ConfigurationError('app: no token endpoint')
+      return ['thread', 'tok']
+    })
+    const client = await connect({ url: 'ws://fake', protocols })
+    const items: Item[] = []
+    client.subscribe((item) => items.push(item))
+    broken = true
+    server.drop()
+    const reason = await client.closed
+    expect(reason).toBeInstanceOf(ConfigurationError)
+    expect(reason?.message).toBe('app: no token endpoint')
+    expect(protocols).toHaveBeenCalledTimes(2)
     expect(items).toEqual([
       { kind: 'status', status: 'reconnecting' },
       { kind: 'status', status: 'closed' },

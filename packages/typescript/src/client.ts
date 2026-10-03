@@ -3,7 +3,7 @@ import {
   ForbiddenError,
   InputError,
   raised,
-  type ThreadException,
+  ThreadException,
   TransportError,
 } from './errors.js'
 import { Outbox } from './outbox.js'
@@ -256,7 +256,7 @@ export class Client {
     try {
       return await protocols()
     } catch (error) {
-      if (error instanceof ForbiddenError) throw error
+      if (error instanceof ThreadException) throw error
       const reason = error instanceof Error ? error.message : String(error)
       throw new TransportError(`client: the protocols function threw: ${reason}`)
     }

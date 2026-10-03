@@ -350,11 +350,12 @@ sees `seq` 7 before `seq` 6, and never skips one. A dropped socket reconnects wi
 with fresh `headers`; a following client follows again from the last `seq` it saw in each thread
 (and joins each one instead when that fails), and every client re-joins every thread it had joined
 from there; the missed events arrive before anything new. A re-follow's or re-join's `Joined` also
-arrives in `events()`, and when it says `truncated`, redraw from the latest page. A reconnect your endpoint refuses (HTTP 401 or 403 on
-the upgrade, or 1008 before the hello is answered), or whose `headers` function raises
-`ForbiddenError`, stops the client, and `events()` raises that error; any other error from `headers`
-is a failed attempt, retried with backoff and the function called again. Items wait in the client until you read them, so an
-assistant that joins and then starts reading misses nothing.
+arrives in `events()`, and when it says `truncated`, redraw from the latest page. A reconnect your
+endpoint refuses (HTTP 401 or 403 on the upgrade, or 1008 before the hello is answered), or whose
+`headers` function raises `ForbiddenError`, stops the client, and `events()` raises that error; an
+error from `headers` that is not the library's is a failed attempt, retried with backoff and the
+function called again. Items wait in the client until you read them, so an assistant that joins and
+then starts reading misses nothing.
 
 A client's `status` says where its connection is: `"open"`; `"reconnecting"` from the moment its
 socket drops until it follows again, if it was following, and every thread it had joined is joined
@@ -541,8 +542,9 @@ Securing the upgrade is yours, like the rest of authentication. A short checklis
   hijacking).
 - Prefer short-lived tokens. `headers` in Python and `protocols` in TypeScript may be async
   functions, called on every reconnect, so a fresh token goes with each attempt. Raise
-  `ForbiddenError` from one to refuse the connection for good; any other error, a failed token fetch
-  while the network is down say, counts as a failed attempt and the client keeps reconnecting.
+  `ForbiddenError` from one to refuse the connection for good, as the example below does for an
+  expired session; an error that is not the library's, a failed token fetch while the network is
+  down say, counts as a failed attempt and the client keeps reconnecting.
 
 ### The TypeScript client
 
@@ -550,11 +552,14 @@ Securing the upgrade is yours, like the rest of authentication. A short checklis
 dependencies:
 
 ```ts
-import { connect, resolve } from '@rfnry/thread'
+import { connect, ForbiddenError, resolve } from '@rfnry/thread'
 
 const client = await connect({
   url: 'wss://app.example.com/thread',
-  protocols: async () => ['thread', await session.token()],
+  protocols: async () => {
+    if (session.expired) throw new ForbiddenError('session expired')
+    return ['thread', await session.token()]
+  },
 })
 const unsubscribe = client.subscribe(render, { includeOwn: true })
 const joined = await client.join(threadId, { since: 0 })

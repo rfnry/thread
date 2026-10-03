@@ -306,10 +306,11 @@ async def connect(cls, url: str, *, headers: HeadersSource | None = None) -> Cli
 Connects over a WebSocket to `url` and returns the client. `headers` go with the upgrade; a
 `HeadersSource` is `dict[str, str] | Callable[[], Awaitable[dict[str, str]]]`, a dict or an async
 function returning one, called on every attempt so a token can refresh. Raises `ForbiddenError` when
-the upgrade is refused with HTTP 401 or 403, the socket is closed with 1008 before the hello is
-answered, or the `headers` function raises `ForbiddenError`, `TransportError` when the socket cannot
-be opened, the hello goes unanswered, or the `headers` function raises anything else; on a
-reconnect that is a failed attempt, retried with backoff.
+the upgrade is refused with HTTP 401 or 403 or the socket is closed with 1008 before the hello is
+answered, and `TransportError` when the socket cannot be opened or the hello goes unanswered. The
+`headers` function refuses by raising `ForbiddenError`: a `ThreadException` it raises is raised as
+it is, and anything else as a `TransportError`, which on a reconnect is a failed attempt, retried
+with backoff.
 
 ### `Client.create_thread`
 
@@ -647,7 +648,8 @@ event and signal of the threads joined, each `Invited`, each re-join's `Joined`,
 `StatusChanged` each time `status` changes; the caller's own are left out unless `include_own`.
 Items wait in the client until read, and the iterator ends when the client closes. Raises the error
 that stopped the client: `ForbiddenError` when a reconnect was refused with HTTP 401 or 403 or
-closed with 1008 before its hello was answered, or the `headers` function raised `ForbiddenError`.
+closed with 1008 before its hello was answered, or the `ForbiddenError` or `ConfigurationError` the
+`headers` function raised.
 
 ### `Client.status`
 
@@ -1531,10 +1533,11 @@ async function connect(options: ConnectOptions): Promise<Client>
 ```
 
 Opens a WebSocket to `options.url`, offering `options.protocols` as the subprotocol list, and
-returns the connected client. Raises `ForbiddenError` when the `protocols` function throws
-`ForbiddenError` or the socket is closed with 1008 before the hello is answered, `TransportError`
-when the socket cannot be opened, the hello goes unanswered, or the `protocols` function throws
-anything else.
+returns the connected client. Raises `ForbiddenError` when the socket is closed with 1008 before the
+hello is answered, and `TransportError` when the socket cannot be opened or the hello goes
+unanswered. The `protocols` function refuses by throwing `ForbiddenError`: a `ThreadException` it
+throws is raised as it is, and anything else as a `TransportError`, which on a reconnect is a failed
+attempt, retried with backoff.
 
 ### `Client`
 
@@ -1553,12 +1556,12 @@ A participant's connection, made by `connect`; the constructor alone opens no so
 `'reconnecting'` from a dropped socket until it is back and every thread joined is joined again, and
 `'closed'` for good; listeners hear each change as a `StatusChanged`. `closed` resolves when the
 client stops for good: `null` after `close()`, or the error that stopped it, a `ForbiddenError` when
-the `protocols` function throws `ForbiddenError` on a reconnect or the reconnect is closed with 1008
-before its hello is answered; any other error from `protocols` is a failed attempt, retried with
-backoff. Every method that talks to the server raises
-`TransportError` when the client is closed or not connected, except those that write an event,
-which retry across reconnects and raise it when not acknowledged within a minute, and raises again,
-with its class and message, an error the server raised.
+a reconnect is closed with 1008 before its hello is answered, or the `ForbiddenError` or
+`ConfigurationError` the `protocols` function throws on a reconnect; anything else it throws is a
+failed attempt, retried with backoff. Every method that talks to the server raises `TransportError`
+when the client is closed or not connected, except those that write an event, which retry across
+reconnects and raise it when not acknowledged within a minute, and raises again, with its class and
+message, an error the server raised.
 
 ### `Client.createThread`
 

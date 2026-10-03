@@ -11,7 +11,13 @@ from websockets.http11 import Request, Response
 
 from rfnry_thread import client as client_module
 from rfnry_thread.client import Client, Item
-from rfnry_thread.errors import ForbiddenError, InputError, ThreadException, TransportError
+from rfnry_thread.errors import (
+    ConfigurationError,
+    ForbiddenError,
+    InputError,
+    ThreadException,
+    TransportError,
+)
 from rfnry_thread.inmemory import InMemoryStorage
 from rfnry_thread.models import Identity, Joined, Message, StatusChanged, Text
 from rfnry_thread.server import Server
@@ -397,6 +403,31 @@ async def test_a_headers_function_that_refuses_on_reconnect_ends_the_stream_with
     with pytest.raises(ForbiddenError, match="^app: session expired$"):
         await asyncio.wait_for(read_to_the_end(ana, seen), 3.0)
     assert ana.status == "closed"
+    assert seen == [StatusChanged(status="reconnecting"), StatusChanged(status="closed")]
+
+
+async def test_a_library_error_from_the_headers_function_is_raised_as_it_is_and_stops_a_reconnect(
+    live: Live,
+) -> None:
+    async def misconfigured() -> dict[str, str]:
+        raise ConfigurationError("app: no token endpoint")
+
+    with pytest.raises(ConfigurationError, match="^app: no token endpoint$"):
+        await Client.connect(live.url, headers=misconfigured)
+    calls: list[int] = []
+
+    async def headers() -> dict[str, str]:
+        calls.append(1)
+        if len(calls) > 1:
+            raise ConfigurationError("app: no token endpoint")
+        return ANA_HEADERS
+
+    ana = await Client.connect(live.url, headers=headers)
+    await live.drop()
+    seen: list[Item] = []
+    with pytest.raises(ConfigurationError, match="^app: no token endpoint$"):
+        await asyncio.wait_for(read_to_the_end(ana, seen), 3.0)
+    assert (ana.status, len(calls)) == ("closed", 2)
     assert seen == [StatusChanged(status="reconnecting"), StatusChanged(status="closed")]
 
 
