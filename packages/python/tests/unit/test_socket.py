@@ -36,6 +36,7 @@ class Live:
         self.server = server
         self.open: list[Served] = []
         self.paused = False
+        self.refusing = False
         self.drop_ack = False
         self.drop_join = False
         self.url = ""
@@ -82,6 +83,9 @@ async def running(server: Server) -> AsyncIterator[Live]:
         return None
 
     async def handler(socket: ServerConnection) -> None:
+        if live.refusing:
+            await socket.close(1008, "session expired")
+            return
         identity = who(socket.request)
         assert identity is not None
         served = Served(socket, live)
@@ -297,6 +301,53 @@ async def test_an_upgrade_refused_on_reconnect_ends_the_stream_with_the_error(li
         await asyncio.wait_for(read_to_the_end(ana, seen), 3.0)
     assert ana.status == "closed"
     assert seen == [StatusChanged(status="reconnecting"), StatusChanged(status="closed")]
+
+
+async def test_a_connection_closed_as_a_policy_violation_before_its_hello_is_refused(
+    live: Live,
+) -> None:
+    live.refusing = True
+    with pytest.raises(
+        ForbiddenError,
+        match="^websocket: the server refused the connection with code 1008: session expired$",
+    ):
+        await Client.connect(live.url, headers=ANA_HEADERS)
+
+
+async def test_a_reconnect_closed_as_a_policy_violation_ends_the_stream_with_the_error(
+    live: Live,
+) -> None:
+    ana = await Client.connect(live.url, headers=ANA_HEADERS)
+    live.refusing = True
+    await live.drop()
+    seen: list[Item] = []
+    with pytest.raises(
+        ForbiddenError,
+        match="^websocket: the server refused the connection with code 1008: session expired$",
+    ):
+        await asyncio.wait_for(read_to_the_end(ana, seen), 3.0)
+    assert ana.status == "closed"
+    assert seen == [StatusChanged(status="reconnecting"), StatusChanged(status="closed")]
+
+
+async def test_a_socket_closed_as_a_policy_violation_after_its_hello_reconnects(
+    live: Live,
+) -> None:
+    ana = await Client.connect(live.url, headers=ANA_HEADERS)
+    for served in live.open:
+        await served.socket.close(1008, "token rotated")
+    live.open.clear()
+    seen: list[Item] = []
+
+    async def reopened() -> None:
+        async for item in ana.events():
+            seen.append(item)
+            if item == StatusChanged(status="open"):
+                return
+
+    await asyncio.wait_for(reopened(), 3.0)
+    assert seen == [StatusChanged(status="reconnecting"), StatusChanged(status="open")]
+    await ana.close()
 
 
 async def test_a_headers_function_that_raises_on_reconnect_ends_the_stream_with_the_error(

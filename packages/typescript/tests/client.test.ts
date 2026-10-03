@@ -301,6 +301,49 @@ describe('client', () => {
     await expect(client.send('t1', 'late')).rejects.toBeInstanceOf(ForbiddenError)
   })
 
+  it('raises a connection closed as a policy violation before its hello as a refusal', async () => {
+    server.refusing = true
+    const refused = connect({ url: 'ws://fake', protocols: ['thread', 'tok'] })
+    await expect(refused).rejects.toBeInstanceOf(ForbiddenError)
+    await expect(refused).rejects.toThrow(
+      'client: the server refused the connection with code 1008: session expired'
+    )
+  })
+
+  it('stops for good when a reconnect is closed as a policy violation before its hello', async () => {
+    const client = await connect({ url: 'ws://fake', protocols: ['thread', 'tok'] })
+    const items: Item[] = []
+    client.subscribe((item) => items.push(item))
+    await client.join('t1', { since: 0 })
+    server.refusing = true
+    server.drop()
+    const reason = await client.closed
+    expect(reason).toBeInstanceOf(ForbiddenError)
+    expect(reason?.message).toBe(
+      'client: the server refused the connection with code 1008: session expired'
+    )
+    expect(client.status).toBe('closed')
+    expect(server.hellos).toHaveLength(2)
+    expect(items).toEqual([
+      { kind: 'status', status: 'reconnecting' },
+      { kind: 'status', status: 'closed' },
+    ])
+    await expect(client.send('t1', 'late')).rejects.toBeInstanceOf(ForbiddenError)
+  })
+
+  it('reconnects a socket closed as a policy violation after its hello', async () => {
+    const { client, items } = await joined()
+    server.current?.close(1008, 'token rotated')
+    await vi.waitFor(() => expect(items).toContainEqual({ kind: 'status', status: 'open' }))
+    expect(client.status).toBe('open')
+    expect(items.map((item) => ('status' in item ? item.status : 'joined'))).toEqual([
+      'reconnecting',
+      'joined',
+      'open',
+    ])
+    await client.close()
+  })
+
   it('closes a socket a reconnect opened after close()', async () => {
     let calls = 0
     let held = false

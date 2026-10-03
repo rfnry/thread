@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest'
-import { connect, InputError, resolve } from '../../src/index.js'
+import { connect, ForbiddenError, InputError, resolve } from '../../src/index.js'
 import type { Item } from '../../src/types.js'
 
 const url = process.env.THREAD_URL ?? ''
@@ -108,6 +108,39 @@ describe.skipIf(!url)('a live server', () => {
     )
     await ana.close()
     await again.close()
+  })
+
+  it('ends closed with a ForbiddenError when the endpoint refuses a reconnect with 1008', async () => {
+    let refused = false
+    const client = await connect({
+      url,
+      protocols: async () => ['thread', refused ? 'refused' : 'ana'],
+    })
+    const items: Item[] = []
+    client.subscribe((item) => items.push(item))
+    const thread = await client.createThread({ threadId: 'e2e-refused' })
+    await client.addMember(thread.id, helper)
+    await client.join(thread.id)
+    await until(() =>
+      items.some(
+        (item) => 'kind' in item && item.kind === 'present' && item.sender.id === helper.id
+      )
+    )
+    refused = true
+    await client.custom(thread.id, 'drop', {})
+    const reason = await client.closed
+    expect(reason).toBeInstanceOf(ForbiddenError)
+    expect(reason?.message).toBe(
+      'client: the server refused the connection with code 1008: session expired'
+    )
+    expect(client.status).toBe('closed')
+    expect(items.flatMap((item) => ('status' in item ? [item.status] : []))).toEqual([
+      'reconnecting',
+      'closed',
+    ])
+    await expect(connect({ url, protocols: ['thread', 'refused'] })).rejects.toBeInstanceOf(
+      ForbiddenError
+    )
   })
 
   it('keeps a followed thread it left left after a drop, until it joins it', async () => {

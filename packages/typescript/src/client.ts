@@ -7,7 +7,7 @@ import {
   TransportError,
 } from './errors.js'
 import { Outbox } from './outbox.js'
-import { decode, encode, type Frame, HELLO, PROTOCOL } from './protocol.js'
+import { CLOSE_REFUSED, decode, encode, type Frame, HELLO, PROTOCOL } from './protocol.js'
 import { timing } from './timing.js'
 import type {
   Content,
@@ -86,9 +86,16 @@ function handshake(socket: WebSocket): Promise<Payload> {
       else if (frame.type === 'response' && frame.id === HELLO) resolve(frame.payload)
       else reject(new TransportError('client: the server did not answer the hello'))
     }
-    socket.onclose = () => {
+    socket.onclose = (event) => {
       clearTimeout(timer)
-      reject(new TransportError('client: the hello was not answered'))
+      const reason = event.reason ? `: ${event.reason}` : ''
+      reject(
+        event.code === CLOSE_REFUSED
+          ? new ForbiddenError(
+              `client: the server refused the connection with code ${CLOSE_REFUSED}${reason}`
+            )
+          : new TransportError('client: the hello was not answered')
+      )
     }
     socket.send(encode({ type: 'hello', protocol: PROTOCOL }))
   })

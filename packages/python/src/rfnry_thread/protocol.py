@@ -8,6 +8,7 @@ from rfnry_thread.errors import InputError, ThreadException
 
 PROTOCOL = 1
 HELLO = "hello"
+CLOSE_REFUSED = 1008
 CLOSE_PROTOCOL = 4000
 CLOSE_SLOW = 4001
 METHODS = frozenset(

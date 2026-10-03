@@ -306,8 +306,9 @@ async def connect(cls, url: str, *, headers: HeadersSource | None = None) -> Cli
 Connects over a WebSocket to `url` and returns the client. `headers` go with the upgrade; a
 `HeadersSource` is `dict[str, str] | Callable[[], Awaitable[dict[str, str]]]`, a dict or an async
 function returning one, called on every attempt so a token can refresh. Raises `ForbiddenError` when
-the upgrade is refused with HTTP 401 or 403 or the `headers` function raises, `TransportError` when
-the socket cannot be opened or the hello goes unanswered.
+the upgrade is refused with HTTP 401 or 403, the socket is closed with 1008 before the hello is
+answered, or the `headers` function raises, `TransportError` when the socket cannot be opened or the
+hello goes unanswered.
 
 ### `Client.create_thread`
 
@@ -633,8 +634,8 @@ Yields, in order of arrival, each `Item`, which is `Event | Signal | Joined | St
 event and signal of the threads joined, each `Invited`, each re-join's `Joined`, and a
 `StatusChanged` each time `status` changes; the caller's own are left out unless `include_own`.
 Items wait in the client until read, and the iterator ends when the client closes. Raises the error
-that stopped the client: `ForbiddenError` when a reconnect was refused with HTTP 401 or 403 or the
-`headers` function raised.
+that stopped the client: `ForbiddenError` when a reconnect was refused with HTTP 401 or 403 or
+closed with 1008 before its hello was answered, or the `headers` function raised.
 
 ### `Client.status`
 
@@ -1415,7 +1416,8 @@ class ForbiddenError(ThreadException):
 
 A verb by a non-member, an `authorize` that says no, an edit or retraction of someone else's event,
 a signal from a connection that has not joined the thread; on a client, an upgrade refused with HTTP
-401 or 403, or a `headers` or `protocols` function that raised.
+401 or 403, a socket closed with 1008 before its hello is answered, or a `headers` or `protocols`
+function that raised.
 
 ### `StorageError`
 
@@ -1517,8 +1519,9 @@ async function connect(options: ConnectOptions): Promise<Client>
 ```
 
 Opens a WebSocket to `options.url`, offering `options.protocols` as the subprotocol list, and
-returns the connected client. Raises `ForbiddenError` when the `protocols` function throws,
-`TransportError` when the socket cannot be opened or the hello goes unanswered.
+returns the connected client. Raises `ForbiddenError` when the `protocols` function throws or the
+socket is closed with 1008 before the hello is answered, `TransportError` when the socket cannot be
+opened or the hello goes unanswered.
 
 ### `Client`
 
@@ -1537,7 +1540,8 @@ A participant's connection, made by `connect`; the constructor alone opens no so
 `'reconnecting'` from a dropped socket until it is back and every thread joined is joined again, and
 `'closed'` for good; listeners hear each change as a `StatusChanged`. `closed` resolves when the
 client stops for good: `null` after `close()`, or the error that stopped it, a `ForbiddenError` when
-the `protocols` function throws on a reconnect. Every method that talks to the server raises
+the `protocols` function throws on a reconnect or the reconnect is closed with 1008 before its hello
+is answered. Every method that talks to the server raises
 `TransportError` when the client is closed or not connected, except those that write an event,
 which retry across reconnects and raise it when not acknowledged within a minute, and raises again,
 with its class and message, an error the server raised.
@@ -2407,7 +2411,8 @@ class ForbiddenError extends ThreadException {
 ```
 
 A verb by a non-member, an `authorize` that says no, an edit or retraction of someone else's event,
-a signal from a connection that has not joined the thread, a `protocols` function that threw.
+a signal from a connection that has not joined the thread, a socket closed with 1008 before its
+hello is answered, a `protocols` function that threw.
 
 ### `StorageError`
 

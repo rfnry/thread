@@ -82,6 +82,9 @@ async def test_the_typescript_client_against_a_live_server() -> None:
     async def handler(socket: ServerConnection) -> None:
         identity = who(socket.request)
         assert identity is not None
+        if identity.id == "refused":
+            await socket.close(1008, "session expired")
+            return
         await server.serve(Socket(socket, open_sockets), identity=identity, scope="acme")
 
     async with serve(

@@ -7,7 +7,7 @@ export class FakeSocket {
   readyState = 0
   onopen: ((event: unknown) => void) | null = null
   onmessage: ((event: { data: string }) => void) | null = null
-  onclose: ((event: { code: number }) => void) | null = null
+  onclose: ((event: { code: number; reason: string }) => void) | null = null
   onerror: ((event: unknown) => void) | null = null
   readonly sent: Frame[] = []
 
@@ -22,7 +22,7 @@ export class FakeSocket {
       if (server.down) {
         this.readyState = 3
         this.onerror?.({})
-        this.onclose?.({ code: 1006 })
+        this.onclose?.({ code: 1006, reason: '' })
         return
       }
       this.readyState = 1
@@ -37,10 +37,10 @@ export class FakeSocket {
     setTimeout(() => void this.server.receive(this, frame), 0)
   }
 
-  close(code = 1000, _reason?: string): void {
+  close(code = 1000, reason = ''): void {
     if (this.readyState === 3) return
     this.readyState = 3
-    setTimeout(() => this.onclose?.({ code }), 0)
+    setTimeout(() => this.onclose?.({ code, reason }), 0)
   }
 
   deliver(frame: Frame): void {
@@ -55,6 +55,7 @@ export class FakeServer {
   readonly opened: Array<string | string[] | undefined> = []
   readonly stored = new Map<string, Frame>()
   down = false
+  refusing = false
   dropAck = false
   seq = 0
   identity: Frame = { role: 'user', id: 'ana', name: 'Ana', metadata: {} }
@@ -111,6 +112,10 @@ export class FakeServer {
   async receive(socket: FakeSocket, frame: Frame): Promise<void> {
     if (frame.type === 'hello') {
       this.hellos.push(frame)
+      if (this.refusing) {
+        socket.close(1008, 'session expired')
+        return
+      }
       socket.deliver({
         type: 'response',
         id: 'hello',

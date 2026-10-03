@@ -158,9 +158,12 @@ async def thread_socket(websocket: WebSocket, user: User = Depends(current_user)
     await server.serve(websocket, identity=Identity(role="user", id=user.id, name=user.name), scope=user.org)
 ```
 
-Any other framework adapts in the same few lines. Refusing a connection is refusing the upgrade,
-before `serve`. `identity` and `scope` are keyword-only, on `serve` and `server.connect`
-alike. Everything the socket says afterwards is authored as that identity, in that scope.
+Any other framework adapts in the same few lines. Refusing a connection happens before `serve`:
+answer the upgrade with HTTP 401 or 403, or accept it and close it at once with 1008, policy
+violation (`await websocket.close(code=1008)`). A client stops on a refusal, with a
+`ForbiddenError`; a browser cannot see an HTTP status, so the TypeScript client sees only 1008.
+`identity` and `scope` are keyword-only, on `serve` and `server.connect` alike. Everything the
+socket says afterwards is authored as that identity, in that scope.
 
 There are two ways to get a client, and they are the same class:
 
@@ -348,9 +351,9 @@ with fresh `headers`; a following client follows again from the last `seq` it sa
 (and joins each one instead when that fails), and every client re-joins every thread it had joined
 from there; the missed events arrive before anything new. A re-follow's or re-join's `Joined` also
 arrives in `events()`, and when it says `truncated`, redraw from the latest page. A reconnect your endpoint refuses (HTTP 401 or 403 on
-the upgrade), or whose `headers` function raises, stops the client, and `events()` raises that
-error. Items wait in the client until you read them, so an assistant that
-joins and then starts reading misses nothing.
+the upgrade, or 1008 before the hello is answered), or whose `headers` function raises, stops the
+client, and `events()` raises that error. Items wait in the client until you read them, so an
+assistant that joins and then starts reading misses nothing.
 
 A client's `status` says where its connection is: `"open"`; `"reconnecting"` from the moment its
 socket drops until it follows again, if it was following, and every thread it had joined is joined
@@ -572,9 +575,11 @@ await reply.finish()
 `'open'`, `'reconnecting'` or `'closed'` — and every listener hears each change as a
 `StatusChanged`, `{ kind: 'status', status }`: the one item without a thread, so a listener that
 follows one thread checks for it first. `client.closed` resolves when the client stops for good —
-`null` after `close()`, or the error when your `protocols` function throws on a reconnect, an
-expired session say. A browser cannot see why an upgrade failed, so a refused reconnect otherwise
-keeps retrying with backoff, `'reconnecting'` all along. Stores, hooks and rendering are your UI's.
+`null` after `close()`, or the error when your `protocols` function throws on a reconnect or your
+endpoint refuses it, an expired session say. A browser cannot see why an upgrade failed, so an
+upgrade refused with HTTP 401 or 403 keeps retrying with backoff, `'reconnecting'` all along; a
+connection accepted and closed with 1008 is the refusal it sees. Stores, hooks and rendering are
+your UI's.
 
 ## Tools
 
@@ -674,7 +679,8 @@ thread, so it is a `NotFoundError` too, except in `create_thread`, which refuses
 `InputError`, and in a signal, which needs a join first. `ForbiddenError` for a verb by a
 non-member, an `authorize` that says no, an edit or retraction of someone else's event, a signal
 from a connection that has not joined the thread, and on a client, an upgrade refused with HTTP 401
-or 403 or a `headers` or `protocols` function that raised. `InputError` for a request the library
+or 403, a connection closed with 1008 before its hello is answered, or a `headers` or `protocols`
+function that raised. `InputError` for a request the library
 refuses: an empty scope, an empty thread id given to `create_thread`, an identity whose fields do
 not fit, a `system` identity added as a member, a `limit` outside 1 to 500 on `list_threads` or
 `history`, a join given both `since` and `resume`, a `working` label over 1000 characters, a media

@@ -2,6 +2,7 @@ import { InputError } from './errors.js'
 
 export const PROTOCOL = 1
 export const HELLO = 'hello'
+export const CLOSE_REFUSED = 1008
 
 type Payload = Record<string, unknown>
 export type Hello = { type: 'hello'; protocol: number }
