@@ -419,18 +419,23 @@ two replicas without a database.
 
 #### One handler per thread
 
-Every replica's assistant follows the same threads, so every one of them hears each message. When
-exactly one should answer, hold a Postgres advisory lock for the thread while a run works on it,
-on the same database, and let the others leave the message alone:
+Every replica's assistant follows the same threads, so every one of them hears each message. A
+Postgres advisory lock on the same database, keyed by scope and thread, makes the runs on one thread
+mutually exclusive; answering once is the holder's check, inside the lock, for a reply already in
+the log:
 
 ```python
 async with pool.acquire() as conn:
-    if await conn.fetchval("SELECT pg_try_advisory_lock(hashtext($1))", item.thread_id):
+    key = f"{assistant.scope}:{item.thread_id}"
+    if await conn.fetchval("SELECT pg_try_advisory_lock(hashtext($1))", key):
         try:
-            await answer(item)
+            later = await assistant.history(item.thread_id, after=item.seq)
+            mine = [e for e in later if e.in_reply_to == item.id and e.author.id == assistant.identity.id]
+            if not mine:
+                await answer(item)
             await assistant.mark(item.thread_id, item.seq)
         finally:
-            await conn.execute("SELECT pg_advisory_unlock(hashtext($1))", item.thread_id)
+            await conn.execute("SELECT pg_advisory_unlock(hashtext($1))", key)
 ```
 
 A replica that dies releases its lock with its connection. Effects stay idempotent all the same: a
