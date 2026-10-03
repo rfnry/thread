@@ -525,15 +525,16 @@ async def test_an_assistant_that_joins_with_resume_hears_what_was_said_while_it_
     await ana.add_member("t1", HELPER)
     first = await ana.send("t1", "hello")
     helper = await server.connect(identity=HELPER, scope="acme")
-    await helper.join("t1", resume=True)
+    first_join = await helper.join("t1", resume=True)
     heard = await take(helper, Message)
     assert heard.id == first.id
+    assert first_join.thread.marked == 1
     await helper.mark("t1", heard.seq)
     await helper.close()
     away = await ana.send("t1", "sent while it was away")
     again = await server.connect(identity=HELPER, scope="acme")
     joined = await again.join("t1", resume=True)
-    assert (joined.seq, joined.truncated) == (away.seq, False)
+    assert (joined.seq, joined.truncated, joined.thread.marked) == (away.seq, False, heard.seq)
     said = [item for item in await drain(again, include_own=False) if isinstance(item, Message)]
     assert [m.id for m in said] == [away.id]
     live = await ana.send("t1", "live")
@@ -561,6 +562,24 @@ async def test_a_follower_that_joins_with_resume_reads_the_thread_from_its_mark_
     assert page._cursors["t1"] == 5 and not page._rewinds
     await ana.send("t1", "live")
     assert [item.seq for item in await drain(page) if isinstance(item, Message)] == [6]
+
+
+async def test_a_join_with_resume_beyond_the_replay_limit_hands_the_mark_to_read_the_rest(
+    storage: InMemoryStorage,
+) -> None:
+    server = Server(storage, replay_limit=2)
+    ana = await server.connect(identity=ANA, scope="acme")
+    await ana.create_thread(thread_id="t1")
+    await ana.add_member("t1", HELPER)
+    sent = [await ana.send("t1", f"m{n}") for n in range(4)]
+    helper = await server.connect(identity=HELPER, scope="acme")
+    joined = await helper.join("t1", resume=True)
+    assert (joined.seq, joined.truncated) == (sent[-1].seq, True)
+    replayed = [item for item in await drain(helper) if isinstance(item, Message)]
+    assert [m.id for m in replayed] == [m.id for m in sent[2:]]
+    assert joined.thread.marked is not None
+    rest = await helper.history("t1", after=joined.thread.marked, before=replayed[0].seq)
+    assert [e.id for e in rest if isinstance(e, Message)] == [m.id for m in sent[:2]]
 
 
 async def test_a_join_sends_resume_only_when_asked(server: Server) -> None:

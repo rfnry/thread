@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import contextlib
 import json
 import uuid
 from collections.abc import Awaitable, Callable, Sequence
@@ -276,8 +277,11 @@ class Verbs:
         if resume:
             since = await self._storage.get_mark(scope, thread_id, actor.id)
             if since is None:
-                await self._storage.baseline_marks(scope, actor.id)
-                since = await self._storage.get_mark(scope, thread_id, actor.id)
+                latest = await self._storage.list_events(scope, thread_id, limit=1)
+                head = latest[-1].seq if latest else 0
+                with contextlib.suppress(NotFoundError):
+                    since, _, _ = await self._storage.mark(scope, thread_id, actor.id, head)
+            thread = thread.model_copy(update={"marked": since})
         return await self._hub.join(session, thread, since)
 
     async def follow(

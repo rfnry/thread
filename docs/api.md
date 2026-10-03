@@ -382,12 +382,13 @@ Receives the thread live from now and returns a `Joined`. With `since`, the even
 arrive first (`since=0` for the whole log, at most the server's `replay_limit`, beyond which the
 latest and `truncated=True`), then the current state, then live traffic. With `resume=True`, the
 events after the caller's mark arrive first instead, as `follow(resume=True)` hands each thread
-(from where it was added when it has no mark yet; a membership older than marks starts now). A
-thread the connection already receives, by following, keeps arriving live, and `since` or `resume`
-hands its events after that `seq` or the mark up to where the connection is, once; joins of it in
-flight at the same time each get their own. Raises `InputError` when `since` is negative or given
-with `resume`, `NotFoundError` when the scope holds no such thread, `ForbiddenError` when the caller
-is not a member or `authorize` refuses `read`.
+(from where it was added when it has no mark yet; a membership older than marks starts now, and this
+thread alone is marked there), and the `Joined`'s `thread.marked` is that mark, from which
+`history(after=...)` reads a truncated gap. A thread the connection already receives, by following,
+keeps arriving live, and `since` or `resume` hands its events after that `seq` or the mark up to
+where the connection is, once; joins of it in flight at the same time each get their own. Raises
+`InputError` when `since` is negative or given with `resume`, `NotFoundError` when the scope holds
+no such thread, `ForbiddenError` when the caller is not a member or `authorize` refuses `read`.
 
 ### `Client.leave`
 
@@ -1630,12 +1631,12 @@ async join(threadId: string, options: { since?: number; resume?: boolean } = {})
 Receives the thread live from now and returns a `Joined`. With `since`, the events after that `seq`
 arrive first (`since: 0` for the whole log), then the current state, then live traffic. With
 `resume: true`, the events after the caller's mark arrive first instead, as
-`follow({ resume: true })` hands each thread. A thread the connection already receives, by
-following, keeps arriving live, and `since` or `resume` hands its events after that `seq` or the
-mark up to where the connection is, once; joins of it in flight at the same time each get their
-own. Raises `InputError` when `since` is negative or given with `resume`, `NotFoundError` when the
-scope holds no such thread, `ForbiddenError` when the caller is not a member or `authorize` refuses
-`read`.
+`follow({ resume: true })` hands each thread, and the `Joined`'s `thread.marked` is that mark. A
+thread the connection already receives, by following, keeps arriving live, and `since` or `resume`
+hands its events after that `seq` or the mark up to where the connection is, once; joins of it in
+flight at the same time each get their own. Raises `InputError` when `since` is negative or given
+with `resume`, `NotFoundError` when the scope holds no such thread, `ForbiddenError` when the caller
+is not a member or `authorize` refuses `read`.
 
 ### `Client.leave`
 

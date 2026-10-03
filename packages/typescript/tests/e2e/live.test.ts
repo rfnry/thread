@@ -100,7 +100,7 @@ describe.skipIf(!url)('a live server', () => {
     const items: Item[] = []
     again.subscribe((item) => items.push(item))
     const joined = await again.join(thread.id, { resume: true })
-    expect(joined.seq).toBe(away.seq)
+    expect([joined.seq, joined.thread.marked]).toEqual([away.seq, hello.seq])
     await until(() => items.some((item) => 'author' in item && item.id === away.id))
     expect(items.flatMap((item) => ('author' in item ? [item.seq] : []))).toEqual([away.seq])
     await expect(again.join(thread.id, { since: 0, resume: true })).rejects.toBeInstanceOf(

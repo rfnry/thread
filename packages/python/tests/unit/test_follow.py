@@ -343,6 +343,7 @@ async def test_a_join_with_resume_replays_what_the_thread_said_after_the_mark(
     again = await Peer.open(server, HELPER)
     joined = await again.call("thread.join", thread_id="t1", resume=True)
     assert (joined["seq"], joined["truncated"]) == (4, False)
+    assert joined["thread"]["marked"] == seen["seq"]
     assert texts(await again.quiet()) == ["while away"]
     await say(ana, "t1", "live")
     assert texts(await again.quiet()) == ["live"]
@@ -373,7 +374,7 @@ async def test_a_join_with_resume_into_a_membership_with_no_mark_starts_now_and_
     await say(ana, "t1", "old")
     helper = await Peer.open(server, HELPER)
     joined = await helper.call("thread.join", thread_id="t1", resume=True)
-    assert (joined["seq"], joined["truncated"]) == (2, False)
+    assert (joined["seq"], joined["truncated"], joined["thread"]["marked"]) == (2, False, 2)
     assert texts(await helper.quiet()) == []
     assert await storage.get_mark("acme", "t1", "helper") == 2
     await helper.close()
@@ -381,6 +382,22 @@ async def test_a_join_with_resume_into_a_membership_with_no_mark_starts_now_and_
     again = await Peer.open(server, HELPER)
     await again.call("thread.join", thread_id="t1", resume=True)
     assert texts(await again.quiet()) == ["while away"]
+
+
+async def test_a_join_with_resume_gives_a_mark_to_its_own_thread_alone(
+    storage: InMemoryStorage, server: Server
+) -> None:
+    for thread_id in ("t1", "t2"):
+        await server.create_thread("acme", thread_id)
+        await storage.add_member(
+            "acme", Member(thread_id=thread_id, identity=HELPER, added_at=AT, added_by=SYSTEM)
+        )
+    helper = await Peer.open(server, HELPER)
+    joined = await helper.call("thread.join", thread_id="t1", resume=True)
+    assert joined["thread"]["marked"] == await storage.get_mark("acme", "t1", "helper")
+    assert await storage.get_mark("acme", "t2", "helper") is None
+    listed = {t["id"]: t for t in (await helper.call("thread.list"))["threads"]}
+    assert (listed["t2"].get("marked"), listed["t2"].get("unread")) == (None, None)
 
 
 async def test_a_join_takes_since_or_resume_not_both(server: Server) -> None:
@@ -402,8 +419,12 @@ async def test_a_join_with_resume_beyond_the_replay_limit_is_the_latest_and_trun
         await say(ana, "t1", f"m{n}")
     helper = await Peer.open(server, HELPER)
     joined = await helper.call("thread.join", thread_id="t1", resume=True)
-    assert (joined["seq"], joined["truncated"]) == (6, True)
+    assert (joined["seq"], joined["truncated"], joined["thread"]["marked"]) == (6, True, 1)
     assert texts(await helper.quiet()) == ["m2", "m3"]
+    rest = await helper.call(
+        "thread.history", thread_id="t1", after=joined["thread"]["marked"], before=5
+    )
+    assert texts(rest["events"]) == ["m0", "m1"]
 
 
 async def test_joining_a_followed_thread_with_resume_replays_from_the_mark_once(
@@ -416,7 +437,7 @@ async def test_joining_a_followed_thread_with_resume_replays_from_the_mark_once(
     await helper.call("thread.follow")
     await helper.call("thread.mark", thread_id="t1", seq=3)
     joined = await helper.call("thread.join", thread_id="t1", resume=True)
-    assert (joined["seq"], joined["truncated"]) == (5, False)
+    assert (joined["seq"], joined["truncated"], joined["thread"]["marked"]) == (5, False, 3)
     assert texts(await helper.quiet()) == ["m1", "m2"]
     await say(ana, "t1", "live")
     assert texts(await helper.quiet()) == ["live"]

@@ -759,8 +759,14 @@ describe('client', () => {
   it('joins from its mark with resume, and sends resume only when asked', async () => {
     server.handlers.set('thread.join', ({ thread_id, resume }) => {
       if (resume) for (const seq of [4, 5]) server.push('event', message(seq, `m${seq}`))
+      const thread = {
+        id: thread_id,
+        scope: 'acme',
+        metadata: {},
+        created_at: '2026-01-01T12:00:00Z',
+      }
       return {
-        thread: { id: thread_id, scope: 'acme', metadata: {}, created_at: '2026-01-01T12:00:00Z' },
+        thread: resume ? { ...thread, marked: 3 } : thread,
         seq: resume ? 5 : 0,
         truncated: false,
       }
@@ -768,9 +774,9 @@ describe('client', () => {
     const client = await connect({ url: 'ws://fake', protocols: ['thread', 'tok'] })
     const items: Item[] = []
     client.subscribe((item) => items.push(item))
-    await client.join('t2')
+    expect((await client.join('t2')).thread.marked).toBeUndefined()
     const joined = await client.join('t1', { resume: true })
-    expect(joined.seq).toBe(5)
+    expect([joined.seq, joined.thread.marked]).toEqual([5, 3])
     expect(server.sent('thread.join').map((frame) => frame.payload)).toEqual([
       { thread_id: 't2', since: null },
       { thread_id: 't1', since: null, resume: true },
@@ -782,11 +788,17 @@ describe('client', () => {
     await client.close()
   })
 
-  it('takes a resume beyond the replay limit as the latest events, truncated', async () => {
+  it('takes a resume beyond the replay limit as the latest events, truncated, with the mark to read the rest from', async () => {
     server.handlers.set('thread.join', ({ thread_id }) => {
       for (const seq of [9, 10]) server.push('event', message(seq, `m${seq}`))
       return {
-        thread: { id: thread_id, scope: 'acme', metadata: {}, created_at: '2026-01-01T12:00:00Z' },
+        thread: {
+          id: thread_id,
+          scope: 'acme',
+          metadata: {},
+          created_at: '2026-01-01T12:00:00Z',
+          marked: 2,
+        },
         seq: 10,
         truncated: true,
       }
@@ -795,8 +807,10 @@ describe('client', () => {
     const items: Item[] = []
     client.subscribe((item) => items.push(item))
     const joined = await client.join('t1', { resume: true })
-    expect(joined.truncated).toBe(true)
+    expect([joined.truncated, joined.thread.marked]).toEqual([true, 2])
     expect(items.flatMap((item) => ('author' in item ? [item.seq] : []))).toEqual([9, 10])
+    await client.history('t1', { after: joined.thread.marked, before: 9 })
+    expect(server.sent('thread.history').at(-1)?.payload).toMatchObject({ after: 2, before: 9 })
     await client.close()
   })
 
