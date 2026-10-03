@@ -135,7 +135,7 @@ class Server:
         if replay_limit < 1:
             raise ConfigurationError("server: replay_limit must be positive")
         self._storage = storage
-        self._hub = Hub(storage, replay_limit)
+        self._hub = Hub(storage, replay_limit, authorize)
         self._verbs = Verbs(storage, self._hub, authorize, max_inline_bytes, redact)
         self._tasks: set[asyncio.Task[None]] = set()
         self._stop: Stop | None = None

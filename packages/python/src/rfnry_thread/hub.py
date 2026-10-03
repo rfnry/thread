@@ -5,10 +5,11 @@ import json
 import logging
 import uuid
 import weakref
+from collections.abc import Awaitable, Callable
 from dataclasses import dataclass, field
 from typing import Any
 
-from rfnry_thread.errors import ForbiddenError, ThreadException
+from rfnry_thread.errors import ForbiddenError, NotFoundError, ThreadException
 from rfnry_thread.models import (
     SIGNALS,
     Event,
@@ -49,6 +50,7 @@ class Session:
     working: set[str] = field(default_factory=set)
     present: set[str] = field(default_factory=set)
     following: bool = False
+    dropped: bool = False
 
     def push_event(self, event: Event, payload: dict[str, Any]) -> None:
         self.joined[event.thread_id] = event.seq
@@ -66,9 +68,15 @@ def _size(payload: dict[str, Any]) -> int:
 
 
 class Hub:
-    def __init__(self, storage: Storage, replay_limit: int) -> None:
+    def __init__(
+        self,
+        storage: Storage,
+        replay_limit: int,
+        authorize: Callable[[Identity, str, Thread], Awaitable[bool]] | None = None,
+    ) -> None:
         self.storage = storage
         self.replay_limit = replay_limit
+        self.authorize = authorize
         self.origin = uuid.uuid4().hex
         self.state = LatestState(self.origin)
         self.sessions: set[Session] = set()
@@ -90,16 +98,21 @@ class Hub:
         return list(self._rooms.get((scope, thread_id), ()))
 
     async def join(self, session: Session, thread: Thread, since: int | None) -> Joined:
-        present = thread.id in session.present
-        joined = await self._enter(session, thread, since)
-        session.present.add(thread.id)
-        if not present:
+        joined, _ = await self._enter(session, thread, since)
+        if thread.id not in session.present and not session.dropped:
+            session.present.add(thread.id)
             await self._arrive(session, thread.id)
         return joined
 
-    async def _enter(self, session: Session, thread: Thread, since: int | None) -> Joined:
+    async def _enter(
+        self, session: Session, thread: Thread, since: int | None
+    ) -> tuple[Joined, bool]:
         scope, thread_id = session.scope, thread.id
         async with self._lock(scope, thread_id):
+            if session.dropped:
+                return Joined(thread=thread, seq=session.joined.get(thread_id, 0)), False
+            if thread_id in session.joined:
+                return Joined(thread=thread, seq=session.joined[thread_id]), False
             latest = await self.storage.list_events(scope, thread_id, limit=1)
             head = latest[-1].seq if latest else 0
             if not await self.storage.is_member(scope, thread_id, session.identity.id):
@@ -124,17 +137,18 @@ class Hub:
                 session.push_event(event, event.model_dump(mode="json"))
             for signal in self.state.snapshot(scope, thread_id):
                 session.push_signal(signal.model_dump(mode="json"))
-        return Joined(thread=thread, seq=head, truncated=truncated)
+        return Joined(thread=thread, seq=head, truncated=truncated), True
 
     async def follow(
         self, session: Session, threads: list[tuple[Thread, int | None]]
     ) -> list[Joined]:
         found: list[Joined] = []
         for thread, since in threads:
-            if thread.id in session.joined:
-                found.append(Joined(thread=thread, seq=session.joined[thread.id]))
+            try:
+                joined, _ = await self._enter(session, thread, since)
+            except (ForbiddenError, NotFoundError):
                 continue
-            found.append(await self._enter(session, thread, since))
+            found.append(joined)
         return found
 
     async def leave(self, session: Session, thread_id: str) -> None:
@@ -244,7 +258,6 @@ class Hub:
     async def added(
         self, scope: str, thread: Thread, sender: Identity, identity: Identity, seq: int
     ) -> None:
-        await self._added_here(scope, thread, sender, identity.id, seq)
         await self._publish(
             scope,
             thread.id,
@@ -256,6 +269,7 @@ class Hub:
                 "seq": seq,
             },
         )
+        await self._added_here(scope, thread, sender, identity.id, seq)
 
     async def _added_here(
         self, scope: str, thread: Thread, sender: Identity, identity_id: str, seq: int | None
@@ -268,8 +282,20 @@ class Hub:
             ):
                 continue
             if session.following:
-                since = None if seq is None else seq - 1
-                session.push_joined(await self._enter(session, thread, since))
+                try:
+                    if (
+                        self.authorize is not None
+                        and session.identity.role != "system"
+                        and not await self.authorize(session.identity, "read", thread)
+                    ):
+                        continue
+                    joined, entered = await self._enter(
+                        session, thread, None if seq is None else seq - 1
+                    )
+                except (ForbiddenError, NotFoundError):
+                    continue
+                if entered:
+                    session.push_joined(joined)
             elif identity_id != sender.id:
                 session.push_signal(
                     Invited(thread_id=thread.id, sender=sender, thread=thread).model_dump(
@@ -298,6 +324,7 @@ class Hub:
                 del self._local[key]
 
     async def drop(self, session: Session) -> None:
+        session.dropped = True
         for thread_id in list(session.joined):
             await self.leave(session, thread_id)
         self.sessions.discard(session)

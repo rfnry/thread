@@ -1,3 +1,4 @@
+import asyncio
 from typing import Any
 
 import pytest
@@ -148,3 +149,94 @@ async def test_follow_refuses_a_negative_since(server: Server) -> None:
     helper = await Peer.open(server, HELPER)
     with pytest.raises(InputError, match="^server: since cannot be negative$"):
         await helper.call("thread.follow", since={"t1": -1})
+
+
+async def test_a_follower_is_not_handed_a_thread_authorize_refuses_when_added_later(
+    storage: InMemoryStorage,
+) -> None:
+    async def authorize(actor: Identity, action: str, thread: Thread) -> bool:
+        return not thread.metadata.get("secret")
+
+    server = Server(storage, authorize=authorize)
+    helper = await Peer.open(server, HELPER)
+    await helper.call("thread.follow")
+    await server.create_thread("acme", "closed", {"secret": True})
+    await server.add_member("acme", "closed", HELPER)
+    assert await helper.quiet() == []
+    assert helper.joined == []
+
+
+async def test_following_then_joining_the_same_thread_arrives_and_leaves_once(
+    server: Server,
+) -> None:
+    ana = await threads(server, "t1")
+    await ana.call("thread.join", thread_id="t1")
+    await ana.quiet()
+    helper = await Peer.open(server, HELPER)
+    await helper.call("thread.follow")
+    await say(ana, "t1", "before")
+    await helper.call("thread.join", thread_id="t1")
+    await say(ana, "t1", "after")
+    assert texts(await helper.quiet()) == ["before", "after"]
+    assert [p["kind"] for p in await ana.quiet() if p["kind"] in ("present", "left")] == ["present"]
+    await helper.call("thread.leave", thread_id="t1")
+    assert [p["kind"] for p in await ana.quiet() if p["kind"] in ("present", "left")] == ["left"]
+
+
+async def test_a_following_connection_receives_a_thread_its_identity_creates_elsewhere(
+    server: Server,
+) -> None:
+    follower = await Peer.open(server, ANA)
+    await follower.call("thread.follow")
+    other = await Peer.open(server, ANA)
+    await other.call("thread.create", thread_id="mine")
+    pushes = await follower.quiet()
+    assert [j["thread"]["id"] for j in follower.joined] == ["mine"]
+    assert [p["kind"] for p in pushes] == ["member_added"]
+
+
+async def test_an_add_survives_a_follower_whose_membership_is_gone_and_is_still_published(
+    storage: InMemoryStorage, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    near, far = Server(storage), Server(storage)
+    await near.start()
+    await far.start()
+    try:
+        following = await Peer.open(near, HELPER)
+        await following.call("thread.follow")
+        plain = await Peer.open(far, HELPER)
+        ana = await Peer.open(near, ANA)
+        await ana.call("thread.create", thread_id="t1")
+        real = storage.is_member
+
+        async def is_member(scope: str, thread_id: str, identity_id: str) -> bool:
+            return False if identity_id == "helper" else await real(scope, thread_id, identity_id)
+
+        monkeypatch.setattr(storage, "is_member", is_member)
+        await ana.call("member.add", thread_id="t1", identity=who(HELPER))
+        assert [p["kind"] for p in await plain.quiet(0.3)] == ["invited"]
+        assert following.joined == []
+    finally:
+        await near.stop()
+        await far.stop()
+
+
+async def test_a_session_closed_during_an_add_is_not_left_in_the_room(
+    storage: InMemoryStorage,
+) -> None:
+    holder: dict[str, Peer] = {}
+
+    async def authorize(actor: Identity, action: str, thread: Thread) -> bool:
+        if actor.id == "helper" and thread.id == "t1" and "helper" in holder:
+            await holder.pop("helper").close()
+            await asyncio.sleep(0.05)
+        return True
+
+    server = Server(storage, authorize=authorize)
+    helper = await Peer.open(server, HELPER)
+    await helper.call("thread.follow")
+    session = next(s for s in server._hub.sessions if s.identity.id == "helper")
+    holder["helper"] = helper
+    await server.create_thread("acme", "t1")
+    await server.add_member("acme", "t1", HELPER)
+    assert session not in server._hub._rooms.get(("acme", "t1"), set())
