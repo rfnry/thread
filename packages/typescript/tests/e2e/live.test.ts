@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest'
-import { connect, resolve } from '../../src/index.js'
+import { connect, InputError, resolve } from '../../src/index.js'
 import type { Item } from '../../src/types.js'
 
 const url = process.env.THREAD_URL ?? ''
@@ -84,6 +84,30 @@ describe.skipIf(!url)('a live server', () => {
     )
     expect(new Set(seqs).size).toBe(seqs.length)
     await client.close()
+  })
+
+  it('joins with resume and hears what was said while it was away', async () => {
+    const ana = await connect({ url, protocols: ['thread', 'ana'] })
+    const thread = await ana.createThread({ threadId: 'e2e-join-resume' })
+    await ana.addMember(thread.id, { role: 'user', id: 'bruno', name: 'Bruno' })
+    const first = await connect({ url, protocols: ['thread', 'bruno'] })
+    await first.join(thread.id, { resume: true })
+    const hello = await ana.send(thread.id, 'hello')
+    expect(await first.mark(thread.id, hello.seq)).toBe(hello.seq)
+    await first.close()
+    const away = await ana.send(thread.id, 'sent while away')
+    const again = await connect({ url, protocols: ['thread', 'bruno'] })
+    const items: Item[] = []
+    again.subscribe((item) => items.push(item))
+    const joined = await again.join(thread.id, { resume: true })
+    expect(joined.seq).toBe(away.seq)
+    await until(() => items.some((item) => 'author' in item && item.id === away.id))
+    expect(items.flatMap((item) => ('author' in item ? [item.seq] : []))).toEqual([away.seq])
+    await expect(again.join(thread.id, { since: 0, resume: true })).rejects.toBeInstanceOf(
+      InputError
+    )
+    await ana.close()
+    await again.close()
   })
 
   it('keeps a followed thread it left left after a drop, until it joins it', async () => {

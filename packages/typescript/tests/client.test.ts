@@ -711,6 +711,90 @@ describe('client', () => {
     await client.close()
   })
 
+  it('joins from its mark with resume, and sends resume only when asked', async () => {
+    server.handlers.set('thread.join', ({ thread_id, resume }) => {
+      if (resume) for (const seq of [4, 5]) server.push('event', message(seq, `m${seq}`))
+      return {
+        thread: { id: thread_id, scope: 'acme', metadata: {}, created_at: '2026-01-01T12:00:00Z' },
+        seq: resume ? 5 : 0,
+        truncated: false,
+      }
+    })
+    const client = await connect({ url: 'ws://fake', protocols: ['thread', 'tok'] })
+    const items: Item[] = []
+    client.subscribe((item) => items.push(item))
+    await client.join('t2')
+    const joined = await client.join('t1', { resume: true })
+    expect(joined.seq).toBe(5)
+    expect(server.sent('thread.join').map((frame) => frame.payload)).toEqual([
+      { thread_id: 't2', since: null },
+      { thread_id: 't1', since: null, resume: true },
+    ])
+    server.push('event', message(5, 'repeat'))
+    server.push('event', message(6, 'live'))
+    await vi.waitFor(() => expect(items.at(-1)).toMatchObject({ seq: 6 }))
+    expect(items.flatMap((item) => ('author' in item ? [item.seq] : []))).toEqual([4, 5, 6])
+    await client.close()
+  })
+
+  it('takes a resume beyond the replay limit as the latest events, truncated', async () => {
+    server.handlers.set('thread.join', ({ thread_id }) => {
+      for (const seq of [9, 10]) server.push('event', message(seq, `m${seq}`))
+      return {
+        thread: { id: thread_id, scope: 'acme', metadata: {}, created_at: '2026-01-01T12:00:00Z' },
+        seq: 10,
+        truncated: true,
+      }
+    })
+    const client = await connect({ url: 'ws://fake', protocols: ['thread', 'tok'] })
+    const items: Item[] = []
+    client.subscribe((item) => items.push(item))
+    const joined = await client.join('t1', { resume: true })
+    expect(joined.truncated).toBe(true)
+    expect(items.flatMap((item) => ('author' in item ? [item.seq] : []))).toEqual([9, 10])
+    await client.close()
+  })
+
+  it('hands a followed thread joined with resume its history from the mark once while a live event lands', async () => {
+    const log = [1, 2, 3].map((seq) => message(seq, `m${seq}`))
+    const t1 = { id: 't1', scope: 'acme', metadata: {}, created_at: '2026-01-01T12:00:00Z' }
+    server.handlers.set('thread.follow', () => ({
+      joined: [{ thread: t1, seq: 3, truncated: false }],
+    }))
+    server.handlers.set('thread.join', () => {
+      const live = message(4, 'live')
+      log.push(live)
+      server.push('event', live)
+      for (const event of log.filter((event) => event.seq > 1)) server.push('event', event)
+      return { thread: t1, seq: log.length, truncated: false }
+    })
+    const client = await connect({ url: 'ws://fake', protocols: ['thread', 'tok'] })
+    const items: Item[] = []
+    client.subscribe((item) => items.push(item))
+    await client.follow()
+    const joined = await client.join('t1', { resume: true })
+    expect(joined.seq).toBe(4)
+    server.push('event', message(4, 'live'))
+    server.push('event', message(5, 'after'))
+    await vi.waitFor(() => expect(items.at(-1)).toMatchObject({ seq: 5 }))
+    expect(items.flatMap((item) => ('author' in item ? [item.seq] : []))).toEqual([4, 2, 3, 5])
+    await client.close()
+  })
+
+  it('raises a join refused for since with resume and keeps no cursor for it', async () => {
+    server.handlers.set('thread.join', ({ since, resume }) => {
+      if (since !== null && resume)
+        throw { code: 'input', message: 'server: a join takes since or resume, not both' }
+      return { thread: {}, seq: 0, truncated: false }
+    })
+    const client = await connect({ url: 'ws://fake', protocols: ['thread', 'tok'] })
+    const refused = client.join('t1', { since: 0, resume: true })
+    await expect(refused).rejects.toBeInstanceOf(InputError)
+    await expect(refused).rejects.toThrow('server: a join takes since or resume, not both')
+    expect((client as unknown as { cursors: Map<string, number> }).cursors.has('t1')).toBe(false)
+    await client.close()
+  })
+
   it('forgets a leave once the server delivers that thread again from a new add', async () => {
     const t1 = { id: 't1', scope: 'acme', metadata: {}, created_at: '2026-01-01T12:00:00Z' }
     server.handlers.set('thread.follow', () => ({

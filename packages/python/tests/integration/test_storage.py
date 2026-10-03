@@ -350,6 +350,22 @@ async def test_baseline_marks_set_the_last_seq_only_where_there_is_no_mark(
     assert (await storage.mark("acme", "t2", "ana", 0))[0] == 0
 
 
+async def test_a_mark_is_read_for_one_membership_and_is_none_without_one(
+    storage: Storage,
+) -> None:
+    await room(storage, "t1", "acme", ANA, BRUNO)
+    await room(storage, "t1", "other", ANA)
+    await storage.append_event("acme", say("t1", "x"))
+    assert await storage.get_mark("acme", "t1", "ana") is None
+    await storage.mark("acme", "t1", "ana", 1)
+    assert await storage.get_mark("acme", "t1", "ana") == 1
+    assert await storage.get_mark("acme", "t1", "bruno") is None
+    assert await storage.get_mark("other", "t1", "ana") is None
+    assert await storage.get_mark("acme", "missing", "ana") is None
+    await storage.remove_member("acme", "t1", "ana")
+    assert await storage.get_mark("acme", "t1", "ana") is None
+
+
 async def test_a_deleted_scope_takes_its_marks_along(storage: Storage) -> None:
     await room(storage, "t1", "acme", ANA)
     await storage.mark("acme", "t1", "ana", 0)

@@ -373,16 +373,19 @@ a member or `authorize` refuses `delete`.
 ### `Client.join`
 
 ```python
-async def join(self, thread_id: str, since: int | None = None) -> Joined: ...
+async def join(self, thread_id: str, since: int | None = None, resume: bool = False) -> Joined: ...
 ```
 
 Receives the thread live from now and returns a `Joined`. With `since`, the events after that `seq`
 arrive first (`since=0` for the whole log, at most the server's `replay_limit`, beyond which the
-latest and `truncated=True`), then the current state, then live traffic. A thread the connection
-already receives, by following, keeps arriving live, and `since` hands its events after that `seq`
-up to where the connection is, once; joins of it in flight at the same time each get their own.
-Raises `InputError` when `since` is negative, `NotFoundError` when the scope holds no such thread,
-`ForbiddenError` when the caller is not a member or `authorize` refuses `read`.
+latest and `truncated=True`), then the current state, then live traffic. With `resume=True`, the
+events after the caller's mark arrive first instead, as `follow(resume=True)` hands each thread
+(from where it was added when it has no mark yet; a membership older than marks starts now). A
+thread the connection already receives, by following, keeps arriving live, and `since` or `resume`
+hands its events after that `seq` or the mark up to where the connection is, once; joins of it in
+flight at the same time each get their own. Raises `InputError` when `since` is negative or given
+with `resume`, `NotFoundError` when the scope holds no such thread, `ForbiddenError` when the caller
+is not a member or `authorize` refuses `read`.
 
 ### `Client.leave`
 
@@ -1278,6 +1281,8 @@ class Storage(Protocol):
         self, scope: str, thread_id: str, identity_id: str, seq: int
     ) -> tuple[int, int, bool]: ...
 
+    async def get_mark(self, scope: str, thread_id: str, identity_id: str) -> int | None: ...
+
     async def baseline_marks(self, scope: str, identity_id: str) -> int: ...
 
     async def append_event(self, scope: str, event: Event) -> tuple[Event, bool]: ...
@@ -1326,9 +1331,9 @@ returning `None`. Raises `NotFoundError`, from `add_member` and `append_event`, 
 no such thread, and `StorageError`, from `create_thread`, when the thread's scope is not `scope`.
 `mark` stores the identity's private read position in the thread, never lowering it, and returns
 it with the count of `message` events by others after it, at most 100, and whether it moved (a
-first mark, or a higher one); `baseline_marks` stores each
-thread's last `seq` as the mark of every membership of `identity_id` that has none, and returns how
-many it stored. `mark` raises `NotFoundError` when the identity is not a member of the thread.
+first mark, or a higher one); `get_mark` returns it, `None` without one; `baseline_marks` stores
+each thread's last `seq` as the mark of every membership of `identity_id` that has none, and returns
+how many it stored. `mark` raises `NotFoundError` when the identity is not a member of the thread.
 
 ### `InMemoryStorage`
 
@@ -1387,8 +1392,8 @@ class InputError(ThreadException):
 
 A request the library refuses: an empty scope, an empty thread id given to `create_thread`, an
 identity whose fields do not fit, a media part with both or neither of `data` and `url`, a value
-over its limit, an edit or retraction of the wrong kind of event, an unknown event or signal kind,
-an unknown tool, arguments a tool rejects.
+over its limit, a join given both `since` and `resume`, an edit or retraction of the wrong kind of
+event, an unknown event or signal kind, an unknown tool, arguments a tool rejects.
 
 ### `ConfigurationError`
 
@@ -1602,15 +1607,18 @@ a member or `authorize` refuses `delete`.
 ### `Client.join`
 
 ```ts
-async join(threadId: string, options: { since?: number } = {}): Promise<Joined>
+async join(threadId: string, options: { since?: number; resume?: boolean } = {}): Promise<Joined>
 ```
 
 Receives the thread live from now and returns a `Joined`. With `since`, the events after that `seq`
-arrive first (`since: 0` for the whole log), then the current state, then live traffic. A thread
-the connection already receives, by following, keeps arriving live, and `since` hands its events
-after that `seq` up to where the connection is, once; joins of it in flight at the same time each
-get their own. Raises `InputError` when `since` is negative, `NotFoundError` when the scope holds
-no such thread, `ForbiddenError` when the caller is not a member or `authorize` refuses `read`.
+arrive first (`since: 0` for the whole log), then the current state, then live traffic. With
+`resume: true`, the events after the caller's mark arrive first instead, as
+`follow({ resume: true })` hands each thread. A thread the connection already receives, by
+following, keeps arriving live, and `since` or `resume` hands its events after that `seq` or the
+mark up to where the connection is, once; joins of it in flight at the same time each get their
+own. Raises `InputError` when `since` is negative or given with `resume`, `NotFoundError` when the
+scope holds no such thread, `ForbiddenError` when the caller is not a member or `authorize` refuses
+`read`.
 
 ### `Client.leave`
 
@@ -2377,8 +2385,8 @@ class InputError extends ThreadException {
 ```
 
 A request the library refuses: an empty thread id given to `createThread`, an identity whose fields
-do not fit, a value over its limit, an edit or retraction of the wrong kind of event, a stream
-finished twice.
+do not fit, a value over its limit, a join given both `since` and `resume`, an edit or retraction of
+the wrong kind of event, a stream finished twice.
 
 ### `ConfigurationError`
 

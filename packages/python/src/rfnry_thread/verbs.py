@@ -260,10 +260,20 @@ class Verbs:
             )
         return stored, unread
 
-    async def join(self, session: Session, thread_id: str, since: int | None) -> Joined:
+    async def join(
+        self, session: Session, thread_id: str, since: int | None, resume: bool = False
+    ) -> Joined:
+        if since is not None and resume:
+            raise InputError("server: a join takes since or resume, not both")
         if since is not None and since < 0:
             raise InputError("server: since cannot be negative")
-        thread = await self.thread(session.identity, session.scope, thread_id, "read")
+        actor, scope = session.identity, session.scope
+        thread = await self.thread(actor, scope, thread_id, "read")
+        if resume:
+            since = await self._storage.get_mark(scope, thread_id, actor.id)
+            if since is None:
+                await self._storage.baseline_marks(scope, actor.id)
+                since = await self._storage.get_mark(scope, thread_id, actor.id)
         return await self._hub.join(session, thread, since)
 
     async def follow(

@@ -385,7 +385,9 @@ what each thread said after your **mark**, your private read position: `mark(thr
 stores it, never lowers it, and when it moved tells your other connections with `Marked`. A thread
 you were added to starts from the add; a gap longer than the replay limit arrives as its latest
 events with `truncated=True`, and
-`history(thread_id, after=mark, before=...)` reads the rest. Resuming is at least once: an event
+`history(thread_id, after=mark, before=...)` reads the rest. A participant that joins its threads
+one at a time resumes each the same way, with `join(thread_id, resume=True)`; a join takes `since`
+or `resume`, not both. Resuming is at least once: an event
 handled just before a crash comes again, so handle idempotently, and when you handle events
 concurrently, mark only up to the lowest one not yet handled.
 
@@ -675,10 +677,11 @@ from a connection that has not joined the thread, and on a client, an upgrade re
 or 403 or a `headers` or `protocols` function that raised. `InputError` for a request the library
 refuses: an empty scope, an empty thread id given to `create_thread`, an identity whose fields do
 not fit, a `system` identity added as a member, a `limit` outside 1 to 500 on `list_threads` or
-`history`, a `working` label over 1000 characters, a media part with both or neither of `data` and
-`url`, inline media over the cap, a custom payload over 64 KiB, message metadata over 8 KiB or not a
-JSON object, a message or edit that redaction leaves empty, an edit of anything but a message, a
-retraction of anything but a message or a step, an unknown event or signal kind, a malformed frame.
+`history`, a join given both `since` and `resume`, a `working` label over 1000 characters, a media
+part with both or neither of `data` and `url`, inline media over the cap, a custom payload over 64
+KiB, message metadata over 8 KiB or not a JSON object, a message or edit that redaction leaves
+empty, an edit of anything but a message, a retraction of anything but a message or a step, an
+unknown event or signal kind, a malformed frame.
 `ConfigurationError` for a setup that cannot work: a limit that is not positive, a `system` identity
 given to `serve` or `server.connect`, a `redact` that returns something other than parts, a
 `ThreadTools` with an empty `thread_id`, two tools with the same name in one `Tools`, a `Tool` with

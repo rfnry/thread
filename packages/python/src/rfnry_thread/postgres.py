@@ -443,6 +443,16 @@ class PostgresStorage:
             )
         return int(row["seq"]), int(row["unread"]), bool(row["moved"])
 
+    async def get_mark(self, scope: str, thread_id: str, identity_id: str) -> int | None:
+        async with self._guard("get_mark"), self._pool.acquire() as conn:
+            seq = await conn.fetchval(
+                "SELECT seq FROM thread_marks WHERE scope = $1 AND thread_id = $2 AND identity_id = $3",
+                scope,
+                thread_id,
+                identity_id,
+            )
+        return None if seq is None else int(seq)
+
     async def baseline_marks(self, scope: str, identity_id: str) -> int:
         async with self._guard("baseline_marks"), self._pool.acquire() as conn:
             status = await conn.execute(

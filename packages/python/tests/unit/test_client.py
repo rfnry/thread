@@ -496,6 +496,71 @@ async def test_a_failed_join_keeps_the_cursor_of_a_thread_the_client_follows(
     assert [item.seq for item in await drain(page) if isinstance(item, Message)] == [live.seq]
 
 
+async def test_an_assistant_that_joins_with_resume_hears_what_was_said_while_it_was_away(
+    server: Server,
+) -> None:
+    ana = await server.connect(identity=ANA, scope="acme")
+    await ana.create_thread(thread_id="t1")
+    await ana.add_member("t1", HELPER)
+    first = await ana.send("t1", "hello")
+    helper = await server.connect(identity=HELPER, scope="acme")
+    await helper.join("t1", resume=True)
+    heard = await take(helper, Message)
+    assert heard.id == first.id
+    await helper.mark("t1", heard.seq)
+    await helper.close()
+    away = await ana.send("t1", "sent while it was away")
+    again = await server.connect(identity=HELPER, scope="acme")
+    joined = await again.join("t1", resume=True)
+    assert (joined.seq, joined.truncated) == (away.seq, False)
+    said = [item for item in await drain(again, include_own=False) if isinstance(item, Message)]
+    assert [m.id for m in said] == [away.id]
+    live = await ana.send("t1", "live")
+    said = [item for item in await drain(again, include_own=False) if isinstance(item, Message)]
+    assert [m.id for m in said] == [live.id]
+    with pytest.raises(InputError, match="^server: a join takes since or resume, not both$"):
+        await again.join("t1", since=0, resume=True)
+
+
+async def test_a_follower_that_joins_with_resume_reads_the_thread_from_its_mark_once(
+    server: Server,
+) -> None:
+    ana = await server.connect(identity=ANA, scope="acme")
+    await ana.create_thread(thread_id="t1")
+    await ana.add_member("t1", HELPER)
+    for n in range(3):
+        await ana.send("t1", f"m{n}")
+    page = await server.connect(identity=HELPER, scope="acme")
+    await page.follow()
+    await drain(page)
+    await page.mark("t1", 3)
+    joined = await page.join("t1", resume=True)
+    assert joined.seq == 5
+    assert [item.seq for item in await drain(page) if isinstance(item, Message)] == [4, 5]
+    assert page._cursors["t1"] == 5 and not page._rewinds
+    await ana.send("t1", "live")
+    assert [item.seq for item in await drain(page) if isinstance(item, Message)] == [6]
+
+
+async def test_a_join_sends_resume_only_when_asked(server: Server) -> None:
+    ana = await server.connect(identity=ANA, scope="acme")
+    await ana.create_thread(thread_id="t1")
+    sent: list[dict[str, Any]] = []
+    request = ana._request
+
+    async def record(method: str, payload: dict[str, Any]) -> dict[str, Any]:
+        sent.append(payload)
+        return await request(method, payload)
+
+    ana._request = record  # type: ignore[method-assign]
+    await ana.join("t1")
+    await ana.join("t1", resume=True)
+    assert sent == [
+        {"thread_id": "t1", "since": None},
+        {"thread_id": "t1", "since": None, "resume": True},
+    ]
+
+
 async def test_history_and_list_threads_leave_out_the_new_fields_at_their_defaults(
     server: Server,
 ) -> None:

@@ -70,6 +70,7 @@ class _Update(_Ref):
 
 class _Join(_Ref):
     since: int | None = None
+    resume: bool = False
 
 
 class _Follow(_Args):
@@ -285,7 +286,7 @@ class Server:
             return {}
         if method == "thread.join":
             join = _args(_Join, method, payload)
-            return _dump(await verbs.join(session, join.thread_id, join.since))
+            return _dump(await verbs.join(session, join.thread_id, join.since, join.resume))
         if method == "thread.follow":
             follow = _args(_Follow, method, payload)
             joined = await verbs.follow(session, follow.resume, follow.since)

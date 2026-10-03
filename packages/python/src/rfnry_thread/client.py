@@ -472,16 +472,20 @@ class Client:
         )
         return _expect(event, Message)
 
-    async def _join(self, thread_id: str, since: int | None) -> Joined:
+    async def _join(self, thread_id: str, since: int | None, resume: bool = False) -> Joined:
         held = self._cursors.get(thread_id)
+        start = 0 if resume else since
         rewind: tuple[str, range, set[int]] | None = None
         if held is None:
             self._cursors[thread_id] = since or 0
-        elif since is not None and since < held:
-            rewind = (thread_id, range(since + 1, held + 1), set())
+        elif start is not None and start < held:
+            rewind = (thread_id, range(start + 1, held + 1), set())
             self._rewinds.append(rewind)
+        payload: dict[str, Any] = {"thread_id": thread_id, "since": since}
+        if resume:
+            payload["resume"] = True
         try:
-            reply = await self._request("thread.join", {"thread_id": thread_id, "since": since})
+            reply = await self._request("thread.join", payload)
         finally:
             self._rewinds = [other for other in self._rewinds if other is not rewind]
         joined = Joined.model_validate(reply)
@@ -527,12 +531,12 @@ class Client:
         await self._request("thread.delete", {"thread_id": thread_id})
         self._cursors.pop(thread_id, None)
 
-    async def join(self, thread_id: str, since: int | None = None) -> Joined:
+    async def join(self, thread_id: str, since: int | None = None, resume: bool = False) -> Joined:
         self._left.discard(thread_id)
         self._leaving.discard(thread_id)
         known = thread_id in self._cursors
         try:
-            joined = await self._join(thread_id, since)
+            joined = await self._join(thread_id, since, resume)
         except ThreadException:
             if not known:
                 self._cursors.pop(thread_id, None)

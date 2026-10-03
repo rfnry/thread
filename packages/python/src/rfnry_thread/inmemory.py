@@ -170,6 +170,9 @@ class InMemoryStorage:
                     break
         return count
 
+    async def get_mark(self, scope: str, thread_id: str, identity_id: str) -> int | None:
+        return self._marks.get((scope, thread_id, identity_id))
+
     async def baseline_marks(self, scope: str, identity_id: str) -> int:
         stored = 0
         for (owner, thread_id), members in self._members.items():

@@ -125,6 +125,9 @@ def golden() -> dict[str, Frame]:
         "request-thread-join": Request(
             id="1", method="thread.join", payload={"thread_id": "t1", "since": 0}
         ),
+        "request-thread-join-resume": Request(
+            id="6", method="thread.join", payload={"thread_id": "t1", "since": None, "resume": True}
+        ),
         "response-thread-join": Response(
             id="1", payload=Joined(thread=thread, seq=12, truncated=True).model_dump(mode="json")
         ),

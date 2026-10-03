@@ -456,20 +456,20 @@ export class Client {
     return (await this.event(threadId, fields, clientId)) as Message
   }
 
-  private async joinFrom(threadId: string, since: number | null): Promise<Joined> {
+  private async joinFrom(threadId: string, since: number | null, resume = false): Promise<Joined> {
     const held = this.cursors.get(threadId)
+    const start = resume ? 0 : since
     const rewind =
-      since !== null && held !== undefined && since < held
-        ? { threadId, since, held, taken: new Set<number>() }
+      start !== null && held !== undefined && start < held
+        ? { threadId, since: start, held, taken: new Set<number>() }
         : null
     if (held === undefined) this.cursors.set(threadId, since ?? 0)
     if (rewind) this.rewinds.push(rewind)
+    const payload: Payload = { thread_id: threadId, since }
+    if (resume) payload.resume = true
     let joined: Joined
     try {
-      joined = (await this.request('thread.join', {
-        thread_id: threadId,
-        since,
-      })) as unknown as Joined
+      joined = (await this.request('thread.join', payload)) as unknown as Joined
     } finally {
       this.rewinds = this.rewinds.filter((other) => other !== rewind)
     }
@@ -518,12 +518,15 @@ export class Client {
     this.cursors.delete(threadId)
   }
 
-  async join(threadId: string, options: { since?: number } = {}): Promise<Joined> {
+  async join(
+    threadId: string,
+    options: { since?: number; resume?: boolean } = {}
+  ): Promise<Joined> {
     this.left.delete(threadId)
     this.leaving.delete(threadId)
     const known = this.cursors.has(threadId)
     try {
-      const joined = await this.joinFrom(threadId, options.since ?? null)
+      const joined = await this.joinFrom(threadId, options.since ?? null, options.resume ?? false)
       this.held.add(threadId)
       return joined
     } catch (error) {
