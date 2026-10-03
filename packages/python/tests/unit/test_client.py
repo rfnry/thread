@@ -14,6 +14,7 @@ from rfnry_thread.models import (
     Edit,
     Image,
     Invited,
+    Marked,
     Message,
     Present,
     Read,
@@ -320,3 +321,45 @@ def test_serve_and_connect_take_who_and_where_by_keyword() -> None:
         "order",
         "preview",
     ]
+
+
+async def test_a_client_follows_its_threads_and_is_handed_new_ones(server: Server) -> None:
+    ana = await server.connect(identity=ANA, scope="acme")
+    helper = await server.connect(identity=HELPER, scope="acme")
+    await ana.create_thread(thread_id="t1")
+    await ana.add_member("t1", HELPER)
+    [joined] = await helper.follow()
+    assert joined.thread.id == "t1"
+    await ana.create_thread(thread_id="t2")
+    await ana.add_member("t2", HELPER)
+    await ana.send("t2", "hello")
+    kinds = [type(item).__name__ for item in await drain(helper, include_own=False)]
+    assert kinds == ["Invited", "Joined", "MemberAdded", "Joined", "Message"]
+
+
+async def test_mark_returns_the_stored_position_and_tells_the_markers_other_clients(
+    server: Server,
+) -> None:
+    ana = await server.connect(identity=ANA, scope="acme")
+    phone = await server.connect(identity=HELPER, scope="acme")
+    laptop = await server.connect(identity=HELPER, scope="acme")
+    await ana.create_thread(thread_id="t1")
+    await ana.add_member("t1", HELPER)
+    message = await ana.send("t1", "hi")
+    assert await phone.mark("t1", message.seq) == message.seq
+    assert await phone.mark("t1", 0) == message.seq
+    told = [item for item in await drain(laptop, include_own=False) if isinstance(item, Marked)]
+    assert {(m.thread_id, m.seq, m.unread) for m in told} == {("t1", message.seq, 0)}
+
+
+async def test_history_reads_forward_and_the_inbox_lists_by_activity(server: Server) -> None:
+    ana = await server.connect(identity=ANA, scope="acme")
+    for thread_id in ("t1", "t2"):
+        await ana.create_thread(thread_id=thread_id)
+    first = await ana.send("t1", "one")
+    await ana.send("t1", "two")
+    assert [e.seq for e in await ana.history("t1", after=first.seq)] == [first.seq + 1]
+    listed = await ana.list_threads(order="activity", preview=True)
+    assert [t.id for t in listed] == ["t1", "t2"]
+    assert listed[0].last_message is not None
+    assert listed[0].last_message.content == [Text(text="two")]

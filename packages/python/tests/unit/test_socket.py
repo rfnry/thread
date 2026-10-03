@@ -318,3 +318,25 @@ async def test_a_headers_function_that_raises_on_reconnect_ends_the_stream_with_
         await asyncio.wait_for(read_to_the_end(ana, seen), 3.0)
     assert ana.status == "closed"
     assert seen == [StatusChanged(status="reconnecting"), StatusChanged(status="closed")]
+
+
+async def test_a_follower_refollows_once_after_a_drop_and_misses_nothing(live: Live) -> None:
+    ana_identity = Identity(role="user", id="ana", name="Ana")
+    ana = await Client.connect(live.url, headers=ANA_HEADERS)
+    bruno = await live.server.connect(identity=BRUNO, scope="acme")
+    for thread_id in ("t1", "t2"):
+        await bruno.create_thread(thread_id=thread_id)
+        await bruno.add_member(thread_id, ana_identity)
+    await ana.follow()
+    await drain(ana)
+    live.paused = True
+    await live.drop()
+    await until(lambda: ana.status == "reconnecting")
+    await bruno.send("t1", "away one")
+    await bruno.create_thread(thread_id="t3")
+    await bruno.add_member("t3", ana_identity)
+    await bruno.send("t3", "away three")
+    live.paused = False
+    await until(lambda: ana.status == "open", timeout=3.0)
+    said = [first_text(item) for item in await drain(ana) if isinstance(item, Message)]
+    assert sorted(said) == ["away one", "away three"]

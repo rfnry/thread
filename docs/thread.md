@@ -211,6 +211,9 @@ at most 500 events (`Server(replay_limit=)`); beyond that you get the latest 500
 past the thread's last `seq` — it was deleted and made again under the same id — replays nothing
 and says `truncated=True` too, and the client follows the thread from `joined.seq`.
 
+`await helper.follow()` receives every thread you belong to at once, and `await helper.mark(thread.id, seq)`
+stores your read position; [Following and catching up](#following-and-catching-up) has the rest.
+
 ### Sending and streaming
 
 Every verb that writes returns the stored event:

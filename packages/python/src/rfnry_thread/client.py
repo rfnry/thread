@@ -28,9 +28,11 @@ from rfnry_thread.models import (
     Identity,
     IdentityLike,
     Joined,
+    Marked,
     Member,
     MemberRemoved,
     Message,
+    Order,
     Part,
     Read,
     Retract,
@@ -95,7 +97,7 @@ async def _headers(source: HeadersSource | None) -> dict[str, str] | None:
 
 
 def _own(item: Item, identity: Identity) -> bool:
-    if isinstance(item, Joined):
+    if isinstance(item, Joined | Marked):
         return False
     who = getattr(item, "sender", None) or getattr(item, "author", None)
     return isinstance(who, Identity) and who.id == identity.id
@@ -195,6 +197,8 @@ class Client:
         self._ids = itertools.count(1)
         self._inbox: asyncio.Queue[Item | None] = asyncio.Queue()
         self._cursors: dict[str, int] = {}
+        self._following = False
+        self._present: set[str] = set()
         self._outbox: dict[str, asyncio.Lock] = {}
         self._connected = asyncio.Event()
         self._reader: asyncio.Task[None] | None = None
@@ -267,6 +271,12 @@ class Client:
         self._lost(connection)
 
     def _receive(self, push: Push) -> None:
+        if push.name == "joined":
+            joined = Joined.model_validate(push.payload)
+            thread_id = joined.thread.id
+            self._cursors[thread_id] = max(self._cursors.get(thread_id, 0), joined.seq)
+            self._inbox.put_nowait(joined)
+            return
         if push.name == "event":
             event = EVENTS.validate_python(push.payload)
             cursor = self._cursors.get(event.thread_id)
@@ -325,13 +335,23 @@ class Client:
             self._reconnector = None
 
     async def _rejoin(self) -> None:
+        if self._following:
+            try:
+                await self._follow(True, dict(self._cursors))
+            except TransportError:
+                return
+            except ThreadException:
+                pass
         for thread_id, cursor in list(self._cursors.items()):
+            if self._following and thread_id not in self._present:
+                continue
             try:
                 joined = await self._join(thread_id, cursor)
             except TransportError:
                 return
             except ThreadException:
                 self._cursors.pop(thread_id, None)
+                self._present.discard(thread_id)
                 continue
             self._inbox.put_nowait(joined)
 
@@ -447,8 +467,17 @@ class Client:
             (await self._request("thread.get", {"thread_id": thread_id}))["thread"]
         )
 
-    async def list_threads(self, before: str | None = None, limit: int = 50) -> list[Thread]:
-        reply = await self._request("thread.list", {"before": before, "limit": limit})
+    async def list_threads(
+        self,
+        before: str | None = None,
+        limit: int = 50,
+        order: Order = "created",
+        preview: bool = False,
+    ) -> list[Thread]:
+        reply = await self._request(
+            "thread.list",
+            {"before": before, "limit": limit, "order": order, "preview": preview},
+        )
         return [Thread.model_validate(t) for t in reply["threads"]]
 
     async def update_thread(self, thread_id: str, metadata: dict[str, Any]) -> Thread:
@@ -461,14 +490,34 @@ class Client:
 
     async def join(self, thread_id: str, since: int | None = None) -> Joined:
         try:
-            return await self._join(thread_id, since)
+            joined = await self._join(thread_id, since)
         except ThreadException:
             self._cursors.pop(thread_id, None)
             raise
+        self._present.add(thread_id)
+        return joined
 
     async def leave(self, thread_id: str) -> None:
         self._cursors.pop(thread_id, None)
+        self._present.discard(thread_id)
         await self._request("thread.leave", {"thread_id": thread_id})
+
+    async def follow(self, resume: bool = False) -> list[Joined]:
+        return await self._follow(resume, None)
+
+    async def _follow(self, resume: bool, since: dict[str, int] | None) -> list[Joined]:
+        self._following = True
+        reply = await self._request("thread.follow", {"resume": resume, "since": since})
+        found = [Joined.model_validate(joined) for joined in reply["joined"]]
+        for joined in found:
+            thread_id = joined.thread.id
+            self._cursors[thread_id] = max(self._cursors.get(thread_id, 0), joined.seq)
+            self._inbox.put_nowait(joined)
+        return found
+
+    async def mark(self, thread_id: str, seq: int) -> int:
+        reply = await self._request("thread.mark", {"thread_id": thread_id, "seq": seq})
+        return int(reply["seq"])
 
     async def history(
         self,
@@ -476,10 +525,17 @@ class Client:
         before: int | None = None,
         limit: int = 50,
         kinds: list[str] | None = None,
+        after: int | None = None,
     ) -> list[Event]:
         reply = await self._request(
             "thread.history",
-            {"thread_id": thread_id, "before": before, "limit": limit, "kinds": kinds},
+            {
+                "thread_id": thread_id,
+                "before": before,
+                "limit": limit,
+                "kinds": kinds,
+                "after": after,
+            },
         )
         return [EVENTS.validate_python(e) for e in reply["events"]]
 

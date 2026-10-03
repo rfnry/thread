@@ -334,12 +334,20 @@ when the caller is not a member or `authorize` refuses `read`.
 ### `Client.list_threads`
 
 ```python
-async def list_threads(self, before: str | None = None, limit: int = 50) -> list[Thread]: ...
+async def list_threads(
+    self,
+    before: str | None = None,
+    limit: int = 50,
+    order: Order = "created",
+    preview: bool = False,
+) -> list[Thread]: ...
 ```
 
-Returns the threads the caller is a member of, newest first, up to `limit`; `before` is a thread id,
-for the next page. With an `authorize`, the threads it refuses to `read` are skipped and a page
-still holds up to `limit`. Raises `InputError` when `limit` is not between 1 and 500.
+Returns the threads the caller is a member of, newest first, up to `limit`; `before` is a thread
+id, for the next page. `order="activity"` orders them by their latest message. Each carries
+`last_seq`, `last_message_at`, `marked` and `unread`, and with `preview=True` its `last_message`.
+With an `authorize`, the threads it refuses to `read` are skipped and a page still holds up to
+`limit`. Raises `InputError` when `limit` is not between 1 and 500 or `order` is neither.
 
 ### `Client.update_thread`
 
@@ -382,6 +390,32 @@ async def leave(self, thread_id: str) -> None: ...
 Stops receiving the thread live; the caller's open streams and `Working` there end, and `Left` goes
 out when it was the identity's last connection in it. Leaving a thread not joined does nothing.
 
+### `Client.follow`
+
+```python
+async def follow(self, resume: bool = False) -> list[Joined]: ...
+```
+
+Receives every thread the caller is a member of, from now on, and each thread it is added to later
+from the moment it is added, as a `Joined` on `events()`; returns the `Joined` of each thread it
+receives now. With `resume=True`, each thread's events after the caller's mark come first (from
+where it was added when it has no mark yet; a membership older than marks starts now), at most the
+server's `replay_limit`, beyond which the latest and `truncated=True`. Following is not presence:
+no `Present` is announced, and the caller may still signal and receive signals in every thread.
+After a dropped socket the client follows again from what it has seen. Threads `authorize` refuses
+to `read` are left out. Raises `InputError` for a negative position.
+
+### `Client.mark`
+
+```python
+async def mark(self, thread_id: str, seq: int) -> int: ...
+```
+
+Stores the caller's private read position in the thread, never lowering it, and returns the stored
+`seq`; the caller's other connections receive `Marked`. Raises `InputError` when `seq` is not
+between 0 and the thread's last `seq`, `NotFoundError` when the scope holds no such thread,
+`ForbiddenError` when the caller is not a member or `authorize` refuses `read`.
+
 ### `Client.history`
 
 ```python
@@ -391,11 +425,13 @@ async def history(
     before: int | None = None,
     limit: int = 50,
     kinds: list[str] | None = None,
+    after: int | None = None,
 ) -> list[Event]: ...
 ```
 
 Returns the latest `limit` events below `before` (a `seq`), in `seq` order; `kinds` keeps only those
-kinds. Raises `InputError` when `limit` is not between 1 and 500, `NotFoundError` when the scope
+kinds. With `after` (a `seq`), the first `limit` events after it, in `seq` order; `before` and
+`after` together are a range. Raises `InputError` when `after` is negative or `limit` is not between 1 and 500, `NotFoundError` when the scope
 holds no such thread, `ForbiddenError` when the caller is not a member or `authorize` refuses
 `read`.
 
