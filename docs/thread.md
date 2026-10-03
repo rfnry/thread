@@ -211,8 +211,8 @@ at most 500 events (`Server(replay_limit=)`); beyond that you get the latest 500
 past the thread's last `seq` — it was deleted and made again under the same id — replays nothing
 and says `truncated=True` too, and the client follows the thread from `joined.seq`.
 
-`await helper.follow()` receives every thread you belong to at once, and `await helper.mark(thread.id, seq)`
-stores your read position; [Following and catching up](#following-and-catching-up) has the rest.
+A participant that follows never needs this: a thread it is added to arrives on its own
+([Following and catching up](#following-and-catching-up)).
 
 ### Sending and streaming
 
@@ -361,6 +361,41 @@ A connection that cannot keep up — its outbound queue over its bound with no w
 ten seconds — is closed, and its client resumes from its cursor. Stream deltas waiting for a slow
 connection are merged, never dropped.
 
+### Following and catching up
+
+A participant that belongs to many threads follows them instead of joining each:
+
+```python
+await helper.follow(resume=True)
+async for item in helper.events():
+    if isinstance(item, Message):
+        await handle(item)
+        await helper.mark(item.thread_id, item.seq)
+```
+
+`follow()` receives every thread you are a member of from now on, and a thread you are added to
+later from the moment you were added, as a `Joined` on the stream: there is no `Invited` to answer.
+Following is not presence; a page that opens a thread still joins it. `follow(resume=True)` first
+hands you what each thread said after your **mark**, your private read position: `mark(thread_id,
+seq)` stores it, never lowers it, and tells your other connections with `Marked`. A thread you were
+added to starts from the add; a gap longer than the replay limit arrives as its latest events with
+`truncated=True`, and `history(thread_id, after=mark, before=...)` reads the rest. Resuming is at
+least once: an event handled just before a crash comes again, so handle idempotently, and when you
+handle events concurrently, mark only up to the lowest one not yet handled.
+
+An inbox reads the same marks:
+
+```python
+inbox = await ana.list_threads(order="activity", preview=True)
+inbox[0].unread, inbox[0].last_message
+first_unread = await ana.history(inbox[0].id, after=inbox[0].marked)
+older = await ana.history(inbox[0].id, before=first_unread[0].seq)
+```
+
+`order="activity"` puts the thread with the latest message first; `unread` counts messages by
+others after your mark, up to 100; `preview=True` adds each thread's latest message, edits applied,
+retractions skipped.
+
 ### Many replicas
 
 Run as many servers as you like on one Postgres database. Each one `LISTEN`s for the others and
@@ -381,6 +416,25 @@ another with jittered backoff, listens again and repeats its own state at once, 
 rebuild it. `start()` holds one connection from the pool for `LISTEN`; `stop()` gives it back.
 Servers sharing one `InMemoryStorage` in one process link the same way, which is how the tests run
 two replicas without a database.
+
+#### One handler per thread
+
+Every replica's assistant follows the same threads, so every one of them hears each message. When
+exactly one should answer, hold a Postgres advisory lock for the thread while a run works on it,
+on the same database, and let the others leave the message alone:
+
+```python
+async with pool.acquire() as conn:
+    if await conn.fetchval("SELECT pg_try_advisory_lock(hashtext($1))", item.thread_id):
+        try:
+            await answer(item)
+            await assistant.mark(item.thread_id, item.seq)
+        finally:
+            await conn.execute("SELECT pg_advisory_unlock(hashtext($1))", item.thread_id)
+```
+
+A replica that dies releases its lock with its connection. Effects stay idempotent all the same: a
+resume can hand the next holder an event the last one handled just before it died.
 
 ### Permissions
 
