@@ -240,3 +240,24 @@ async def test_a_session_closed_during_an_add_is_not_left_in_the_room(
     await server.create_thread("acme", "t1")
     await server.add_member("acme", "t1", HELPER)
     assert session not in server._hub._rooms.get(("acme", "t1"), set())
+
+
+async def test_a_session_dropped_inside_the_storage_reads_of_an_enter_is_not_left_in_the_room(
+    storage: InMemoryStorage, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    server = Server(storage)
+    helper = await Peer.open(server, HELPER)
+    await helper.call("thread.follow")
+    session = next(s for s in server._hub.sessions if s.identity.id == "helper")
+    await server.create_thread("acme", "t1")
+    real = storage.is_member
+
+    async def is_member(scope: str, thread_id: str, identity_id: str) -> bool:
+        if identity_id == "helper":
+            await server._hub.drop(session)
+        return await real(scope, thread_id, identity_id)
+
+    monkeypatch.setattr(storage, "is_member", is_member)
+    await server.add_member("acme", "t1", HELPER)
+    assert session not in server._hub._rooms.get(("acme", "t1"), set())
+    assert "t1" not in session.joined

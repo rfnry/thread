@@ -131,6 +131,8 @@ class Hub:
                     replay = await self.storage.list_events(
                         scope, thread_id, since=since, limit=self.replay_limit
                     )
+            if session.dropped:
+                return Joined(thread=thread, seq=head), False
             session.joined[thread_id] = replay[0].seq - 1 if replay else head
             self._rooms.setdefault((scope, thread_id), set()).add(session)
             for event in replay:
