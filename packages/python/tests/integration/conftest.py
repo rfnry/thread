@@ -8,7 +8,7 @@ from rfnry_thread.inmemory import InMemoryStorage
 from rfnry_thread.postgres import PostgresStorage
 from rfnry_thread.storage import Storage
 
-TABLES = "thread_events, thread_members, thread_threads"
+TABLES = "thread_marks, thread_events, thread_members, thread_threads"
 
 
 async def postgres_pool() -> Any:

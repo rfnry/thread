@@ -277,3 +277,54 @@ async def test_initialize_adds_the_metadata_index_to_an_existing_database() -> N
         )
     await pool.close()
     assert definition is not None and "USING gin (metadata)" in definition
+
+
+async def test_a_mark_moves_forward_only_and_counts_what_others_said_after_it(
+    storage: Storage,
+) -> None:
+    await room(storage, "t1", "acme", ANA, BRUNO)
+    for n in range(3):
+        await storage.append_event("acme", say("t1", f"b{n}", author=BRUNO))
+    await storage.append_event("acme", say("t1", "a0", author=ANA))
+    assert await storage.mark("acme", "t1", "ana", 1) == (1, 2)
+    assert await storage.mark("acme", "t1", "ana", 0) == (1, 2)
+    assert await storage.mark("acme", "t1", "ana", 4) == (4, 0)
+
+
+async def test_a_mark_needs_a_membership_and_leaves_with_it(storage: Storage) -> None:
+    await room(storage, "t1", "acme", ANA)
+    with pytest.raises(NotFoundError, match="'bruno' is not a member of thread 't1'$"):
+        await storage.mark("acme", "t1", "bruno", 0)
+    await storage.add_member(
+        "acme", Member(thread_id="t1", identity=BRUNO, added_at=AT, added_by=SYSTEM)
+    )
+    await storage.append_event("acme", say("t1", "b1", author=BRUNO))
+    assert await storage.mark("acme", "t1", "ana", 1) == (1, 0)
+    await storage.remove_member("acme", "t1", "ana")
+    await storage.add_member(
+        "acme", Member(thread_id="t1", identity=ANA, added_at=AT, added_by=SYSTEM)
+    )
+    assert await storage.mark("acme", "t1", "ana", 0) == (0, 1)
+
+
+async def test_baseline_marks_set_the_last_seq_only_where_there_is_no_mark(
+    storage: Storage,
+) -> None:
+    await room(storage, "t1", "acme", ANA)
+    await room(storage, "t2", "acme", ANA)
+    await room(storage, "t3", "acme", BRUNO)
+    for client_id in ("x", "y"):
+        await storage.append_event("acme", say("t1", client_id))
+    await storage.append_event("acme", say("t2", "z"))
+    await storage.mark("acme", "t2", "ana", 0)
+    assert await storage.baseline_marks("acme", "ana") == 1
+    assert await storage.baseline_marks("acme", "ana") == 0
+    assert (await storage.mark("acme", "t1", "ana", 0))[0] == 2
+    assert (await storage.mark("acme", "t2", "ana", 0))[0] == 0
+
+
+async def test_a_deleted_scope_takes_its_marks_along(storage: Storage) -> None:
+    await room(storage, "t1", "acme", ANA)
+    await storage.mark("acme", "t1", "ana", 0)
+    assert await storage.delete_scope("acme") == 3
+    assert await storage.verify_absent("acme")

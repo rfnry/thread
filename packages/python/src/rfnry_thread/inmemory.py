@@ -6,7 +6,7 @@ from typing import Any
 
 from rfnry_thread.errors import NotFoundError, StorageError
 from rfnry_thread.models import Event, Member, Thread
-from rfnry_thread.storage import OnEvent, OnResume, OnSignal, Stop
+from rfnry_thread.storage import UNREAD_CAP, OnEvent, OnResume, OnSignal, Stop
 
 Key = tuple[str, str]
 
@@ -29,6 +29,7 @@ class InMemoryStorage:
         self._members: dict[Key, dict[str, Member]] = {}
         self._events: dict[Key, list[Event]] = {}
         self._keys: dict[tuple[str, str, str, str], Event] = {}
+        self._marks: dict[tuple[str, str, str], int] = {}
         self._listeners: list[tuple[OnEvent, OnSignal]] = []
 
     async def initialize(self) -> None:
@@ -87,6 +88,7 @@ class InMemoryStorage:
             return False
         self._members.pop(key, None)
         self._events.pop(key, None)
+        self._marks = {k: v for k, v in self._marks.items() if k[:2] != key}
         self._keys = {k: v for k, v in self._keys.items() if k[:2] != key}
         return True
 
@@ -101,6 +103,7 @@ class InMemoryStorage:
         return member, True
 
     async def remove_member(self, scope: str, thread_id: str, identity_id: str) -> bool:
+        self._marks.pop((scope, thread_id, identity_id), None)
         return self._members.get((scope, thread_id), {}).pop(identity_id, None) is not None
 
     async def list_members(self, scope: str, thread_id: str) -> list[Member]:
@@ -111,6 +114,34 @@ class InMemoryStorage:
 
     async def is_member(self, scope: str, thread_id: str, identity_id: str) -> bool:
         return identity_id in self._members.get((scope, thread_id), {})
+
+    async def mark(self, scope: str, thread_id: str, identity_id: str, seq: int) -> tuple[int, int]:
+        if identity_id not in self._members.get((scope, thread_id), {}):
+            raise NotFoundError(
+                f"inmemory: {identity_id!r} is not a member of thread {thread_id!r}"
+            )
+        key = (scope, thread_id, identity_id)
+        stored = max(self._marks.get(key, seq), seq)
+        self._marks[key] = stored
+        return stored, self._unread(scope, thread_id, identity_id, stored)
+
+    def _unread(self, scope: str, thread_id: str, identity_id: str, after: int) -> int:
+        count = 0
+        for event in self._events.get((scope, thread_id), []):
+            if event.seq > after and event.kind == "message" and event.author.id != identity_id:
+                count += 1
+                if count == UNREAD_CAP:
+                    break
+        return count
+
+    async def baseline_marks(self, scope: str, identity_id: str) -> int:
+        stored = 0
+        for (owner, thread_id), members in self._members.items():
+            key = (owner, thread_id, identity_id)
+            if owner == scope and identity_id in members and key not in self._marks:
+                self._marks[key] = len(self._events[(owner, thread_id)])
+                stored += 1
+        return stored
 
     async def append_event(self, scope: str, event: Event) -> tuple[Event, bool]:
         log = self._events.get((scope, event.thread_id))
@@ -159,12 +190,15 @@ class InMemoryStorage:
         keys = [key for key in self._threads if key[0] == scope]
         removed = 0
         for key in keys:
-            removed += 1 + len(self._members.get(key, {})) + len(self._events.get(key, []))
+            marks = sum(1 for mark in self._marks if mark[:2] == key)
+            removed += 1 + len(self._members.get(key, {})) + len(self._events.get(key, [])) + marks
             await self.delete_thread(*key)
         return removed
 
     async def verify_absent(self, scope: str) -> bool:
-        return not any(key[0] == scope for key in [*self._threads, *self._members, *self._events])
+        return not any(
+            key[0] == scope for key in [*self._threads, *self._members, *self._events, *self._marks]
+        )
 
     async def listen(
         self, on_event: OnEvent, on_signal: OnSignal, on_resume: OnResume | None = None

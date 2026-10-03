@@ -1199,6 +1199,12 @@ class Storage(Protocol):
 
     async def is_member(self, scope: str, thread_id: str, identity_id: str) -> bool: ...
 
+    async def mark(
+        self, scope: str, thread_id: str, identity_id: str, seq: int
+    ) -> tuple[int, int]: ...
+
+    async def baseline_marks(self, scope: str, identity_id: str) -> int: ...
+
     async def append_event(self, scope: str, event: Event) -> tuple[Event, bool]: ...
 
     async def list_events(
@@ -1240,6 +1246,10 @@ server on the storage appends or publishes, and an `OnResume`, `on_resume()`, ca
 listener is back; it returns a `Stop`, `stop()`, that ends it, and all four are async functions
 returning `None`. Raises `NotFoundError`, from `add_member` and `append_event`, when the scope holds
 no such thread, and `StorageError`, from `create_thread`, when the thread's scope is not `scope`.
+`mark` stores the identity's private read position in the thread, never lowering it, and returns
+it with the count of `message` events by others after it, at most 100; `baseline_marks` stores each
+thread's last `seq` as the mark of every membership of `identity_id` that has none, and returns how
+many it stored. `mark` raises `NotFoundError` when the identity is not a member of the thread.
 
 ### `InMemoryStorage`
 

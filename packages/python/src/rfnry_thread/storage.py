@@ -10,6 +10,8 @@ OnSignal = Callable[[str, str, dict[str, Any]], Awaitable[None]]
 OnResume = Callable[[], Awaitable[None]]
 Stop = Callable[[], Awaitable[None]]
 
+UNREAD_CAP = 100
+
 
 @runtime_checkable
 class Storage(Protocol):
@@ -41,6 +43,12 @@ class Storage(Protocol):
     async def list_members(self, scope: str, thread_id: str) -> list[Member]: ...
 
     async def is_member(self, scope: str, thread_id: str, identity_id: str) -> bool: ...
+
+    async def mark(
+        self, scope: str, thread_id: str, identity_id: str, seq: int
+    ) -> tuple[int, int]: ...
+
+    async def baseline_marks(self, scope: str, identity_id: str) -> int: ...
 
     async def append_event(self, scope: str, event: Event) -> tuple[Event, bool]: ...
 

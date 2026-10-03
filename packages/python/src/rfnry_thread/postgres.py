@@ -10,7 +10,7 @@ from typing import Any
 
 from rfnry_thread.errors import NotFoundError, StorageError, ThreadException
 from rfnry_thread.models import EVENTS, Event, Member, Thread
-from rfnry_thread.storage import OnEvent, OnResume, OnSignal, Stop
+from rfnry_thread.storage import UNREAD_CAP, OnEvent, OnResume, OnSignal, Stop
 
 EVENTS_CHANNEL = "thread_events"
 SIGNALS_CHANNEL = "thread_signals"
@@ -44,6 +44,14 @@ _DDL = [
         UNIQUE (scope, thread_id, id),
         UNIQUE (scope, thread_id, author_id, client_id),
         FOREIGN KEY (scope, thread_id) REFERENCES thread_threads (scope, id) ON DELETE CASCADE)
+    """,
+    """
+    CREATE TABLE IF NOT EXISTS thread_marks (
+        scope TEXT NOT NULL, thread_id TEXT NOT NULL, identity_id TEXT NOT NULL,
+        seq BIGINT NOT NULL, at TIMESTAMPTZ NOT NULL,
+        PRIMARY KEY (scope, thread_id, identity_id),
+        FOREIGN KEY (scope, thread_id, identity_id)
+            REFERENCES thread_members (scope, thread_id, identity_id) ON DELETE CASCADE)
     """,
 ]
 
@@ -328,10 +336,46 @@ class PostgresStorage:
             )
         return None if body is None else _event(body)
 
+    async def mark(self, scope: str, thread_id: str, identity_id: str, seq: int) -> tuple[int, int]:
+        async with self._guard("mark"), self._pool.acquire() as conn:
+            row = await conn.fetchrow(
+                "WITH stored AS (INSERT INTO thread_marks (scope, thread_id, identity_id, seq, at) "
+                "SELECT $1, $2, $3, $4, now() WHERE EXISTS (SELECT 1 FROM thread_members "
+                "WHERE scope = $1 AND thread_id = $2 AND identity_id = $3) "
+                "ON CONFLICT (scope, thread_id, identity_id) DO UPDATE "
+                "SET seq = GREATEST(thread_marks.seq, EXCLUDED.seq), at = EXCLUDED.at RETURNING seq) "
+                "SELECT s.seq, (SELECT count(*) FROM (SELECT 1 FROM thread_events e "
+                "WHERE e.scope = $1 AND e.thread_id = $2 AND e.seq > s.seq AND e.kind = 'message' "
+                "AND e.author_id <> $3 LIMIT $5) u) AS unread FROM stored s",
+                scope,
+                thread_id,
+                identity_id,
+                seq,
+                UNREAD_CAP,
+            )
+        if row is None:
+            raise NotFoundError(
+                f"postgres: {identity_id!r} is not a member of thread {thread_id!r}"
+            )
+        return int(row["seq"]), int(row["unread"])
+
+    async def baseline_marks(self, scope: str, identity_id: str) -> int:
+        async with self._guard("baseline_marks"), self._pool.acquire() as conn:
+            status = await conn.execute(
+                "INSERT INTO thread_marks (scope, thread_id, identity_id, seq, at) "
+                "SELECT m.scope, m.thread_id, m.identity_id, t.last_seq, now() "
+                "FROM thread_members m JOIN thread_threads t ON t.scope = m.scope AND t.id = m.thread_id "
+                "WHERE m.scope = $1 AND m.identity_id = $2 "
+                "ON CONFLICT (scope, thread_id, identity_id) DO NOTHING",
+                scope,
+                identity_id,
+            )
+        return _count(status)
+
     async def delete_scope(self, scope: str) -> int:
         async with self._guard("delete_scope"), self._pool.acquire() as conn, conn.transaction():
             removed = 0
-            for table in ("thread_events", "thread_members", "thread_threads"):
+            for table in ("thread_marks", "thread_events", "thread_members", "thread_threads"):
                 removed += _count(
                     await conn.execute(f"DELETE FROM {table} WHERE scope = $1", scope)
                 )
@@ -341,7 +385,7 @@ class PostgresStorage:
         async with self._guard("verify_absent"), self._pool.acquire() as conn:
             counts = [
                 await conn.fetchval(f"SELECT count(*) FROM {table} WHERE scope = $1", scope)
-                for table in ("thread_threads", "thread_members", "thread_events")
+                for table in ("thread_threads", "thread_members", "thread_events", "thread_marks")
             ]
         return all(count == 0 for count in counts)
 
