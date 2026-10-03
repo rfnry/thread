@@ -24,6 +24,7 @@ ILLUSTRATIVE = {
     'run = await engine.run("support", scope="acme", input=message.content,': "needs rfnry-engine; examples/factory_assistant runs it",
     "await helper.follow(resume=True)": "follows until the stream ends; test_follow.py covers the pattern",
     "async with pool.acquire() as conn:": "needs Postgres; the integration tier covers it",
+    'offered = websocket.scope.get("subprotocols", [])': "needs a web framework's socket; test_socket.py covers a refusal with 1008",
     "pool = await asyncpg.create_pool(dsn)": "needs Postgres; the integration tier covers it",
 }
 

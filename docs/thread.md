@@ -160,10 +160,20 @@ async def thread_socket(websocket: WebSocket, user: User = Depends(current_user)
 
 Any other framework adapts in the same few lines. Refusing a connection happens before `serve`:
 answer the upgrade with HTTP 401 or 403, or accept it and close it at once with 1008, policy
-violation (`await websocket.close(code=1008)`). A client stops on a refusal, with a
-`ForbiddenError`; a browser cannot see an HTTP status, so the TypeScript client sees only 1008.
-`identity` and `scope` are keyword-only, on `serve` and `server.connect` alike. Everything the
-socket says afterwards is authored as that identity, in that scope.
+violation:
+
+```python
+offered = websocket.scope.get("subprotocols", [])
+await websocket.accept(subprotocol=offered[0] if offered else None)
+await websocket.close(code=1008)
+```
+
+Close only after the accept, which names a subprotocol the client offered: a close before the accept
+goes out as HTTP 403, and a browser sees that, or a handshake naming none of the subprotocols it
+offered, only as 1006, a dropped network, so the TypeScript client would retry forever. A client
+stops on a refusal, with a `ForbiddenError`. `identity` and `scope` are keyword-only, on `serve` and
+`server.connect` alike. Everything the socket says afterwards is authored as that identity, in that
+scope.
 
 There are two ways to get a client, and they are the same class:
 
@@ -455,8 +465,8 @@ async with pool.acquire() as conn:
 Advisory locks share one key space per database with whatever else the application locks, and a
 collision between try-locks silently skips a message, hence the 64-bit key. A session lock pins its
 connection for the whole run: take it from a direct session, not a transaction-pooling proxy, on a
-pool reserved for these locks and sized to the runs a replica allows at once, not the pool the server
-and storage use.
+pool reserved for these locks and sized to the runs a replica allows at once, not the pool the
+server and storage use.
 
 A replica that dies releases its lock with its connection. Effects stay idempotent all the same: a
 resume can hand the next holder an event the last one handled just before it died.
@@ -567,16 +577,16 @@ const message = await client.send(threadId, 'Can you check my invoice?')
 ```
 
 The verbs are the Python ones in camelCase — `createThread`, `getThread`, `listThreads`,
-`updateThread`, `deleteThread`, `join`, `leave`, `follow`, `mark`, `marked`, `history`, `present`, `addMember`,
-`removeMember`, `listMembers`, `send`, `stream`, `step`, `edit`, `retract`, `read`, `custom`,
-`working`, `idle`, `cancel`, `close` — with the same outbox, reconnect and resume. Events and signals are the wire
-shapes, fields as they travel (`thread_id`, `in_reply_to`); options are camelCase, and `send` and
-`stream` take `metadata` beside `inReplyTo`. A browser cannot set headers on a WebSocket, so the
-upgrade carries your session cookie — check its `Origin` — or a token in `protocols`, the
-subprotocol list; an endpoint that reads a token there accepts with one of
-the offered subprotocols (`await websocket.accept(subprotocol="thread")`). Listeners get
-what arrives after they subscribe, so subscribe before joining. A UI usually wants its own messages
-too, echoed from other tabs, hence `includeOwn`. Streaming:
+`updateThread`, `deleteThread`, `join`, `leave`, `follow`, `mark`, `marked`, `history`, `present`,
+`addMember`, `removeMember`, `listMembers`, `send`, `stream`, `step`, `edit`, `retract`, `read`,
+`custom`, `working`, `idle`, `cancel`, `close` — with the same outbox, reconnect and resume. Events
+and signals are the wire shapes, fields as they travel (`thread_id`, `in_reply_to`); options are
+camelCase, and `send` and `stream` take `metadata` beside `inReplyTo`. A browser cannot set headers
+on a WebSocket, so the upgrade carries your session cookie — check its `Origin` — or a token in
+`protocols`, the subprotocol list; an endpoint that reads a token there accepts with one of the
+offered subprotocols (`await websocket.accept(subprotocol="thread")`). Listeners get what arrives
+after they subscribe, so subscribe before joining. A UI usually wants its own messages too, echoed
+from other tabs, hence `includeOwn`. Streaming:
 
 ```ts
 const reply = client.stream(threadId, { inReplyTo: message.id })
@@ -590,10 +600,10 @@ await reply.finish()
 `StatusChanged`, `{ kind: 'status', status }`: the one item without a thread, so a listener that
 follows one thread checks for it first. `client.closed` resolves when the client stops for good —
 `null` after `close()`, or the error when your `protocols` function throws `ForbiddenError` on a
-reconnect or your endpoint refuses it, an expired session say. A browser cannot see why an upgrade failed, so an
-upgrade refused with HTTP 401 or 403 keeps retrying with backoff, `'reconnecting'` all along; a
-connection accepted and closed with 1008 is the refusal it sees. Stores, hooks and rendering are
-your UI's.
+reconnect or your endpoint refuses it, an expired session say. A browser cannot see why an upgrade
+failed, so an upgrade refused with HTTP 401 or 403 keeps retrying with backoff, `'reconnecting'` all
+along; a connection accepted and closed with 1008 is the refusal it sees. Stores, hooks and
+rendering are your UI's.
 
 ## Tools
 
@@ -694,20 +704,20 @@ thread, so it is a `NotFoundError` too, except in `create_thread`, which refuses
 non-member, an `authorize` that says no, an edit or retraction of someone else's event, a signal
 from a connection that has not joined the thread, and on a client, an upgrade refused with HTTP 401
 or 403, a connection closed with 1008 before its hello is answered, or a `headers` or `protocols`
-function that raised `ForbiddenError`. `InputError` for a request the library
-refuses: an empty scope, an empty thread id given to `create_thread`, an identity whose fields do
-not fit, a `system` identity added as a member, a `limit` outside 1 to 500 on `list_threads` or
-`history`, a join given both `since` and `resume`, a `working` label over 1000 characters, a media
-part with both or neither of `data` and `url`, inline media over the cap, a custom payload over 64
-KiB, message metadata over 8 KiB or not a JSON object, a message or edit that redaction leaves
-empty, an edit of anything but a message, a retraction of anything but a message or a step, an
-unknown event or signal kind, a malformed frame.
-`ConfigurationError` for a setup that cannot work: a limit that is not positive, a `system` identity
-given to `serve` or `server.connect`, a `redact` that returns something other than parts, a
-`ThreadTools` with an empty `thread_id`, two tools with the same name in one `Tools`, a `Tool` with
-no body when it is called. `StorageError` for the database. `TransportError` for the socket: a write
-not acknowledged within its deadline, a client used after `close()`, a connection that cannot be
-opened. On a client, an error the server raised is raised again with its class and message.
+function that raised `ForbiddenError`. `InputError` for a request the library refuses: an empty
+scope, an empty thread id given to `create_thread`, an identity whose fields do not fit, a `system`
+identity added as a member, a `limit` outside 1 to 500 on `list_threads` or `history`, a join given
+both `since` and `resume`, a `working` label over 1000 characters, a media part with both or neither
+of `data` and `url`, inline media over the cap, a custom payload over 64 KiB, message metadata over
+8 KiB or not a JSON object, a message or edit that redaction leaves empty, an edit of anything but a
+message, a retraction of anything but a message or a step, an unknown event or signal kind, a
+malformed frame. `ConfigurationError` for a setup that cannot work: a limit that is not positive, a
+`system` identity given to `serve` or `server.connect`, a `redact` that returns something other than
+parts, a `ThreadTools` with an empty `thread_id`, two tools with the same name in one `Tools`, a
+`Tool` with no body when it is called. `StorageError` for the database. `TransportError` for the
+socket: a write not acknowledged within its deadline, a client used after `close()`, a connection
+that cannot be opened. On a client, an error the server raised is raised again with its class and
+message.
 
 All under `ThreadException` — the root takes the `Exception` suffix, every child ends in `Error`,
 and the names avoid Python's `PermissionError` and `ConnectionError`. Every message names the
