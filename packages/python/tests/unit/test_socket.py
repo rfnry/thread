@@ -2,6 +2,7 @@ import asyncio
 import contextlib
 from collections.abc import AsyncIterator
 from http import HTTPStatus
+from typing import Any
 
 import pytest
 from until import until
@@ -10,7 +11,7 @@ from websockets.http11 import Request, Response
 
 from rfnry_thread import client as client_module
 from rfnry_thread.client import Client, Item
-from rfnry_thread.errors import ForbiddenError, TransportError
+from rfnry_thread.errors import ForbiddenError, InputError, ThreadException, TransportError
 from rfnry_thread.inmemory import InMemoryStorage
 from rfnry_thread.models import Identity, Joined, Message, StatusChanged, Text
 from rfnry_thread.server import Server
@@ -329,6 +330,14 @@ async def test_a_follower_refollows_once_after_a_drop_and_misses_nothing(live: L
         await bruno.add_member(thread_id, ana_identity)
     await ana.follow()
     await drain(ana)
+    sent: list[tuple[str, dict[str, Any]]] = []
+    request = ana._request
+
+    async def record(method: str, payload: dict[str, Any]) -> dict[str, Any]:
+        sent.append((method, payload))
+        return await request(method, payload)
+
+    ana._request = record  # type: ignore[method-assign]
     live.paused = True
     await live.drop()
     await until(lambda: ana.status == "reconnecting")
@@ -340,3 +349,75 @@ async def test_a_follower_refollows_once_after_a_drop_and_misses_nothing(live: L
     await until(lambda: ana.status == "open", timeout=3.0)
     said = [first_text(item) for item in await drain(ana) if isinstance(item, Message)]
     assert sorted(said) == ["away one", "away three"]
+    follows = [payload for method, payload in sent if method == "thread.follow"]
+    assert len(follows) == 1
+    assert follows[0]["resume"] is True
+    assert set(follows[0]["since"]) == {"t1", "t2"}
+    assert [m for m, _ in sent if m == "thread.join"] == []
+
+
+async def test_a_followed_client_rejoins_only_the_threads_it_joined_explicitly(
+    live: Live,
+) -> None:
+    ana_identity = Identity(role="user", id="ana", name="Ana")
+    ana = await Client.connect(live.url, headers=ANA_HEADERS)
+    bruno = await live.server.connect(identity=BRUNO, scope="acme")
+    for thread_id in ("t1", "t2"):
+        await bruno.create_thread(thread_id=thread_id)
+        await bruno.add_member(thread_id, ana_identity)
+    await ana.follow()
+    await ana.join("t2")
+    await drain(ana)
+    sent: list[tuple[str, dict[str, Any]]] = []
+    request = ana._request
+
+    async def record(method: str, payload: dict[str, Any]) -> dict[str, Any]:
+        sent.append((method, payload))
+        return await request(method, payload)
+
+    ana._request = record  # type: ignore[method-assign]
+    live.paused = True
+    await live.drop()
+    await until(lambda: ana.status == "reconnecting")
+    live.paused = False
+    await until(lambda: ana.status == "open", timeout=3.0)
+    joins = [payload["thread_id"] for method, payload in sent if method == "thread.join"]
+    assert joins == ["t2"]
+
+
+async def test_a_follow_that_fails_leaves_the_client_not_following(live: Live) -> None:
+    ana = await Client.connect(live.url, headers=ANA_HEADERS)
+    with pytest.raises(InputError):
+        await ana._follow(False, {"t1": -1})
+    assert ana._following is False
+
+
+async def test_a_failed_refollow_falls_back_to_joining_every_thread(live: Live) -> None:
+    ana_identity = Identity(role="user", id="ana", name="Ana")
+    ana = await Client.connect(live.url, headers=ANA_HEADERS)
+    bruno = await live.server.connect(identity=BRUNO, scope="acme")
+    await bruno.create_thread(thread_id="t1")
+    await bruno.add_member("t1", ana_identity)
+    await ana.follow()
+    await drain(ana)
+    sent: list[str] = []
+    request = ana._request
+
+    async def record(method: str, payload: dict[str, Any]) -> dict[str, Any]:
+        sent.append(method)
+        return await request(method, payload)
+
+    async def refuse(resume: bool, since: dict[str, int] | None) -> list[Joined]:
+        raise ThreadException("client: refused")
+
+    ana._request = record  # type: ignore[method-assign]
+    ana._follow = refuse  # type: ignore[method-assign]
+    live.paused = True
+    await live.drop()
+    await until(lambda: ana.status == "reconnecting")
+    await bruno.send("t1", "away one")
+    live.paused = False
+    await until(lambda: ana.status == "open", timeout=3.0)
+    said = [first_text(item) for item in await drain(ana) if isinstance(item, Message)]
+    assert said == ["away one"]
+    assert "thread.join" in sent

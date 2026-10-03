@@ -335,15 +335,17 @@ class Client:
             self._reconnector = None
 
     async def _rejoin(self) -> None:
+        followed = False
         if self._following:
             try:
                 await self._follow(True, dict(self._cursors))
+                followed = True
             except TransportError:
                 return
             except ThreadException:
                 pass
         for thread_id, cursor in list(self._cursors.items()):
-            if self._following and thread_id not in self._present:
+            if followed and thread_id not in self._present:
                 continue
             try:
                 joined = await self._join(thread_id, cursor)
@@ -506,8 +508,8 @@ class Client:
         return await self._follow(resume, None)
 
     async def _follow(self, resume: bool, since: dict[str, int] | None) -> list[Joined]:
-        self._following = True
         reply = await self._request("thread.follow", {"resume": resume, "since": since})
+        self._following = True
         found = [Joined.model_validate(joined) for joined in reply["joined"]]
         for joined in found:
             thread_id = joined.thread.id
