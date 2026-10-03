@@ -394,7 +394,8 @@ An inbox reads the same marks:
 inbox = await ana.list_threads(order="activity", preview=True)
 inbox[0].unread, inbox[0].last_message
 first_unread = await ana.history(inbox[0].id, after=inbox[0].marked)
-older = await ana.history(inbox[0].id, before=first_unread[0].seq)
+if first_unread:
+    older = await ana.history(inbox[0].id, before=first_unread[0].seq)
 ```
 
 `order="activity"` puts the thread with the latest message first; `unread` counts messages by
@@ -434,7 +435,7 @@ async with pool.acquire() as conn:
     key = f"{assistant.scope}:{item.thread_id}"
     if await conn.fetchval("SELECT pg_try_advisory_lock(hashtext($1))", key):
         try:
-            later = await assistant.history(item.thread_id, after=item.seq)
+            later = await assistant.history(item.thread_id, after=item.seq, limit=500, kinds=["message"])
             mine = [e for e in later if e.in_reply_to == item.id and e.author.id == assistant.identity.id]
             if not mine:
                 await answer(item)

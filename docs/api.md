@@ -202,8 +202,8 @@ Returns every thread of the scope, member or not, newest first, up to `limit`; `
 containment compared as JSON, and `before` a thread id for the next page. Raises `InputError` when
 the scope is empty or `limit` is not between 1 and 500.
 
-`order="activity"` lists by the latest message, and `preview=True` fills `last_message`; a system
-listing has no `marked` or `unread`.
+`order` is an `Order`, which is `Literal["created", "activity"]`: `"activity"` lists by the latest
+message. `preview=True` fills `last_message`; a system listing has no `marked` or `unread`.
 
 ### `Server.update_thread`
 
@@ -344,7 +344,8 @@ async def list_threads(
 ```
 
 Returns the threads the caller is a member of, newest first, up to `limit`; `before` is a thread
-id, for the next page. `order="activity"` orders them by their latest message. Each carries
+id, for the next page. `order` is an `Order`, which is `Literal["created", "activity"]`:
+`"activity"` orders them by their latest message. Each carries
 `last_seq`, `last_message_at`, `marked` and `unread`, and with `preview=True` its `last_message`.
 With an `authorize`, the threads it refuses to `read` are skipped and a page still holds up to
 `limit`. Raises `InputError` when `limit` is not between 1 and 500 or `order` is neither.
@@ -1314,8 +1315,9 @@ writes a row, and the log is append-only: an event is removed only with its thre
 existing thread, membership, or event of the same author and `client_id` comes back with `False`,
 and a new event gets the thread's next `seq`); the getters return `None` for what the scope does not
 hold, `list_threads` returns threads newest first and `list_events` events in `seq` order, with
-`since` the first after it and without it the latest. `order="activity"` lists by the latest message
-instead, a thread without messages by its creation; `preview=True` fills each thread's
+`since` the first after it and without it the latest. `order` is an `Order`, which is
+`Literal["created", "activity"]`: `"activity"` lists by the latest message instead, a thread without
+messages by its creation; `preview=True` fills each thread's
 `last_message`. `listen` takes an `OnEvent`, `on_event(scope,
 thread_id, seq)`, and an `OnSignal`, `on_signal(scope, thread_id, payload)`, called for what any
 server on the storage appends or publishes, and an `OnResume`, `on_resume()`, called once a dropped
