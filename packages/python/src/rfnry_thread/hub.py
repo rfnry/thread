@@ -283,7 +283,7 @@ class Hub:
             scope,
             thread.id,
             {
-                "kind": "added",
+                "kind": "invited",
                 "thread_id": thread.id,
                 "sender": sender.model_dump(mode="json"),
                 "to": identity.id,

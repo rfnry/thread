@@ -217,6 +217,42 @@ async def test_an_invitation_reaches_only_connections_not_in_the_thread() -> Non
     assert await pushes(other_scope, other_recorder) == []
 
 
+async def test_an_add_is_published_as_an_invitation_with_its_seq() -> None:
+    storage, hub, thread = await setup()
+    published: list[dict[str, Any]] = []
+
+    async def publish(scope: str, thread_id: str, payload: dict[str, Any]) -> None:
+        published.append(payload)
+
+    storage.publish = publish  # type: ignore[method-assign]
+    hub.linked = True
+    await hub.added("acme", thread, ANA, BRUNO, 3)
+    assert published == [
+        {
+            "o": hub.origin,
+            "kind": "invited",
+            "thread_id": "t1",
+            "sender": ANA.model_dump(mode="json"),
+            "to": "bruno",
+            "seq": 3,
+        }
+    ]
+
+
+async def test_an_invitation_without_a_seq_invites_and_hands_followers_the_thread() -> None:
+    _, hub, thread = await setup(events=2)
+    plain, plain_recorder = open_session(BRUNO)
+    following, following_recorder = open_session(BRUNO)
+    following.following = True
+    hub.sessions.update({plain, following})
+    notice = {"kind": "invited", "thread_id": "t1", "sender": ANA.model_dump(mode="json")}
+    await hub.on_signal("acme", "t1", {"o": "older", **notice, "to": "bruno"})
+    assert kinds(await pushes(plain, plain_recorder)) == ["invited"]
+    await following.outbound.drain()
+    assert [frame["name"] for frame in following_recorder.frames] == ["joined"]
+    assert following.joined == {"t1": 2}
+
+
 async def test_deletion_tells_the_room_and_empties_it() -> None:
     _, hub, thread = await setup()
     ana, recorder = open_session(ANA)
