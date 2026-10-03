@@ -18,6 +18,11 @@ export type Thread = {
   scope: string
   metadata: Record<string, unknown>
   created_at: string
+  last_seq?: number
+  last_message_at?: string
+  marked?: number
+  unread?: number
+  last_message?: Message
 }
 
 export type Member = { thread_id: string; identity: Identity; added_at: string; added_by: Identity }

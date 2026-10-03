@@ -133,7 +133,7 @@ export class FakeServer {
     }
   }
 
-  push(name: 'event' | 'signal', payload: Frame): void {
+  push(name: 'event' | 'signal' | 'joined', payload: Frame): void {
     this.current?.deliver({ type: 'push', name, payload })
   }
 

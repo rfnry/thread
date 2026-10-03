@@ -185,6 +185,8 @@ export class Client {
   private nextId = 1
   private readonly listeners = new Map<Listener, boolean>()
   private readonly cursors = new Map<string, number>()
+  private following = false
+  private readonly held = new Set<string>()
   private stopped = false
   private current: Status = 'open'
   private failure: ThreadException | null = null
@@ -264,6 +266,15 @@ export class Client {
       return
     }
     if (frame.type !== 'push') return
+    if (frame.name === 'joined') {
+      const joined = frame.payload as unknown as Joined
+      this.cursors.set(
+        joined.thread.id,
+        Math.max(this.cursors.get(joined.thread.id) ?? 0, joined.seq)
+      )
+      this.emit(joined)
+      return
+    }
     if (frame.name === 'event') {
       const event = frame.payload as unknown as Event
       const cursor = this.cursors.get(event.thread_id)
@@ -283,7 +294,8 @@ export class Client {
 
   private emit(item: Item): void {
     const who = 'author' in item ? item.author : 'sender' in item ? item.sender : null
-    const own = who !== null && who.id === this.identity.id
+    const own =
+      who !== null && who.id === this.identity.id && !('kind' in item && item.kind === 'marked')
     for (const [listener, includeOwn] of this.listeners) {
       if (!includeOwn && own) continue
       try {
@@ -335,12 +347,23 @@ export class Client {
   }
 
   private async rejoin(): Promise<void> {
+    let followed = false
+    if (this.following) {
+      try {
+        await this.followFrom(true, Object.fromEntries(this.cursors))
+        followed = true
+      } catch (error) {
+        if (error instanceof TransportError) return
+      }
+    }
     for (const [threadId, cursor] of [...this.cursors]) {
+      if (followed && !this.held.has(threadId)) continue
       try {
         this.emit(await this.joinFrom(threadId, cursor))
       } catch (error) {
         if (error instanceof TransportError) return
         this.cursors.delete(threadId)
+        this.held.delete(threadId)
       }
     }
   }
@@ -429,10 +452,19 @@ export class Client {
     return (await this.request('thread.get', { thread_id: threadId })).thread as Thread
   }
 
-  async listThreads(options: { before?: string; limit?: number } = {}): Promise<Thread[]> {
+  async listThreads(
+    options: {
+      before?: string
+      limit?: number
+      order?: 'created' | 'activity'
+      preview?: boolean
+    } = {}
+  ): Promise<Thread[]> {
     const reply = await this.request('thread.list', {
       before: options.before ?? null,
       limit: options.limit ?? 50,
+      order: options.order ?? 'created',
+      preview: options.preview ?? false,
     })
     return reply.threads as Thread[]
   }
@@ -448,7 +480,9 @@ export class Client {
 
   async join(threadId: string, options: { since?: number } = {}): Promise<Joined> {
     try {
-      return await this.joinFrom(threadId, options.since ?? null)
+      const joined = await this.joinFrom(threadId, options.since ?? null)
+      this.held.add(threadId)
+      return joined
     } catch (error) {
       this.cursors.delete(threadId)
       throw error
@@ -457,16 +491,44 @@ export class Client {
 
   async leave(threadId: string): Promise<void> {
     this.cursors.delete(threadId)
+    this.held.delete(threadId)
     await this.request('thread.leave', { thread_id: threadId })
+  }
+
+  async follow(options: { resume?: boolean } = {}): Promise<Joined[]> {
+    return this.followFrom(options.resume ?? false, null)
+  }
+
+  private async followFrom(
+    resume: boolean,
+    since: Record<string, number> | null
+  ): Promise<Joined[]> {
+    const reply = await this.request('thread.follow', { resume, since })
+    this.following = true
+    const found = reply.joined as Joined[]
+    for (const joined of found) {
+      this.cursors.set(
+        joined.thread.id,
+        Math.max(this.cursors.get(joined.thread.id) ?? 0, joined.seq)
+      )
+      this.emit(joined)
+    }
+    return found
+  }
+
+  async mark(threadId: string, seq: number): Promise<number> {
+    const reply = await this.request('thread.mark', { thread_id: threadId, seq })
+    return reply.seq as number
   }
 
   async history(
     threadId: string,
-    options: { before?: number; limit?: number; kinds?: string[] } = {}
+    options: { before?: number; after?: number; limit?: number; kinds?: string[] } = {}
   ): Promise<Event[]> {
     const reply = await this.request('thread.history', {
       thread_id: threadId,
       before: options.before ?? null,
+      after: options.after ?? null,
       limit: options.limit ?? 50,
       kinds: options.kinds ?? null,
     })

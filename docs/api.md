@@ -1553,12 +1553,22 @@ when the caller is not a member or `authorize` refuses `read`.
 ### `Client.listThreads`
 
 ```ts
-async listThreads(options: { before?: string; limit?: number } = {}): Promise<Thread[]>
+async listThreads(
+  options: {
+    before?: string
+    limit?: number
+    order?: 'created' | 'activity'
+    preview?: boolean
+  } = {}
+): Promise<Thread[]>
 ```
 
 Returns the threads the caller is a member of, newest first, up to `limit` (50 when left out);
-`before` is a thread id, for the next page. Raises `InputError` when `limit` is not between 1 and
-500.
+`before` is a thread id, for the next page. `order: 'activity'` orders them by their latest
+message. Each carries `last_seq`, `last_message_at`, `marked` and `unread`, and with `preview: true`
+its `last_message`. With an `authorize`, the threads it refuses to `read` are skipped and a page
+still holds up to `limit`. Raises `InputError` when `limit` is not between 1 and 500 or `order` is
+neither.
 
 ### `Client.updateThread`
 
@@ -1600,18 +1610,45 @@ async leave(threadId: string): Promise<void>
 Stops receiving the thread live; the caller's open streams and `Working` there end. Leaving a thread
 not joined does nothing.
 
+### `Client.follow`
+
+```ts
+async follow(options: { resume?: boolean } = {}): Promise<Joined[]>
+```
+
+Receives every thread the caller is a member of, from now on, and each thread it is added to later
+from the moment it is added, as a `Joined` to the listeners; returns the `Joined` of each thread it
+receives now. With `resume: true`, each thread's events after the caller's mark come first (from
+where it was added when it has no mark yet; a membership older than marks starts now), at most the
+server's `replay_limit`, beyond which the latest and `truncated: true`. Following is not presence:
+no `Present` is announced, and the caller may still signal and receive signals in every thread.
+After a dropped socket the client follows again from what it has seen. Threads `authorize` refuses
+to `read` are left out. Raises `InputError` for a negative position.
+
+### `Client.mark`
+
+```ts
+async mark(threadId: string, seq: number): Promise<number>
+```
+
+Stores the caller's private read position in the thread, never lowering it, and returns the stored
+`seq`; the caller's other connections receive `Marked`. Raises `InputError` when `seq` is not
+between 0 and the thread's last `seq`, `NotFoundError` when the scope holds no such thread,
+`ForbiddenError` when the caller is not a member or `authorize` refuses `read`.
+
 ### `Client.history`
 
 ```ts
 async history(
   threadId: string,
-  options: { before?: number; limit?: number; kinds?: string[] } = {}
+  options: { before?: number; after?: number; limit?: number; kinds?: string[] } = {}
 ): Promise<Event[]>
 ```
 
 Returns the latest `limit` events (50 when left out) below `before` (a `seq`), in `seq` order;
-`kinds` keeps only those kinds. Raises `InputError` when `limit` is not between 1 and 500,
-`NotFoundError` when the scope holds no such thread, `ForbiddenError` when the caller is not a
+`kinds` keeps only those kinds. With `after` (a `seq`), the first `limit` events after it, in `seq`
+order; `before` and `after` together are a range. Raises `InputError` when `after` is negative or
+`limit` is not between 1 and 500, `NotFoundError` when the scope holds no such thread, `ForbiddenError` when the caller is not a
 member or `authorize` refuses `read`.
 
 ### `Client.present`
@@ -2255,7 +2292,7 @@ type Thread = {
 
 A conversation: `id` yours or the server's, `scope` its tenant, `metadata` yours. A listed thread
 also carries `last_seq` and `last_message_at` (when its latest message was written); listed for a
-member, `marked` (the member's private read position, `None` without one) and `unread` (messages by
+member, `marked` (the member's private read position, omitted without one) and `unread` (messages by
 others after it, at most 100); with `preview`, `last_message` (the latest message not retracted,
 with its edits). Fields without a value are left out on the wire.
 

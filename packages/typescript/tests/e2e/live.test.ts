@@ -64,4 +64,25 @@ describe.skipIf(!url)('a live server', () => {
     await client.close()
     expect(client.status).toBe('closed')
   })
+
+  it('follows its threads, resumes after a drop without repeats, and marks', async () => {
+    const client = await connect({ url, protocols: async () => ['thread', 'ana'] })
+    const items: Item[] = []
+    client.subscribe((item) => items.push(item), { includeOwn: true })
+    const thread = await client.createThread({ threadId: 'e2e-follow' })
+    await client.addMember(thread.id, helper)
+    const joined = await client.follow({ resume: true })
+    expect(joined.map((one) => one.thread.id)).toContain('e2e-follow')
+    await client.custom(thread.id, 'drop', {})
+    await until(() => client.status === 'open' && items.some((item) => 'status' in item))
+    const sent = await client.send(thread.id, 'after the drop')
+    expect(await client.mark(thread.id, sent.seq)).toBe(sent.seq)
+    const listed = (await client.listThreads({ order: 'activity' })).find((t) => t.id === thread.id)
+    expect(listed?.marked).toBe(sent.seq)
+    const seqs = items.flatMap((item) =>
+      'author' in item && item.thread_id === thread.id ? [item.seq] : []
+    )
+    expect(new Set(seqs).size).toBe(seqs.length)
+    await client.close()
+  })
 })
