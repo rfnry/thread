@@ -1,7 +1,7 @@
 import asyncio
 
 from rfnry_engine import Stop, TextDelta, ToolCallStarted, ToolResultReady
-from rfnry_thread import Cancel, Client, Identity, InMemoryStorage, Invited, Message, Server
+from rfnry_thread import Cancel, Client, Identity, InMemoryStorage, Message, Server
 
 import harness
 
@@ -33,10 +33,9 @@ async def open_thread(name: str) -> dict:
 
 async def listen() -> None:
     me = await server.connect(identity=ASSISTANT, scope=SCOPE)
+    await me.follow()
     async for item in me.events():
-        if isinstance(item, Invited):
-            await me.join(item.thread_id, since=0)
-        elif isinstance(item, Message):
+        if isinstance(item, Message):
             task = asyncio.create_task(answer(me, item))
             running.add(task)
             task.add_done_callback(running.discard)
