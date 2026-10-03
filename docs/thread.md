@@ -439,7 +439,7 @@ the log:
 ```python
 async with pool.acquire() as conn:
     key = f"{assistant.scope}:{item.thread_id}"
-    if await conn.fetchval("SELECT pg_try_advisory_lock(hashtext($1))", key):
+    if await conn.fetchval("SELECT pg_try_advisory_lock(hashtextextended($1, 0))", key):
         try:
             later = await assistant.history(item.thread_id, after=item.seq, limit=500, kinds=["message"])
             mine = [e for e in later if e.in_reply_to == item.id and e.author.id == assistant.identity.id]
@@ -447,8 +447,14 @@ async with pool.acquire() as conn:
                 await answer(item)
             await assistant.mark(item.thread_id, item.seq)
         finally:
-            await conn.execute("SELECT pg_advisory_unlock(hashtext($1))", key)
+            await conn.execute("SELECT pg_advisory_unlock(hashtextextended($1, 0))", key)
 ```
+
+Advisory locks share one key space per database with whatever else the application locks, and a
+collision between try-locks silently skips a message, hence the 64-bit key. A session lock pins its
+connection for the whole run: take it from a direct session, not a transaction-pooling proxy, on a
+pool reserved for these locks and sized to the runs a replica allows at once, not the pool the server
+and storage use.
 
 A replica that dies releases its lock with its connection. Effects stay idempotent all the same: a
 resume can hand the next holder an event the last one handled just before it died.
