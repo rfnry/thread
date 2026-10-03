@@ -1,0 +1,16 @@
+{
+  "name": "signal",
+  "payload": {
+    "kind": "marked",
+    "sender": {
+      "id": "helper",
+      "metadata": {},
+      "name": "Helper",
+      "role": "assistant"
+    },
+    "seq": 7,
+    "thread_id": "t1",
+    "unread": 2
+  },
+  "type": "push"
+}

@@ -21,6 +21,7 @@ METHODS = frozenset(
         "thread.follow",
         "thread.leave",
         "thread.history",
+        "thread.mark",
         "thread.present",
         "member.add",
         "member.remove",

@@ -3,13 +3,13 @@ from typing import Any
 
 import pytest
 
-from rfnry_thread.errors import InputError
+from rfnry_thread.errors import ForbiddenError, InputError
 from rfnry_thread.inmemory import InMemoryStorage
-from rfnry_thread.models import Identity, Thread
+from rfnry_thread.models import SYSTEM, Identity, Member, Thread
 from rfnry_thread.server import Server
 
 from .conftest import say
-from .factories import ANA, HELPER
+from .factories import ANA, AT, BRUNO, HELPER
 from .peer import Peer
 
 
@@ -261,3 +261,132 @@ async def test_a_session_dropped_inside_the_storage_reads_of_an_enter_is_not_lef
     await server.add_member("acme", "t1", HELPER)
     assert session not in server._hub._rooms.get(("acme", "t1"), set())
     assert "t1" not in session.joined
+
+
+async def test_a_member_is_marked_just_before_it_was_added(server: Server) -> None:
+    ana = await threads(server, "t1")
+    await say(ana, "t1", "hello")
+    helper = await Peer.open(server, HELPER)
+    [listed] = (await helper.call("thread.list"))["threads"]
+    assert (listed["marked"], listed["unread"]) == (1, 1)
+
+
+async def test_resume_replays_each_gap_after_the_mark(server: Server) -> None:
+    ana = await threads(server, "t1", "t2")
+    helper = await Peer.open(server, HELPER)
+    await helper.call("thread.follow", resume=True)
+    seen = await say(ana, "t1", "seen")
+    await helper.quiet()
+    assert await helper.call("thread.mark", thread_id="t1", seq=seen["seq"]) == {
+        "seq": seen["seq"],
+        "unread": 0,
+    }
+    await helper.close()
+    await say(ana, "t1", "missed one")
+    await say(ana, "t2", "missed two")
+    again = await Peer.open(server, HELPER)
+    await again.call("thread.follow", resume=True)
+    assert sorted(texts(await again.quiet())) == ["missed one", "missed two"]
+
+
+async def test_a_membership_with_no_mark_resumes_from_now_and_is_given_one(
+    storage: InMemoryStorage, server: Server
+) -> None:
+    await server.create_thread("acme", "t1")
+    await server.add_member("acme", "t1", ANA)
+    await storage.add_member(
+        "acme", Member(thread_id="t1", identity=HELPER, added_at=AT, added_by=SYSTEM)
+    )
+    ana = await Peer.open(server, ANA)
+    await say(ana, "t1", "old")
+    helper = await Peer.open(server, HELPER)
+    await helper.call("thread.follow", resume=True)
+    assert texts(await helper.quiet()) == []
+    [listed] = (await helper.call("thread.list"))["threads"]
+    assert listed["marked"] == 2
+
+
+async def test_a_since_map_naming_a_foreign_thread_is_ignored(server: Server) -> None:
+    await threads(server, "t1")
+    helper = await Peer.open(server, HELPER)
+    reply = await helper.call("thread.follow", resume=True, since={"elsewhere": 0})
+    assert [j["thread"]["id"] for j in reply["joined"]] == ["t1"]
+
+
+async def test_a_resume_gap_beyond_the_replay_limit_is_the_latest_and_truncated(
+    storage: InMemoryStorage,
+) -> None:
+    server = Server(storage, replay_limit=2)
+    ana = await threads(server, "t1")
+    helper = await Peer.open(server, HELPER)
+    await helper.call("thread.follow", resume=True)
+    await helper.close()
+    for n in range(4):
+        await say(ana, "t1", f"m{n}")
+    again = await Peer.open(server, HELPER)
+    [joined] = (await again.call("thread.follow", resume=True))["joined"]
+    assert joined["truncated"] is True
+    assert texts(await again.quiet()) == ["m2", "m3"]
+
+
+async def test_a_mark_never_moves_back_and_must_name_a_seq_in_the_thread(server: Server) -> None:
+    ana = await threads(server, "t1")
+    await say(ana, "t1", "a")
+    await say(ana, "t1", "b")
+    helper = await Peer.open(server, HELPER)
+    assert (await helper.call("thread.mark", thread_id="t1", seq=4))["seq"] == 4
+    assert (await helper.call("thread.mark", thread_id="t1", seq=3))["seq"] == 4
+    for seq in (-1, 5):
+        with pytest.raises(InputError, match="^server: seq must be between 0 and 4$"):
+            await helper.call("thread.mark", thread_id="t1", seq=seq)
+    bruno = await Peer.open(server, BRUNO)
+    with pytest.raises(ForbiddenError):
+        await bruno.call("thread.mark", thread_id="t1", seq=0)
+
+
+async def test_a_mark_reaches_the_markers_own_connections_on_every_replica(
+    storage: InMemoryStorage,
+) -> None:
+    near, far = Server(storage), Server(storage)
+    await near.start()
+    await far.start()
+    try:
+        ana = await threads(near, "t1")
+        message = await say(ana, "t1", "hi")
+        phone = await Peer.open(near, HELPER)
+        laptop = await Peer.open(far, HELPER)
+        await ana.quiet()
+        reply = await phone.call("thread.mark", thread_id="t1", seq=message["seq"])
+        assert reply == {"seq": message["seq"], "unread": 0}
+        told = await laptop.push("marked")
+        assert (told["thread_id"], told["seq"], told["unread"]) == ("t1", message["seq"], 0)
+        assert [p["kind"] for p in await ana.quiet()] == []
+    finally:
+        await near.stop()
+        await far.stop()
+
+
+async def test_history_reads_forward_after_a_seq_and_within_a_range(server: Server) -> None:
+    ana = await threads(server, "t1")
+    for n in range(4):
+        await say(ana, "t1", f"m{n}")
+    forward = (await ana.call("thread.history", thread_id="t1", after=3, limit=2))["events"]
+    assert [e["seq"] for e in forward] == [4, 5]
+    window = (await ana.call("thread.history", thread_id="t1", after=2, before=5))["events"]
+    assert [e["seq"] for e in window] == [3, 4]
+    with pytest.raises(InputError, match="^server: after cannot be negative$"):
+        await ana.call("thread.history", thread_id="t1", after=-1)
+
+
+async def test_the_inbox_lists_by_activity_with_previews(server: Server) -> None:
+    ana = await threads(server, "t1", "t2")
+    await say(ana, "t1", "newest")
+    listed = (await ana.call("thread.list", order="activity", preview=True))["threads"]
+    assert [t["id"] for t in listed] == ["t1", "t2"]
+    assert listed[0]["last_message"]["content"][0]["text"] == "newest"
+    assert "last_message" not in listed[1]
+    with pytest.raises(InputError):
+        await ana.call("thread.list", order="loudest")
+    system = await server.list_threads("acme", order="activity", preview=True)
+    assert [t.id for t in system] == ["t1", "t2"]
+    assert system[0].marked is None and system[0].last_message is not None

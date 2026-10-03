@@ -84,6 +84,7 @@ export type Present = Sent & { kind: 'present' }
 export type Left = Sent & { kind: 'left' }
 export type Invited = Sent & { kind: 'invited'; thread: Thread }
 export type ThreadDeleted = Sent & { kind: 'thread.deleted' }
+export type Marked = Sent & { kind: 'marked'; seq: number; unread: number }
 export type Signal =
   | Working
   | Idle
@@ -95,6 +96,7 @@ export type Signal =
   | Left
   | Invited
   | ThreadDeleted
+  | Marked
 
 export type Joined = { thread: Thread; seq: number; truncated: boolean }
 export type Status = 'open' | 'reconnecting' | 'closed'

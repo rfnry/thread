@@ -193,12 +193,17 @@ async def list_threads(
     metadata: dict[str, Any] | None = None,
     before: str | None = None,
     limit: int = 50,
+    order: Order = "created",
+    preview: bool = False,
 ) -> list[Thread]: ...
 ```
 
 Returns every thread of the scope, member or not, newest first, up to `limit`; `metadata` is
 containment compared as JSON, and `before` a thread id for the next page. Raises `InputError` when
 the scope is empty or `limit` is not between 1 and 500.
+
+`order="activity"` lists by the latest message, and `preview=True` fills `last_message`; a system
+listing has no `marked` or `unread`.
 
 ### `Server.update_thread`
 
@@ -959,6 +964,21 @@ class Invited(BaseModel):
 
 You were added to `thread`, which you have not joined; `sender` added you.
 
+### `Marked`
+
+```python
+class Marked(BaseModel):
+    thread_id: str
+    sender: Identity
+    kind: Literal["marked"] = "marked"
+    seq: int
+    unread: int
+```
+
+Your private read position in the thread moved to `seq`, with `unread` messages by others still
+after it (at most 100); sent to every connection of the identity that marked, never to anyone
+else.
+
 ### `ThreadDeleted`
 
 ```python
@@ -983,7 +1003,8 @@ Signal = Annotated[
     | Present
     | Left
     | Invited
-    | ThreadDeleted,
+    | ThreadDeleted
+    | Marked,
     Field(discriminator="kind"),
 ]
 ```
@@ -2133,6 +2154,16 @@ type Invited = { thread_id: string; sender: Identity; kind: 'invited'; thread: T
 
 You were added to `thread`, which you have not joined; `sender` added you.
 
+### `Marked`
+
+```ts
+type Marked = { kind: 'marked'; thread_id: string; sender: Identity; seq: number; unread: number }
+```
+
+Your private read position in the thread moved to `seq`, with `unread` messages by others still
+after it (at most 100); sent to every connection of the identity that marked, never to anyone
+else.
+
 ### `ThreadDeleted`
 
 ```ts
@@ -2155,6 +2186,7 @@ type Signal =
   | Left
   | Invited
   | ThreadDeleted
+  | Marked
 ```
 
 Anything only true right now, told apart by `kind`, never stored. Every signal carries `thread_id`

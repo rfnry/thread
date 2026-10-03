@@ -11,7 +11,15 @@ from rfnry_thread.client import Client
 from rfnry_thread.connection import Connection
 from rfnry_thread.errors import ConfigurationError, InputError, ThreadException
 from rfnry_thread.hub import Hub, Session
-from rfnry_thread.models import SYSTEM, Identity, IdentityLike, Member, Thread, as_identity
+from rfnry_thread.models import (
+    SYSTEM,
+    Identity,
+    IdentityLike,
+    Member,
+    Order,
+    Thread,
+    as_identity,
+)
 from rfnry_thread.outbound import Outbound
 from rfnry_thread.pipe import End, pipe
 from rfnry_thread.protocol import (
@@ -48,6 +56,8 @@ class _Create(_Args):
 class _List(_Args):
     before: str | None = None
     limit: int = 50
+    order: Order = "created"
+    preview: bool = False
 
 
 class _Ref(_Args):
@@ -69,8 +79,13 @@ class _Follow(_Args):
 
 class _History(_Ref):
     before: int | None = None
+    after: int | None = None
     limit: int = 50
     kinds: list[str] | None = None
+
+
+class _Mark(_Ref):
+    seq: int
 
 
 class _Add(_Ref):
@@ -247,7 +262,15 @@ class Server:
             return {
                 "threads": [
                     _dump(t)
-                    for t in await verbs.list_threads(actor, scope, listing.before, listing.limit)
+                    for t in await verbs.list_threads(
+                        actor,
+                        scope,
+                        listing.before,
+                        listing.limit,
+                        None,
+                        listing.order,
+                        listing.preview,
+                    )
                 ]
             }
         if method == "thread.update":
@@ -273,9 +296,19 @@ class Server:
         if method == "thread.history":
             history = _args(_History, method, payload)
             events = await verbs.history(
-                actor, scope, history.thread_id, history.before, history.limit, history.kinds
+                actor,
+                scope,
+                history.thread_id,
+                history.before,
+                history.limit,
+                history.kinds,
+                history.after,
             )
             return {"events": [_dump(e) for e in events]}
+        if method == "thread.mark":
+            mark = _args(_Mark, method, payload)
+            seq, unread = await verbs.mark(session, mark.thread_id, mark.seq)
+            return {"seq": seq, "unread": unread}
         if method == "member.add":
             add = _args(_Add, method, payload)
             return {
@@ -344,8 +377,12 @@ class Server:
         metadata: dict[str, Any] | None = None,
         before: str | None = None,
         limit: int = 50,
+        order: Order = "created",
+        preview: bool = False,
     ) -> list[Thread]:
-        return await self._verbs.list_threads(SYSTEM, _scope(scope), before, limit, metadata)
+        return await self._verbs.list_threads(
+            SYSTEM, _scope(scope), before, limit, metadata, order, preview
+        )
 
     async def update_thread(self, scope: str, thread_id: str, metadata: dict[str, Any]) -> Thread:
         return await self._verbs.update_thread(SYSTEM, _scope(scope), thread_id, metadata)

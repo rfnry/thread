@@ -28,11 +28,12 @@ const SIGNAL_KINDS = Object.keys({
   left: true,
   invited: true,
   'thread.deleted': true,
+  marked: true,
 } satisfies Record<Signal['kind'], true>)
 
 describe('golden fixtures', () => {
   it('exist', () => {
-    expect(files.length).toBe(31)
+    expect(files.length).toBe(34)
   })
 
   it.each(files)('%s round-trips', (name) => {

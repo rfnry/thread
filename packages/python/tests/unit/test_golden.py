@@ -17,6 +17,7 @@ from rfnry_thread.models import (
     Invited,
     Joined,
     Left,
+    Marked,
     MemberAdded,
     MemberRemoved,
     Message,
@@ -108,6 +109,7 @@ def golden() -> dict[str, Frame]:
         Left(thread_id="t1", sender=ANA),
         Invited(thread_id="t1", sender=ANA, thread=thread),
         ThreadDeleted(thread_id="t1", sender=ANA),
+        Marked(thread_id="t1", sender=HELPER, seq=7, unread=2),
     ]
     frames: dict[str, Frame] = {
         "hello": Hello(protocol=1),
@@ -133,6 +135,10 @@ def golden() -> dict[str, Frame]:
             id="4",
             payload={"joined": [Joined(thread=thread, seq=12).model_dump(mode="json")]},
         ),
+        "request-thread-mark": Request(
+            id="5", method="thread.mark", payload={"thread_id": "t1", "seq": 7}
+        ),
+        "response-thread-mark": Response(id="5", payload={"seq": 7, "unread": 2}),
         "push-joined": Push(
             name="joined", payload=Joined(thread=thread, seq=12).model_dump(mode="json")
         ),

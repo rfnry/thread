@@ -21,8 +21,10 @@ from rfnry_thread.models import (
     Event,
     Identity,
     Joined,
+    Marked,
     Member,
     Message,
+    Order,
     Part,
     Retract,
     Step,
@@ -125,6 +127,7 @@ class Verbs:
                     "identity": identity,
                 },
             )
+            await self._storage.mark(scope, thread.id, identity.id, added.seq - 1)
             await self._hub.added(scope, thread, by, identity, added.seq)
         return member
 
@@ -138,23 +141,31 @@ class Verbs:
         before: str | None,
         limit: int,
         metadata: dict[str, Any] | None = None,
+        order: Order = "created",
+        preview: bool = False,
     ) -> list[Thread]:
         limit = _limit(limit)
+
+        async def page(member_id: str | None, after: str | None) -> list[Thread]:
+            return await self._storage.list_threads(
+                scope, member_id, after, limit, metadata, order, preview
+            )
+
         if actor.role == "system":
-            return await self._storage.list_threads(scope, None, before, limit, metadata)
+            return await page(None, before)
         if self._authorize is None:
-            return await self._storage.list_threads(scope, actor.id, before, limit, metadata)
+            return await page(actor.id, before)
         readable: list[Thread] = []
         while True:
-            page = await self._storage.list_threads(scope, actor.id, before, limit, metadata)
-            for thread in page:
+            found = await page(actor.id, before)
+            for thread in found:
                 if await self._authorize(actor, "read", thread):
                     readable.append(thread)
                     if len(readable) == limit:
                         return readable
-            if len(page) < limit:
+            if len(found) < limit:
                 return readable
-            before = page[-1].id
+            before = found[-1].id
 
     async def update_thread(
         self, actor: Identity, scope: str, thread_id: str, metadata: dict[str, Any]
@@ -226,11 +237,27 @@ class Verbs:
         before: int | None,
         limit: int,
         kinds: Sequence[str] | None,
+        after: int | None = None,
     ) -> list[Event]:
+        if after is not None and after < 0:
+            raise InputError("server: after cannot be negative")
         await self.thread(actor, scope, thread_id, "read")
         return await self._storage.list_events(
-            scope, thread_id, before=before, limit=_limit(limit), kinds=kinds
+            scope, thread_id, since=after, before=before, limit=_limit(limit), kinds=kinds
         )
+
+    async def mark(self, session: Session, thread_id: str, seq: int) -> tuple[int, int]:
+        actor, scope = session.identity, session.scope
+        await self.thread(actor, scope, thread_id, "read")
+        latest = await self._storage.list_events(scope, thread_id, limit=1)
+        head = latest[-1].seq if latest else 0
+        if not 0 <= seq <= head:
+            raise InputError(f"server: seq must be between 0 and {head}")
+        stored, unread = await self._storage.mark(scope, thread_id, actor.id, seq)
+        await self._hub.marked(
+            scope, Marked(thread_id=thread_id, sender=actor, seq=stored, unread=unread)
+        )
+        return stored, unread
 
     async def join(self, session: Session, thread_id: str, since: int | None) -> Joined:
         if since is not None and since < 0:

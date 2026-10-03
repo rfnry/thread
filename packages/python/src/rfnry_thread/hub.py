@@ -18,6 +18,7 @@ from rfnry_thread.models import (
     Invited,
     Joined,
     Left,
+    Marked,
     MemberRemoved,
     Present,
     Signal,
@@ -358,6 +359,16 @@ class Hub:
             piece = signal.model_copy(update={"text": signal.text[start : start + PIECE]})
             await self._publish(scope, signal.thread_id, piece.model_dump(mode="json"))
 
+    async def marked(self, scope: str, signal: Marked) -> None:
+        self._marked_here(scope, signal)
+        await self._publish(scope, signal.thread_id, signal.model_dump(mode="json"))
+
+    def _marked_here(self, scope: str, signal: Marked) -> None:
+        payload = signal.model_dump(mode="json")
+        for session in list(self.sessions):
+            if session.scope == scope and session.identity.id == signal.sender.id:
+                session.push_signal(payload)
+
     async def _publish(self, scope: str, thread_id: str, payload: dict[str, Any]) -> None:
         if not self.linked:
             return
@@ -387,6 +398,9 @@ class Hub:
                         str(payload["to"]),
                         None if seq is None else int(seq),
                     )
+                return
+            if kind == "marked":
+                self._marked_here(scope, Marked.model_validate(payload))
                 return
             signal = SIGNALS.validate_python(payload)
             if isinstance(signal, ThreadDeleted):

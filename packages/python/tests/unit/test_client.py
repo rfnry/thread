@@ -317,4 +317,6 @@ def test_serve_and_connect_take_who_and_where_by_keyword() -> None:
         "metadata",
         "before",
         "limit",
+        "order",
+        "preview",
     ]

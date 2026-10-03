@@ -44,7 +44,7 @@ def test_an_error_frame_carries_the_code_and_message() -> None:
     )
 
 
-def test_the_methods_are_the_designed_fifteen() -> None:
+def test_the_methods_are_the_designed_sixteen() -> None:
     assert {
         "thread.create",
         "thread.get",
@@ -55,6 +55,7 @@ def test_the_methods_are_the_designed_fifteen() -> None:
         "thread.follow",
         "thread.leave",
         "thread.history",
+        "thread.mark",
         "thread.present",
         "member.add",
         "member.remove",

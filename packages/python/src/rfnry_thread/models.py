@@ -242,6 +242,12 @@ class ThreadDeleted(_Signal):
     kind: Literal["thread.deleted"] = "thread.deleted"
 
 
+class Marked(_Signal):
+    kind: Literal["marked"] = "marked"
+    seq: int
+    unread: int
+
+
 Signal = Annotated[
     Working
     | Idle
@@ -252,7 +258,8 @@ Signal = Annotated[
     | Present
     | Left
     | Invited
-    | ThreadDeleted,
+    | ThreadDeleted
+    | Marked,
     Field(discriminator="kind"),
 ]
 SIGNALS: TypeAdapter[Signal] = TypeAdapter(Signal)

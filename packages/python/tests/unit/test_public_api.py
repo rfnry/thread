@@ -45,6 +45,7 @@ EXPECTED = {
     "Left",
     "Invited",
     "ThreadDeleted",
+    "Marked",
     "Signal",
     "ThreadTools",
     "Tool",

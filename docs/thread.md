@@ -106,6 +106,7 @@ A **signal** is ephemeral. Every signal carries `thread_id` and `sender`, stampe
 | `Cancel` | `to` | asks an assistant to stop; what stopping means is its own |
 | `Present` / `Left` | — | the sender opened or closed the thread |
 | `Invited` | `thread` | you were added to a thread you have not joined |
+| `Marked` | `seq`, `unread` | your read position in the thread moved; only your own connections hear it |
 | `ThreadDeleted` | — | the thread is gone |
 
 `Signal` is any of them. `Thread` (`id`, `scope`, `metadata`, `created_at`) and `Member`
@@ -583,7 +584,7 @@ Everything the package exports, by role.
 - **Take part:** `Client`, `Stream`, `Joined`, `StatusChanged`.
 - **Who and what:** `Identity`, `IdentityLike`, `Thread`, `Member`; parts `Text`, `Image`, `Audio`, `Document`, `Part`, `Content`.
 - **The log:** `Message`, `Step`, `Edit`, `Retract`, `Read`, `MemberAdded`, `MemberRemoved`, `ThreadUpdated`, `Custom`, `Event`; `resolve`.
-- **Right now:** `Working`, `Idle`, `StreamStart`, `StreamDelta`, `StreamEnd`, `Cancel`, `Present`, `Left`, `Invited`, `ThreadDeleted`, `Signal`.
+- **Right now:** `Working`, `Idle`, `StreamStart`, `StreamDelta`, `StreamEnd`, `Cancel`, `Present`, `Left`, `Invited`, `Marked`, `ThreadDeleted`, `Signal`.
 - **Give models a thread:** `ThreadTools`, `Tool`, `Tools`.
 - **Store:** `Storage`, `InMemoryStorage`, `PostgresStorage`.
 - **Fail loudly:** `ThreadException`, `NotFoundError`, `InputError`, `ConfigurationError`, `ForbiddenError`, `StorageError`, `TransportError`.

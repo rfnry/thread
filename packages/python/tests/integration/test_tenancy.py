@@ -30,7 +30,7 @@ async def test_erasure_is_provable_and_falsifiable(storage: Storage) -> None:
     await server.add_member("tenant-a", "t1", ANA)
     await server.create_thread("tenant-b", thread_id="t1")
     assert not await server.verify_absent("tenant-a")
-    assert await server.delete_scope("tenant-a") == 3
+    assert await server.delete_scope("tenant-a") == 4
     assert await server.verify_absent("tenant-a")
     assert not await server.verify_absent("tenant-b")
     await storage.create_thread(
