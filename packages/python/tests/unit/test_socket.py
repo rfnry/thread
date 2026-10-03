@@ -385,6 +385,38 @@ async def test_a_followed_client_rejoins_only_the_threads_it_joined_explicitly(
     assert joins == ["t2"]
 
 
+async def test_a_rejoin_reads_the_cursor_a_live_event_moved_during_the_rejoin_before_it(
+    live: Live,
+) -> None:
+    ana_identity = Identity(role="user", id="ana", name="Ana")
+    ana = await Client.connect(live.url, headers=ANA_HEADERS)
+    bruno = await live.server.connect(identity=BRUNO, scope="acme")
+    for thread_id in ("t1", "t2"):
+        await bruno.create_thread(thread_id=thread_id)
+        await bruno.add_member(thread_id, ana_identity)
+    await ana.follow()
+    await ana.join("t1")
+    await ana.join("t2")
+    await drain(ana)
+    request = ana._request
+    landed: list[str] = []
+
+    async def land(method: str, payload: dict[str, Any]) -> dict[str, Any]:
+        if method == "thread.join" and not landed:
+            other = "t2" if payload["thread_id"] == "t1" else "t1"
+            landed.append(other)
+            sent = await bruno.send(other, "live during the re-joins")
+            await until(lambda: ana._cursors.get(other) == sent.seq)
+        return await request(method, payload)
+
+    ana._request = land  # type: ignore[method-assign]
+    await drop_and_reopen(live, ana)
+    said = [
+        (item.thread_id, first_text(item)) for item in await drain(ana) if isinstance(item, Message)
+    ]
+    assert said == [(landed[0], "live during the re-joins")]
+
+
 async def test_a_follow_that_fails_leaves_the_client_not_following(live: Live) -> None:
     ana = await Client.connect(live.url, headers=ANA_HEADERS)
     with pytest.raises(InputError):

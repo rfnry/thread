@@ -567,6 +567,83 @@ describe('client', () => {
     await client.close()
   })
 
+  it('re-joins each thread from the cursor it holds when that thread is re-joined', async () => {
+    const log: Record<string, Array<Record<string, unknown>>> = {
+      t1: [1, 2, 3, 4].map((seq) => ({ ...message(seq, `t1 ${seq}`), thread_id: 't1' })),
+      t2: [1, 2, 3, 4].map((seq) => ({ ...message(seq, `t2 ${seq}`), thread_id: 't2' })),
+    }
+    const thread = (id: string) => ({
+      id,
+      scope: 'acme',
+      metadata: {},
+      created_at: '2026-01-01T12:00:00Z',
+    })
+    server.handlers.set('thread.follow', () => ({
+      joined: ['t1', 't2'].map((id) => ({ thread: thread(id), seq: 4, truncated: false })),
+    }))
+    let landed: string | null = null
+    server.handlers.set('thread.join', ({ thread_id, since }) => {
+      if (landed === null && since !== null) {
+        landed = thread_id === 't1' ? 't2' : 't1'
+        const live = { ...message(5, 'live during the re-joins'), thread_id: landed }
+        log[landed]?.push(live)
+        server.push('event', live)
+      }
+      const events = log[thread_id] ?? []
+      if (since !== null)
+        for (const event of events.filter((event) => (event.seq as number) > since))
+          server.push('event', event)
+      return { thread: thread(thread_id), seq: events.length, truncated: false }
+    })
+    const client = await connect({ url: 'ws://fake', protocols: ['thread', 'tok'] })
+    const items: Item[] = []
+    client.subscribe((item) => items.push(item))
+    await client.follow()
+    await client.join('t1')
+    await client.join('t2')
+    server.drop()
+    await vi.waitFor(() => expect(items).toContainEqual({ kind: 'status', status: 'open' }))
+    expect(server.sent('thread.join').map((frame) => frame.payload.thread_id)).toEqual([
+      't1',
+      't2',
+      't1',
+      't2',
+    ])
+    expect(items.flatMap((item) => ('author' in item ? [[item.thread_id, item.seq]] : []))).toEqual(
+      [[landed, 5]]
+    )
+    await client.close()
+  })
+
+  it('hands a followed thread joined since a seq its history once while a live event lands', async () => {
+    const log = [1, 2, 3].map((seq) => message(seq, `m${seq}`))
+    const t1 = { id: 't1', scope: 'acme', metadata: {}, created_at: '2026-01-01T12:00:00Z' }
+    server.handlers.set('thread.follow', () => ({
+      joined: [{ thread: t1, seq: 3, truncated: false }],
+    }))
+    server.handlers.set('thread.join', ({ since }) => {
+      const live = message(4, 'live')
+      log.push(live)
+      server.push('event', live)
+      for (const event of log.filter((event) => event.seq > (since ?? log.length)))
+        server.push('event', event)
+      return { thread: t1, seq: log.length, truncated: false }
+    })
+    const client = await connect({ url: 'ws://fake', protocols: ['thread', 'tok'] })
+    const items: Item[] = []
+    client.subscribe((item) => items.push(item))
+    await client.follow()
+    const joined = await client.join('t1', { since: 0 })
+    expect(joined.seq).toBe(4)
+    const seqs = items.flatMap((item) => ('author' in item ? [item.seq] : []))
+    expect([...seqs].sort((a, b) => a - b)).toEqual([1, 2, 3, 4])
+    server.push('event', message(4, 'live'))
+    server.push('event', message(5, 'after'))
+    await vi.waitFor(() => expect(items.at(-1)).toMatchObject({ seq: 5 }))
+    expect(items.flatMap((item) => ('author' in item ? [item.seq] : []))).toEqual([4, 1, 2, 3, 5])
+    await client.close()
+  })
+
   it('forgets a leave once the server delivers that thread again from a new add', async () => {
     const t1 = { id: 't1', scope: 'acme', metadata: {}, created_at: '2026-01-01T12:00:00Z' }
     server.handlers.set('thread.follow', () => ({

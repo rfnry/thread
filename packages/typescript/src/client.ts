@@ -186,6 +186,7 @@ export class Client {
   private nextId = 1
   private readonly listeners = new Map<Listener, boolean>()
   private readonly cursors = new Map<string, number>()
+  private readonly rewinds = new Map<string, { since: number; held: number; taken: Set<number> }>()
   private following = false
   private readonly held = new Set<string>()
   private readonly left = new Set<string>()
@@ -283,6 +284,13 @@ export class Client {
     if (frame.name === 'event') {
       const event = frame.payload as unknown as Event
       if (this.leaving.has(event.thread_id)) return
+      const rewind = this.rewinds.get(event.thread_id)
+      if (rewind && event.seq > rewind.since && event.seq <= rewind.held) {
+        if (rewind.taken.has(event.seq)) return
+        rewind.taken.add(event.seq)
+        this.emit(event)
+        return
+      }
       const cursor = this.cursors.get(event.thread_id)
       if (cursor !== undefined) {
         if (event.seq <= cursor) return
@@ -373,8 +381,9 @@ export class Client {
       }
       this.leaving = new Set()
     }
-    for (const [threadId, cursor] of [...this.cursors]) {
-      if (followed && !this.held.has(threadId)) continue
+    for (const threadId of [...this.cursors.keys()]) {
+      const cursor = this.cursors.get(threadId)
+      if (cursor === undefined || (followed && !this.held.has(threadId))) continue
       try {
         this.emit(await this.joinFrom(threadId, cursor))
       } catch (error) {
@@ -443,11 +452,22 @@ export class Client {
   }
 
   private async joinFrom(threadId: string, since: number | null): Promise<Joined> {
-    this.cursors.set(threadId, since ?? 0)
-    const joined = (await this.request('thread.join', {
-      thread_id: threadId,
-      since,
-    })) as unknown as Joined
+    const held = this.cursors.get(threadId)
+    const rewind =
+      since !== null && held !== undefined && since < held
+        ? { since, held, taken: new Set<number>() }
+        : null
+    if (rewind) this.rewinds.set(threadId, rewind)
+    else this.cursors.set(threadId, since ?? 0)
+    let joined: Joined
+    try {
+      joined = (await this.request('thread.join', {
+        thread_id: threadId,
+        since,
+      })) as unknown as Joined
+    } finally {
+      if (rewind && this.rewinds.get(threadId) === rewind) this.rewinds.delete(threadId)
+    }
     this.cursors.set(
       threadId,
       joined.seq < (since ?? 0) ? joined.seq : Math.max(this.cursors.get(threadId) ?? 0, joined.seq)

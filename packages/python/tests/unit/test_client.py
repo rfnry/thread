@@ -4,6 +4,7 @@ import inspect
 from typing import Any, cast
 
 import pytest
+from until import until
 
 from rfnry_thread.client import Client, Item
 from rfnry_thread.errors import ConfigurationError, ForbiddenError, InputError, TransportError
@@ -372,6 +373,50 @@ async def test_a_follower_that_joins_since_a_seq_reads_the_thread_from_it_once(
     await ana.send("t1", "live")
     said = [item for item in await drain(page) if isinstance(item, Message)]
     assert [(m.seq, m.content) for m in said] == [(6, [Text(text="live")])]
+
+
+async def test_a_follower_joining_since_a_seq_while_a_live_event_lands_gets_each_event_once(
+    server: Server,
+) -> None:
+    ana = await server.connect(identity=ANA, scope="acme")
+    await ana.create_thread(thread_id="t1")
+    await ana.add_member("t1", HELPER)
+    for n in range(3):
+        await ana.send("t1", f"m{n}")
+    page = await server.connect(identity=HELPER, scope="acme")
+    await page.follow()
+    await drain(page)
+    request = page._request
+
+    async def land(method: str, payload: dict[str, Any]) -> dict[str, Any]:
+        if method == "thread.join":
+            sent = await ana.send("t1", "live")
+            await until(lambda: page._cursors.get("t1") == sent.seq)
+        return await request(method, payload)
+
+    page._request = land  # type: ignore[method-assign]
+    joined = await page.join("t1", since=0)
+    assert joined.seq == 6
+    items = await drain(page)
+    assert sorted(item.seq for item in items if isinstance(item, Message | MemberAdded)) == [
+        1,
+        2,
+        3,
+        4,
+        5,
+        6,
+    ]
+    said = [
+        part.text
+        for item in items
+        if isinstance(item, Message)
+        for part in item.content
+        if isinstance(part, Text)
+    ]
+    assert sorted(said) == ["live", "m0", "m1", "m2"]
+    assert page._cursors["t1"] == 6
+    await ana.send("t1", "after")
+    assert [item.seq for item in await drain(page) if isinstance(item, Message)] == [7]
 
 
 async def test_history_and_list_threads_leave_out_the_new_fields_at_their_defaults(
