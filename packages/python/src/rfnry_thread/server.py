@@ -310,6 +310,9 @@ class Server:
             mark = _args(_Mark, method, payload)
             seq, unread = await verbs.mark(session, mark.thread_id, mark.seq)
             return {"seq": seq, "unread": unread}
+        if method == "thread.marked":
+            ref = _args(_Ref, method, payload)
+            return {"seq": await verbs.marked(actor, scope, ref.thread_id)}
         if method == "member.add":
             add = _args(_Add, method, payload)
             return {

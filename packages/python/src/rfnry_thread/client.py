@@ -578,6 +578,11 @@ class Client:
         reply = await self._request("thread.mark", {"thread_id": thread_id, "seq": seq})
         return int(reply["seq"])
 
+    async def marked(self, thread_id: str) -> int | None:
+        reply = await self._request("thread.marked", {"thread_id": thread_id})
+        seq = reply["seq"]
+        return None if seq is None else int(seq)
+
     async def history(
         self,
         thread_id: str,

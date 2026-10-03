@@ -582,6 +582,11 @@ export class Client {
     return reply.seq as number
   }
 
+  async marked(threadId: string): Promise<number | null> {
+    const reply = await this.request('thread.marked', { thread_id: threadId })
+    return (reply.seq as number | null) ?? null
+  }
+
   async history(
     threadId: string,
     options: { before?: number; after?: number; limit?: number; kinds?: string[] } = {}

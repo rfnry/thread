@@ -73,6 +73,7 @@ CLIENT = {
     "leave",
     "follow",
     "mark",
+    "marked",
     "history",
     "present",
     "add_member",

@@ -23,6 +23,7 @@ METHODS = frozenset(
         "thread.leave",
         "thread.history",
         "thread.mark",
+        "thread.marked",
         "thread.present",
         "member.add",
         "member.remove",

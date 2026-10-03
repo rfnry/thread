@@ -428,6 +428,16 @@ when `seq` is not
 between 0 and the thread's last `seq`, `NotFoundError` when the scope holds no such thread,
 `ForbiddenError` when the caller is not a member or `authorize` refuses `read`.
 
+### `Client.marked`
+
+```python
+async def marked(self, thread_id: str) -> int | None: ...
+```
+
+Returns the caller's private read position in the thread, `None` without one; it writes nothing and
+tells no one. Raises `NotFoundError` when the scope holds no such thread, `ForbiddenError` when the
+caller is not a member or `authorize` refuses `read`.
+
 ### `Client.history`
 
 ```python
@@ -1664,6 +1674,16 @@ Stores the caller's private read position in the thread, never lowering it, and 
 when `seq` is not
 between 0 and the thread's last `seq`, `NotFoundError` when the scope holds no such thread,
 `ForbiddenError` when the caller is not a member or `authorize` refuses `read`.
+
+### `Client.marked`
+
+```ts
+async marked(threadId: string): Promise<number | null>
+```
+
+Returns the caller's private read position in the thread, `null` without one; it writes nothing and
+tells no one. Raises `NotFoundError` when the scope holds no such thread, `ForbiddenError` when the
+caller is not a member or `authorize` refuses `read`.
 
 ### `Client.history`
 

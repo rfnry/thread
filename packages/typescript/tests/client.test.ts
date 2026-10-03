@@ -507,6 +507,20 @@ describe('client', () => {
     )
   })
 
+  it('reads its own mark, null without one, without a write', async () => {
+    const marks = new Map<string, number>()
+    server.handlers.set('thread.marked', (payload) => ({
+      seq: marks.get(payload.thread_id as string) ?? null,
+    }))
+    const client = await connect({ url: 'ws://fake', protocols: ['thread', 'tok'] })
+    expect(await client.marked('t1')).toBeNull()
+    marks.set('t1', 3)
+    expect(await client.marked('t1')).toBe(3)
+    expect(server.sent('thread.marked').at(-1)?.payload).toEqual({ thread_id: 't1' })
+    expect(server.sent('thread.mark')).toEqual([])
+    await client.close()
+  })
+
   it('reads forward and lists an inbox by activity with previews', async () => {
     const client = await connect({ url: 'ws://fake', protocols: ['thread', 'tok'] })
     await client.history('t1', { after: 3 })

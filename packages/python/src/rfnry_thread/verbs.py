@@ -260,6 +260,10 @@ class Verbs:
             )
         return stored, unread
 
+    async def marked(self, actor: Identity, scope: str, thread_id: str) -> int | None:
+        await self.thread(actor, scope, thread_id, "read")
+        return await self._storage.get_mark(scope, thread_id, actor.id)
+
     async def join(
         self, session: Session, thread_id: str, since: int | None, resume: bool = False
     ) -> Joined:

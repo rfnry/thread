@@ -18,6 +18,7 @@ from rfnry_thread.models import (
     Image,
     Invited,
     Marked,
+    Member,
     MemberAdded,
     Message,
     Present,
@@ -36,7 +37,7 @@ from rfnry_thread.protocol import Push
 from rfnry_thread.resolve import resolve
 from rfnry_thread.server import Server
 
-from .factories import ANA, BRUNO, HELPER, Lookalike, lookalike
+from .factories import ANA, AT, BRUNO, HELPER, Lookalike, lookalike
 
 
 async def take[T](
@@ -357,6 +358,26 @@ async def test_mark_returns_the_stored_position_and_tells_the_markers_other_clie
     told = [item for item in await drain(laptop, include_own=False) if isinstance(item, Marked)]
     assert [(m.thread_id, m.seq, m.unread) for m in told] == [("t1", message.seq, 0)]
     assert [item for item in await drain(phone) if isinstance(item, Marked)] == []
+
+
+async def test_marked_reads_the_callers_own_mark_without_moving_it(
+    server: Server, storage: InMemoryStorage
+) -> None:
+    ana = await server.connect(identity=ANA, scope="acme")
+    helper = await server.connect(identity=HELPER, scope="acme")
+    await ana.create_thread(thread_id="t1")
+    await storage.add_member(
+        "acme", Member(thread_id="t1", identity=HELPER, added_at=AT, added_by=SYSTEM)
+    )
+    message = await ana.send("t1", "hi")
+    assert await helper.marked("t1") is None
+    await helper.mark("t1", message.seq)
+    assert await helper.marked("t1") == message.seq
+    assert await helper.marked("t1") == message.seq
+    zed = Identity(id="zed", role="user", name="Zed")
+    outsider = await server.connect(identity=zed, scope="acme")
+    with pytest.raises(ForbiddenError, match="^server: 'zed' is not a member of thread 't1'$"):
+        await outsider.marked("t1")
 
 
 async def test_a_follower_that_joins_since_a_seq_reads_the_thread_from_it_once(

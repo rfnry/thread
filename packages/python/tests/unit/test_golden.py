@@ -142,6 +142,10 @@ def golden() -> dict[str, Frame]:
             id="5", method="thread.mark", payload={"thread_id": "t1", "seq": 7}
         ),
         "response-thread-mark": Response(id="5", payload={"seq": 7, "unread": 2}),
+        "request-thread-marked": Request(
+            id="6", method="thread.marked", payload={"thread_id": "t1"}
+        ),
+        "response-thread-marked": Response(id="6", payload={"seq": 7}),
         "push-joined": Push(
             name="joined", payload=Joined(thread=thread, seq=12).model_dump(mode="json")
         ),

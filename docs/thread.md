@@ -386,7 +386,8 @@ hands it the thread's events after `since` once while the thread keeps arriving 
 at the same time each get their own. `leave` stops one followed thread, across dropped sockets,
 until you join it, follow again or are added to it again. `follow(resume=True)` first hands you
 what each thread said after your **mark**, your private read position: `mark(thread_id, seq)`
-stores it, never lowers it, and when it moved tells your other connections with `Marked`. A thread
+stores it, never lowers it, and when it moved tells your other connections with `Marked`; `marked(thread_id)` reads it, `None`
+without one, and writes nothing. A thread
 you were added to starts from the add; a gap longer than the replay limit arrives as its latest
 events with `truncated=True`, and
 `history(thread_id, after=mark, before=...)` reads the rest. A participant that joins its threads
@@ -562,7 +563,7 @@ const message = await client.send(threadId, 'Can you check my invoice?')
 ```
 
 The verbs are the Python ones in camelCase — `createThread`, `getThread`, `listThreads`,
-`updateThread`, `deleteThread`, `join`, `leave`, `follow`, `mark`, `history`, `present`, `addMember`,
+`updateThread`, `deleteThread`, `join`, `leave`, `follow`, `mark`, `marked`, `history`, `present`, `addMember`,
 `removeMember`, `listMembers`, `send`, `stream`, `step`, `edit`, `retract`, `read`, `custom`,
 `working`, `idle`, `cancel`, `close` — with the same outbox, reconnect and resume. Events and signals are the wire
 shapes, fields as they travel (`thread_id`, `in_reply_to`); options are camelCase, and `send` and
