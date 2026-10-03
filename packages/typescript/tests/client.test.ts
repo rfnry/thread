@@ -63,7 +63,7 @@ describe('client', () => {
     ])
     expect(methods).toContainEqual([
       'thread.history',
-      { thread_id: 't1', before: 5, after: null, limit: 2, kinds: null },
+      { thread_id: 't1', before: 5, limit: 2, kinds: null },
     ])
     expect(methods).toContainEqual([
       'signal.send',
@@ -485,6 +485,105 @@ describe('client', () => {
       order: 'activity',
       preview: true,
     })
+    await client.close()
+  })
+
+  it('leaves out the new fields at their defaults, so a server from before them still answers', async () => {
+    const client = await connect({ url: 'ws://fake', protocols: ['thread', 'tok'] })
+    await client.history('t1')
+    await client.listThreads()
+    await client.listThreads({ order: 'created', preview: false })
+    expect(server.sent('thread.history').map((frame) => frame.payload)).toEqual([
+      { thread_id: 't1', before: null, limit: 50, kinds: null },
+    ])
+    expect(server.sent('thread.list').map((frame) => frame.payload)).toEqual([
+      { before: null, limit: 50 },
+      { before: null, limit: 50 },
+    ])
+    await client.close()
+  })
+
+  it('follows a thread made again under the same id from the head the re-follow gives', async () => {
+    let calls = 0
+    server.handlers.set('thread.follow', () => ({
+      joined: [
+        {
+          thread: { id: 't1', scope: 'acme', metadata: {}, created_at: '2026-01-01T12:00:00Z' },
+          seq: ++calls === 1 ? 4 : 2,
+          truncated: calls > 1,
+        },
+      ],
+    }))
+    const client = await connect({ url: 'ws://fake', protocols: ['thread', 'tok'] })
+    const items: Item[] = []
+    client.subscribe((item) => items.push(item))
+    await client.follow()
+    server.push('event', message(8, 'old'))
+    await vi.waitFor(() => expect(items.some((item) => 'seq' in item && item.seq === 8)).toBe(true))
+    server.drop()
+    await vi.waitFor(() => expect(items).toContainEqual({ kind: 'status', status: 'open' }))
+    expect(server.sent('thread.follow').at(-1)?.payload).toEqual({ resume: true, since: { t1: 8 } })
+    server.push('event', message(3, 'new'))
+    await vi.waitFor(() => expect(items.at(-1)).toMatchObject({ seq: 3 }))
+    await client.close()
+  })
+
+  it('keeps a followed thread it left left after a drop, until it joins it', async () => {
+    const both = (seq: number) => ({
+      joined: ['t1', 't2'].map((id) => ({
+        thread: { id, scope: 'acme', metadata: {}, created_at: '2026-01-01T12:00:00Z' },
+        seq,
+        truncated: false,
+      })),
+    })
+    server.handlers.set('thread.follow', () => both(4))
+    const client = await connect({ url: 'ws://fake', protocols: ['thread', 'tok'] })
+    const items: Item[] = []
+    client.subscribe((item) => items.push(item))
+    await client.follow()
+    await client.leave('t1')
+    server.handlers.set('thread.follow', () => {
+      server.push('event', message(5, 'replayed by the re-follow'))
+      return both(5)
+    })
+    server.handlers.set('thread.leave', () => {
+      server.push('event', message(6, 'sent before the leave lands'))
+      return {}
+    })
+    items.length = 0
+    server.drop()
+    await vi.waitFor(() => expect(items).toContainEqual({ kind: 'status', status: 'open' }))
+    expect(server.sent().map((frame) => [frame.method, frame.payload.thread_id])).toEqual([
+      ['thread.follow', undefined],
+      ['thread.leave', 't1'],
+      ['thread.follow', undefined],
+      ['thread.leave', 't1'],
+    ])
+    expect(items.flatMap((item) => ('truncated' in item ? [item.thread.id] : []))).toEqual(['t2'])
+    await client.join('t1')
+    server.push('event', message(7, 'joined again'))
+    await vi.waitFor(() => expect(items.at(-1)).toMatchObject({ seq: 7 }))
+    expect(items.flatMap((item) => ('author' in item ? [item.seq] : []))).toEqual([7])
+    await client.close()
+  })
+
+  it('forgets a leave once the server delivers that thread again from a new add', async () => {
+    const t1 = { id: 't1', scope: 'acme', metadata: {}, created_at: '2026-01-01T12:00:00Z' }
+    server.handlers.set('thread.follow', () => ({
+      joined: [{ thread: t1, seq: 4, truncated: false }],
+    }))
+    const client = await connect({ url: 'ws://fake', protocols: ['thread', 'tok'] })
+    const items: Item[] = []
+    client.subscribe((item) => items.push(item))
+    await client.follow()
+    await client.leave('t1')
+    server.push('joined', { thread: t1, seq: 6, truncated: false })
+    await vi.waitFor(() => expect(items.filter((item) => 'truncated' in item)).toHaveLength(2))
+    server.drop()
+    await vi.waitFor(() => expect(items).toContainEqual({ kind: 'status', status: 'open' }))
+    expect(server.sent('thread.leave')).toHaveLength(1)
+    server.push('event', message(7, 'still delivered'))
+    await vi.waitFor(() => expect(items.at(-1)).toMatchObject({ seq: 7 }))
     await client.close()
   })
 })

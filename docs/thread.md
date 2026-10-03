@@ -344,17 +344,19 @@ minute passes, then a `TransportError`. The server deduplicates on the thread, t
 
 From the server to a client, delivery is in order and complete per connection: a connection never
 sees `seq` 7 before `seq` 6, and never skips one. A dropped socket reconnects with jittered backoff,
-with fresh `headers`, and re-joins every thread it had joined from the last `seq` it saw; the missed
-events arrive before anything new. A re-join also arrives in `events()` as its `Joined`, and when it
-says `truncated`, redraw from the latest page. A reconnect your endpoint refuses (HTTP 401 or 403 on
+with fresh `headers`; a following client follows again from the last `seq` it saw in each thread
+(and joins each one instead when that fails), and every client re-joins every thread it had joined
+from there; the missed events arrive before anything new. A re-follow's or re-join's `Joined` also
+arrives in `events()`, and when it says `truncated`, redraw from the latest page. A reconnect your endpoint refuses (HTTP 401 or 403 on
 the upgrade), or whose `headers` function raises, stops the client, and `events()` raises that
 error. Items wait in the client until you read them, so an assistant that
 joins and then starts reading misses nothing.
 
 A client's `status` says where its connection is: `"open"`; `"reconnecting"` from the moment its
-socket drops until every thread it had joined is joined again; `"closed"` once it stops, by
-`close()` or a refused reconnect. Each change arrives in `events()` as a `StatusChanged` — `"open"`
-after the re-joins' `Joined` — the one item that names no thread. It is how a person's page says it
+socket drops until it follows again, if it was following, and every thread it had joined is joined
+again; `"closed"` once it stops, by `close()` or a refused reconnect. Each change arrives in
+`events()` as a `StatusChanged` — `"open"` after the re-follow's and re-joins' `Joined` — the one
+item that names no thread. It is how a person's page says it
 is reconnecting.
 
 A connection that cannot keep up — its outbound queue over its bound with no write finishing for
@@ -375,13 +377,16 @@ async for item in helper.events():
 
 `follow()` receives every thread you are a member of from now on, and a thread you are added to
 later from the moment you were added, as a `Joined` on the stream: there is no `Invited` to answer.
-Following is not presence; a page that opens a thread still joins it. `follow(resume=True)` first
-hands you what each thread said after your **mark**, your private read position: `mark(thread_id,
-seq)` stores it, never lowers it, and tells your other connections with `Marked`. A thread you were
-added to starts from the add; a gap longer than the replay limit arrives as its latest events with
-`truncated=True`, and `history(thread_id, after=mark, before=...)` reads the rest. Resuming is at
-least once: an event handled just before a crash comes again, so handle idempotently, and when you
-handle events concurrently, mark only up to the lowest one not yet handled.
+Following is not presence; a page that opens a thread still joins it, and `join(thread_id, since=)`
+hands it the thread's events after `since` once while the thread keeps arriving live. `leave` stops
+one followed thread, across dropped sockets, until you join it, follow again or are added to it
+again. `follow(resume=True)` first hands you what each thread said after your **mark**, your
+private read position: `mark(thread_id, seq)` stores it, never lowers it, and when it moved tells
+your other connections with `Marked`. A thread you were added to starts from the add; a gap longer
+than the replay limit arrives as its latest events with `truncated=True`, and
+`history(thread_id, after=mark, before=...)` reads the rest. Resuming is at least once: an event
+handled just before a crash comes again, so handle idempotently, and when you handle events
+concurrently, mark only up to the lowest one not yet handled.
 
 An inbox reads the same marks:
 
@@ -541,9 +546,9 @@ const message = await client.send(threadId, 'Can you check my invoice?')
 ```
 
 The verbs are the Python ones in camelCase — `createThread`, `getThread`, `listThreads`,
-`updateThread`, `deleteThread`, `join`, `leave`, `history`, `present`, `addMember`, `removeMember`,
-`listMembers`, `send`, `stream`, `step`, `edit`, `retract`, `read`, `custom`, `working`, `idle`,
-`cancel`, `close` — with the same outbox, reconnect and resume. Events and signals are the wire
+`updateThread`, `deleteThread`, `join`, `leave`, `follow`, `mark`, `history`, `present`, `addMember`,
+`removeMember`, `listMembers`, `send`, `stream`, `step`, `edit`, `retract`, `read`, `custom`,
+`working`, `idle`, `cancel`, `close` — with the same outbox, reconnect and resume. Events and signals are the wire
 shapes, fields as they travel (`thread_id`, `in_reply_to`); options are camelCase, and `send` and
 `stream` take `metadata` beside `inReplyTo`. A browser cannot set headers on a WebSocket, so the
 upgrade carries your session cookie — check its `Origin` — or a token in `protocols`, the

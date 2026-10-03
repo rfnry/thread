@@ -22,6 +22,7 @@ import type {
   Part,
   Read,
   Retract,
+  Signal,
   Status,
   Step,
   Thread,
@@ -187,6 +188,8 @@ export class Client {
   private readonly cursors = new Map<string, number>()
   private following = false
   private readonly held = new Set<string>()
+  private readonly left = new Set<string>()
+  private leaving = new Set<string>()
   private stopped = false
   private current: Status = 'open'
   private failure: ThreadException | null = null
@@ -268,6 +271,8 @@ export class Client {
     if (frame.type !== 'push') return
     if (frame.name === 'joined') {
       const joined = frame.payload as unknown as Joined
+      this.left.delete(joined.thread.id)
+      this.leaving.delete(joined.thread.id)
       this.cursors.set(
         joined.thread.id,
         Math.max(this.cursors.get(joined.thread.id) ?? 0, joined.seq)
@@ -277,6 +282,7 @@ export class Client {
     }
     if (frame.name === 'event') {
       const event = frame.payload as unknown as Event
+      if (this.leaving.has(event.thread_id)) return
       const cursor = this.cursors.get(event.thread_id)
       if (cursor !== undefined) {
         if (event.seq <= cursor) return
@@ -287,8 +293,9 @@ export class Client {
       this.emit(event)
       return
     }
-    const signal = frame.payload as unknown as Item
-    if ('kind' in signal && signal.kind === 'thread.deleted') this.cursors.delete(signal.thread_id)
+    const signal = frame.payload as unknown as Signal
+    if (this.leaving.has(signal.thread_id) && signal.kind !== 'marked') return
+    if (signal.kind === 'thread.deleted') this.cursors.delete(signal.thread_id)
     this.emit(signal)
   }
 
@@ -349,12 +356,22 @@ export class Client {
   private async rejoin(): Promise<void> {
     let followed = false
     if (this.following) {
+      this.leaving = new Set(this.left)
       try {
         await this.followFrom(true, Object.fromEntries(this.cursors))
         followed = true
       } catch (error) {
         if (error instanceof TransportError) return
       }
+      for (const threadId of [...this.leaving].sort()) {
+        if (!this.leaving.has(threadId)) continue
+        try {
+          await this.request('thread.leave', { thread_id: threadId })
+        } catch (error) {
+          if (error instanceof TransportError) return
+        }
+      }
+      this.leaving = new Set()
     }
     for (const [threadId, cursor] of [...this.cursors]) {
       if (followed && !this.held.has(threadId)) continue
@@ -460,12 +477,10 @@ export class Client {
       preview?: boolean
     } = {}
   ): Promise<Thread[]> {
-    const reply = await this.request('thread.list', {
-      before: options.before ?? null,
-      limit: options.limit ?? 50,
-      order: options.order ?? 'created',
-      preview: options.preview ?? false,
-    })
+    const payload: Payload = { before: options.before ?? null, limit: options.limit ?? 50 }
+    if (options.order !== undefined && options.order !== 'created') payload.order = options.order
+    if (options.preview) payload.preview = true
+    const reply = await this.request('thread.list', payload)
     return reply.threads as Thread[]
   }
 
@@ -479,6 +494,8 @@ export class Client {
   }
 
   async join(threadId: string, options: { since?: number } = {}): Promise<Joined> {
+    this.left.delete(threadId)
+    this.leaving.delete(threadId)
     try {
       const joined = await this.joinFrom(threadId, options.since ?? null)
       this.held.add(threadId)
@@ -492,10 +509,13 @@ export class Client {
   async leave(threadId: string): Promise<void> {
     this.cursors.delete(threadId)
     this.held.delete(threadId)
+    if (this.following) this.left.add(threadId)
     await this.request('thread.leave', { thread_id: threadId })
   }
 
   async follow(options: { resume?: boolean } = {}): Promise<Joined[]> {
+    this.left.clear()
+    this.leaving.clear()
     return this.followFrom(options.resume ?? false, null)
   }
 
@@ -505,11 +525,15 @@ export class Client {
   ): Promise<Joined[]> {
     const reply = await this.request('thread.follow', { resume, since })
     this.following = true
-    const found = reply.joined as Joined[]
+    const found = (reply.joined as Joined[]).filter((joined) => !this.leaving.has(joined.thread.id))
     for (const joined of found) {
+      const id = joined.thread.id
+      const sent = since?.[id]
       this.cursors.set(
-        joined.thread.id,
-        Math.max(this.cursors.get(joined.thread.id) ?? 0, joined.seq)
+        id,
+        sent !== undefined && joined.seq < sent
+          ? joined.seq
+          : Math.max(this.cursors.get(id) ?? 0, joined.seq)
       )
       this.emit(joined)
     }
@@ -525,13 +549,14 @@ export class Client {
     threadId: string,
     options: { before?: number; after?: number; limit?: number; kinds?: string[] } = {}
   ): Promise<Event[]> {
-    const reply = await this.request('thread.history', {
+    const payload: Payload = {
       thread_id: threadId,
       before: options.before ?? null,
-      after: options.after ?? null,
       limit: options.limit ?? 50,
       kinds: options.kinds ?? null,
-    })
+    }
+    if (options.after !== undefined) payload.after = options.after
+    const reply = await this.request('thread.history', payload)
     return reply.events as Event[]
   }
 

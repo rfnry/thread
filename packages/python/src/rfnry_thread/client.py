@@ -199,6 +199,8 @@ class Client:
         self._cursors: dict[str, int] = {}
         self._following = False
         self._present: set[str] = set()
+        self._left: set[str] = set()
+        self._leaving: set[str] = set()
         self._outbox: dict[str, asyncio.Lock] = {}
         self._connected = asyncio.Event()
         self._reader: asyncio.Task[None] | None = None
@@ -274,11 +276,15 @@ class Client:
         if push.name == "joined":
             joined = Joined.model_validate(push.payload)
             thread_id = joined.thread.id
+            self._left.discard(thread_id)
+            self._leaving.discard(thread_id)
             self._cursors[thread_id] = max(self._cursors.get(thread_id, 0), joined.seq)
             self._inbox.put_nowait(joined)
             return
         if push.name == "event":
             event = EVENTS.validate_python(push.payload)
+            if event.thread_id in self._leaving:
+                return
             cursor = self._cursors.get(event.thread_id)
             if cursor is not None:
                 if event.seq <= cursor:
@@ -289,6 +295,8 @@ class Client:
             self._inbox.put_nowait(event)
             return
         signal = SIGNALS.validate_python(push.payload)
+        if signal.thread_id in self._leaving and not isinstance(signal, Marked):
+            return
         if isinstance(signal, ThreadDeleted):
             self._cursors.pop(signal.thread_id, None)
         self._inbox.put_nowait(signal)
@@ -337,6 +345,7 @@ class Client:
     async def _rejoin(self) -> None:
         followed = False
         if self._following:
+            self._leaving = set(self._left)
             try:
                 await self._follow(True, dict(self._cursors))
                 followed = True
@@ -344,6 +353,16 @@ class Client:
                 return
             except ThreadException:
                 pass
+            for thread_id in sorted(self._leaving):
+                if thread_id not in self._leaving:
+                    continue
+                try:
+                    await self._request("thread.leave", {"thread_id": thread_id})
+                except TransportError:
+                    return
+                except ThreadException:
+                    pass
+            self._leaving = set()
         for thread_id, cursor in list(self._cursors.items()):
             if followed and thread_id not in self._present:
                 continue
@@ -476,10 +495,12 @@ class Client:
         order: Order = "created",
         preview: bool = False,
     ) -> list[Thread]:
-        reply = await self._request(
-            "thread.list",
-            {"before": before, "limit": limit, "order": order, "preview": preview},
-        )
+        payload: dict[str, Any] = {"before": before, "limit": limit}
+        if order != "created":
+            payload["order"] = order
+        if preview:
+            payload["preview"] = True
+        reply = await self._request("thread.list", payload)
         return [Thread.model_validate(t) for t in reply["threads"]]
 
     async def update_thread(self, thread_id: str, metadata: dict[str, Any]) -> Thread:
@@ -491,6 +512,8 @@ class Client:
         self._cursors.pop(thread_id, None)
 
     async def join(self, thread_id: str, since: int | None = None) -> Joined:
+        self._left.discard(thread_id)
+        self._leaving.discard(thread_id)
         try:
             joined = await self._join(thread_id, since)
         except ThreadException:
@@ -502,18 +525,30 @@ class Client:
     async def leave(self, thread_id: str) -> None:
         self._cursors.pop(thread_id, None)
         self._present.discard(thread_id)
+        if self._following:
+            self._left.add(thread_id)
         await self._request("thread.leave", {"thread_id": thread_id})
 
     async def follow(self, resume: bool = False) -> list[Joined]:
+        self._left.clear()
+        self._leaving.clear()
         return await self._follow(resume, None)
 
     async def _follow(self, resume: bool, since: dict[str, int] | None) -> list[Joined]:
         reply = await self._request("thread.follow", {"resume": resume, "since": since})
         self._following = True
-        found = [Joined.model_validate(joined) for joined in reply["joined"]]
+        found = [
+            joined
+            for joined in map(Joined.model_validate, reply["joined"])
+            if joined.thread.id not in self._leaving
+        ]
         for joined in found:
             thread_id = joined.thread.id
-            self._cursors[thread_id] = max(self._cursors.get(thread_id, 0), joined.seq)
+            sent = (since or {}).get(thread_id)
+            if sent is not None and joined.seq < sent:
+                self._cursors[thread_id] = joined.seq
+            else:
+                self._cursors[thread_id] = max(self._cursors.get(thread_id, 0), joined.seq)
             self._inbox.put_nowait(joined)
         return found
 
@@ -529,16 +564,15 @@ class Client:
         kinds: list[str] | None = None,
         after: int | None = None,
     ) -> list[Event]:
-        reply = await self._request(
-            "thread.history",
-            {
-                "thread_id": thread_id,
-                "before": before,
-                "limit": limit,
-                "kinds": kinds,
-                "after": after,
-            },
-        )
+        payload: dict[str, Any] = {
+            "thread_id": thread_id,
+            "before": before,
+            "limit": limit,
+            "kinds": kinds,
+        }
+        if after is not None:
+            payload["after"] = after
+        reply = await self._request("thread.history", payload)
         return [EVENTS.validate_python(e) for e in reply["events"]]
 
     async def present(self, thread_id: str) -> list[Identity]:

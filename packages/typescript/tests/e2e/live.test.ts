@@ -85,4 +85,37 @@ describe.skipIf(!url)('a live server', () => {
     expect(new Set(seqs).size).toBe(seqs.length)
     await client.close()
   })
+
+  it('keeps a followed thread it left left after a drop, until it joins it', async () => {
+    const ana = await connect({ url, protocols: ['thread', 'ana'] })
+    const bruno = await connect({ url, protocols: ['thread', 'bruno'] })
+    const items: Item[] = []
+    ana.subscribe((item) => items.push(item))
+    const left = await bruno.createThread({ threadId: 'e2e-left' })
+    await bruno.addMember(left.id, ana.identity)
+    const dropper = await ana.createThread({ threadId: 'e2e-left-drop' })
+    await ana.addMember(dropper.id, helper)
+    await ana.follow()
+    await ana.leave(left.id)
+    await until(() =>
+      items.some(
+        (item) => 'kind' in item && item.kind === 'present' && item.thread_id === dropper.id
+      )
+    )
+    await ana.custom(dropper.id, 'drop', {})
+    await until(() => items.some((item) => 'status' in item && item.status === 'open'))
+    await bruno.send(left.id, 'after the drop')
+    await ana.join(left.id)
+    await bruno.send(left.id, 'joined again')
+    const said = () =>
+      items.flatMap((item) =>
+        'author' in item && item.kind === 'message' && item.thread_id === left.id
+          ? [item.content[0]?.type === 'text' ? item.content[0].text : '']
+          : []
+      )
+    await until(() => said().length > 0)
+    expect(said()).toEqual(['joined again'])
+    await ana.close()
+    await bruno.close()
+  })
 })

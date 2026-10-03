@@ -421,3 +421,95 @@ async def test_a_failed_refollow_falls_back_to_joining_every_thread(live: Live) 
     said = [first_text(item) for item in await drain(ana) if isinstance(item, Message)]
     assert said == ["away one"]
     assert "thread.join" in sent
+
+
+async def test_a_refollow_into_a_thread_made_again_follows_it_from_the_new_head(
+    live: Live,
+) -> None:
+    ana_identity = Identity(role="user", id="ana", name="Ana")
+    ana = await Client.connect(live.url, headers=ANA_HEADERS)
+    bruno = await live.server.connect(identity=BRUNO, scope="acme")
+    await bruno.create_thread(thread_id="t1")
+    await bruno.add_member("t1", ana_identity)
+    await ana.follow()
+    for n in range(5):
+        await bruno.send("t1", f"old {n}")
+    await drain(ana)
+    live.paused = True
+    await live.drop()
+    await until(lambda: ana.status == "reconnecting")
+    await live.server.delete_thread("acme", "t1")
+    await bruno.create_thread(thread_id="t1")
+    await bruno.add_member("t1", ana_identity)
+    live.paused = False
+    await until(lambda: ana.status == "open", timeout=3.0)
+    assert ana._cursors["t1"] == 2
+    await bruno.send("t1", "new")
+    assert [first_text(m) for m in await drain(ana) if isinstance(m, Message)] == ["new"]
+
+
+async def drop_and_reopen(live: Live, client: Client) -> None:
+    live.paused = True
+    await live.drop()
+    await until(lambda: client.status == "reconnecting")
+    live.paused = False
+    await until(lambda: client.status == "open", timeout=3.0)
+
+
+async def test_a_followed_thread_left_stays_left_after_a_drop_until_joined_or_followed(
+    live: Live,
+) -> None:
+    ana_identity = Identity(role="user", id="ana", name="Ana")
+    ana = await Client.connect(live.url, headers=ANA_HEADERS)
+    bruno = await live.server.connect(identity=BRUNO, scope="acme")
+    for thread_id in ("t1", "t2"):
+        await bruno.create_thread(thread_id=thread_id)
+        await bruno.add_member(thread_id, ana_identity)
+    await ana.follow(resume=True)
+    await drain(ana)
+    await ana.leave("t1")
+    await bruno.send("t1", "while away")
+    sent: list[tuple[str, dict[str, Any]]] = []
+    request = ana._request
+
+    async def record(method: str, payload: dict[str, Any]) -> dict[str, Any]:
+        sent.append((method, payload))
+        return await request(method, payload)
+
+    ana._request = record  # type: ignore[method-assign]
+    await drop_and_reopen(live, ana)
+    assert [m for m, _ in sent] == ["thread.follow", "thread.leave"]
+    assert sent[1][1] == {"thread_id": "t1"}
+    await bruno.send("t1", "after the drop")
+    await bruno.send("t2", "elsewhere")
+    items = await drain(ana)
+    assert [first_text(m) for m in items if isinstance(m, Message)] == ["elsewhere"]
+    assert [j.thread.id for j in items if isinstance(j, Joined)] == ["t2"]
+    await ana.join("t1")
+    await bruno.send("t1", "joined again")
+    assert [first_text(m) for m in await drain(ana) if isinstance(m, Message)] == ["joined again"]
+    await ana.leave("t2")
+    await ana.follow()
+    await drop_and_reopen(live, ana)
+    await bruno.send("t2", "followed again")
+    said = [first_text(m) for m in await drain(ana) if isinstance(m, Message)]
+    assert said == ["followed again"]
+
+
+async def test_a_left_thread_the_follower_is_added_to_again_is_delivered_after_a_drop(
+    live: Live,
+) -> None:
+    ana_identity = Identity(role="user", id="ana", name="Ana")
+    ana = await Client.connect(live.url, headers=ANA_HEADERS)
+    bruno = await live.server.connect(identity=BRUNO, scope="acme")
+    await bruno.create_thread(thread_id="t1")
+    await bruno.add_member("t1", ana_identity)
+    await ana.follow()
+    await drain(ana)
+    await ana.leave("t1")
+    await bruno.remove_member("t1", ana_identity)
+    await bruno.add_member("t1", ana_identity)
+    assert [j.thread.id for j in await drain(ana) if isinstance(j, Joined)] == ["t1"]
+    await drop_and_reopen(live, ana)
+    await bruno.send("t1", "after the drop")
+    assert [first_text(m) for m in await drain(ana) if isinstance(m, Message)] == ["after the drop"]

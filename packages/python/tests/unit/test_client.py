@@ -15,6 +15,7 @@ from rfnry_thread.models import (
     Image,
     Invited,
     Marked,
+    MemberAdded,
     Message,
     Present,
     Read,
@@ -349,7 +350,56 @@ async def test_mark_returns_the_stored_position_and_tells_the_markers_other_clie
     assert await phone.mark("t1", message.seq) == message.seq
     assert await phone.mark("t1", 0) == message.seq
     told = [item for item in await drain(laptop, include_own=False) if isinstance(item, Marked)]
-    assert {(m.thread_id, m.seq, m.unread) for m in told} == {("t1", message.seq, 0)}
+    assert [(m.thread_id, m.seq, m.unread) for m in told] == [("t1", message.seq, 0)]
+    assert [item for item in await drain(phone) if isinstance(item, Marked)] == []
+
+
+async def test_a_follower_that_joins_since_a_seq_reads_the_thread_from_it_once(
+    server: Server,
+) -> None:
+    ana = await server.connect(identity=ANA, scope="acme")
+    await ana.create_thread(thread_id="t1")
+    await ana.add_member("t1", HELPER)
+    for n in range(3):
+        await ana.send("t1", f"m{n}")
+    page = await server.connect(identity=HELPER, scope="acme")
+    await page.follow()
+    await drain(page)
+    joined = await page.join("t1", since=0)
+    assert joined.seq == 5
+    seqs = [item.seq for item in await drain(page) if isinstance(item, Message | MemberAdded)]
+    assert seqs == [1, 2, 3, 4, 5]
+    await ana.send("t1", "live")
+    said = [item for item in await drain(page) if isinstance(item, Message)]
+    assert [(m.seq, m.content) for m in said] == [(6, [Text(text="live")])]
+
+
+async def test_history_and_list_threads_leave_out_the_new_fields_at_their_defaults(
+    server: Server,
+) -> None:
+    ana = await server.connect(identity=ANA, scope="acme")
+    await ana.create_thread(thread_id="t1")
+    sent: list[tuple[str, dict[str, Any]]] = []
+    request = ana._request
+
+    async def record(method: str, payload: dict[str, Any]) -> dict[str, Any]:
+        sent.append((method, payload))
+        return await request(method, payload)
+
+    ana._request = record  # type: ignore[method-assign]
+    await ana.history("t1")
+    await ana.list_threads()
+    await ana.history("t1", after=0)
+    await ana.list_threads(order="activity", preview=True)
+    assert sent == [
+        ("thread.history", {"thread_id": "t1", "before": None, "limit": 50, "kinds": None}),
+        ("thread.list", {"before": None, "limit": 50}),
+        (
+            "thread.history",
+            {"thread_id": "t1", "before": None, "limit": 50, "kinds": None, "after": 0},
+        ),
+        ("thread.list", {"before": None, "limit": 50, "order": "activity", "preview": True}),
+    ]
 
 
 async def test_history_reads_forward_and_the_inbox_lists_by_activity(server: Server) -> None:

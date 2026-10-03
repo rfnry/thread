@@ -390,7 +390,9 @@ async def leave(self, thread_id: str) -> None: ...
 ```
 
 Stops receiving the thread live; the caller's open streams and `Working` there end, and `Left` goes
-out when it was the identity's last connection in it. Leaving a thread not joined does nothing.
+out when it was the identity's last connection in it. Leaving a thread not joined does nothing. A
+followed thread left stays left, across dropped sockets, until the caller joins it, follows again
+or is added to it again.
 
 ### `Client.follow`
 
@@ -404,8 +406,9 @@ receives now. With `resume=True`, each thread's events after the caller's mark c
 where it was added when it has no mark yet; a membership older than marks starts now), at most the
 server's `replay_limit`, beyond which the latest and `truncated=True`. Following is not presence:
 no `Present` is announced, and the caller may still signal and receive signals in every thread.
-After a dropped socket the client follows again from what it has seen. Threads `authorize` refuses
-to `read` are left out. Raises `InputError` for a negative position.
+After a dropped socket the client follows again from what it has seen, and leaves again the threads
+it had left. Threads `authorize` refuses to `read` are left out. Raises `InputError` for a negative
+position.
 
 ### `Client.mark`
 
@@ -1614,7 +1617,8 @@ async leave(threadId: string): Promise<void>
 ```
 
 Stops receiving the thread live; the caller's open streams and `Working` there end. Leaving a thread
-not joined does nothing.
+not joined does nothing. A followed thread left stays left, across dropped sockets, until the caller
+joins it, follows again or is added to it again.
 
 ### `Client.follow`
 
@@ -1628,8 +1632,9 @@ receives now. With `resume: true`, each thread's events after the caller's mark 
 where it was added when it has no mark yet; a membership older than marks starts now), at most the
 server's `replay_limit`, beyond which the latest and `truncated: true`. Following is not presence:
 no `Present` is announced, and the caller may still signal and receive signals in every thread.
-After a dropped socket the client follows again from what it has seen. Threads `authorize` refuses
-to `read` are left out. Raises `InputError` for a negative position.
+After a dropped socket the client follows again from what it has seen, and leaves again the threads
+it had left. Threads `authorize` refuses to `read` are left out. Raises `InputError` for a negative
+position.
 
 ### `Client.mark`
 
