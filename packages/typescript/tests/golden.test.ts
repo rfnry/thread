@@ -32,7 +32,7 @@ const SIGNAL_KINDS = Object.keys({
 
 describe('golden fixtures', () => {
   it('exist', () => {
-    expect(files.length).toBe(28)
+    expect(files.length).toBe(31)
   })
 
   it.each(files)('%s round-trips', (name) => {

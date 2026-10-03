@@ -126,6 +126,16 @@ def golden() -> dict[str, Frame]:
         "response-thread-join": Response(
             id="1", payload=Joined(thread=thread, seq=12, truncated=True).model_dump(mode="json")
         ),
+        "request-thread-follow": Request(
+            id="4", method="thread.follow", payload={"resume": True, "since": {"t1": 9}}
+        ),
+        "response-thread-follow": Response(
+            id="4",
+            payload={"joined": [Joined(thread=thread, seq=12).model_dump(mode="json")]},
+        ),
+        "push-joined": Push(
+            name="joined", payload=Joined(thread=thread, seq=12).model_dump(mode="json")
+        ),
         "request-event-send": Request(
             id="2",
             method="event.send",
@@ -202,5 +212,8 @@ def test_every_fixture_round_trips(path: Path) -> None:
     frame = decode(json.dumps(wire))
     assert json.loads(encode(frame)) == wire
     if isinstance(frame, Push):
-        adapter = EVENTS if frame.name == "event" else SIGNALS
-        assert adapter.validate_python(frame.payload).model_dump(mode="json") == frame.payload
+        if frame.name == "joined":
+            assert Joined.model_validate(frame.payload).model_dump(mode="json") == frame.payload
+        else:
+            adapter = EVENTS if frame.name == "event" else SIGNALS
+            assert adapter.validate_python(frame.payload).model_dump(mode="json") == frame.payload

@@ -1,0 +1,20 @@
+{
+  "id": "4",
+  "payload": {
+    "joined": [
+      {
+        "seq": 12,
+        "thread": {
+          "created_at": "2026-01-01T12:00:00Z",
+          "id": "t1",
+          "metadata": {
+            "topic": "billing"
+          },
+          "scope": "acme"
+        },
+        "truncated": false
+      }
+    ]
+  },
+  "type": "response"
+}

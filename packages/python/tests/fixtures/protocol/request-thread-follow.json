@@ -1,0 +1,11 @@
+{
+  "id": "4",
+  "method": "thread.follow",
+  "payload": {
+    "resume": true,
+    "since": {
+      "t1": 9
+    }
+  },
+  "type": "request"
+}

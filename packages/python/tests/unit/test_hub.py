@@ -210,7 +210,7 @@ async def test_an_invitation_reaches_only_connections_not_in_the_thread() -> Non
     hub.sessions.update({joined, elsewhere, other_scope})
     await hub.join(joined, thread, None)
     await pushes(joined, joined_recorder)
-    await hub.invite("acme", thread, ANA, BRUNO)
+    await hub.added("acme", thread, ANA, BRUNO, 1)
     assert await pushes(joined, joined_recorder) == []
     invited = await pushes(elsewhere, elsewhere_recorder)
     assert kinds(invited) == ["invited"] and invited[0]["thread"]["id"] == "t1"

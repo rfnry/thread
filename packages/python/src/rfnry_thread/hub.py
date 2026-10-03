@@ -47,6 +47,8 @@ class Session:
     joined: dict[str, int] = field(default_factory=dict)
     streams: set[tuple[str, str]] = field(default_factory=set)
     working: set[str] = field(default_factory=set)
+    present: set[str] = field(default_factory=set)
+    following: bool = False
 
     def push_event(self, event: Event, payload: dict[str, Any]) -> None:
         self.joined[event.thread_id] = event.seq
@@ -54,6 +56,9 @@ class Session:
 
     def push_signal(self, payload: dict[str, Any]) -> None:
         self.outbound.put(Push(name="signal", payload=payload))
+
+    def push_joined(self, joined: Joined) -> None:
+        self.outbound.put(Push(name="joined", payload=joined.model_dump(mode="json")))
 
 
 def _size(payload: dict[str, Any]) -> int:
@@ -85,8 +90,15 @@ class Hub:
         return list(self._rooms.get((scope, thread_id), ()))
 
     async def join(self, session: Session, thread: Thread, since: int | None) -> Joined:
+        present = thread.id in session.present
+        joined = await self._enter(session, thread, since)
+        session.present.add(thread.id)
+        if not present:
+            await self._arrive(session, thread.id)
+        return joined
+
+    async def _enter(self, session: Session, thread: Thread, since: int | None) -> Joined:
         scope, thread_id = session.scope, thread.id
-        again = thread_id in session.joined
         async with self._lock(scope, thread_id):
             latest = await self.storage.list_events(scope, thread_id, limit=1)
             head = latest[-1].seq if latest else 0
@@ -112,9 +124,18 @@ class Hub:
                 session.push_event(event, event.model_dump(mode="json"))
             for signal in self.state.snapshot(scope, thread_id):
                 session.push_signal(signal.model_dump(mode="json"))
-        if not again:
-            await self._arrive(session, thread_id)
         return Joined(thread=thread, seq=head, truncated=truncated)
+
+    async def follow(
+        self, session: Session, threads: list[tuple[Thread, int | None]]
+    ) -> list[Joined]:
+        found: list[Joined] = []
+        for thread, since in threads:
+            if thread.id in session.joined:
+                found.append(Joined(thread=thread, seq=session.joined[thread.id]))
+                continue
+            found.append(await self._enter(session, thread, since))
+        return found
 
     async def leave(self, session: Session, thread_id: str) -> None:
         if session.joined.pop(thread_id, None) is None:
@@ -131,7 +152,9 @@ class Hub:
             )
         if thread_id in session.working:
             await self.signal(session, Idle(thread_id=thread_id, sender=session.identity))
-        await self._depart(session, thread_id)
+        if thread_id in session.present:
+            session.present.discard(thread_id)
+            await self._depart(session, thread_id)
 
     async def deliver(self, scope: str, event: Event) -> None:
         async with self._lock(scope, event.thread_id):
@@ -218,30 +241,41 @@ class Hub:
         self._local.pop(key, None)
         await self.signal(session, Left(thread_id=thread_id, sender=session.identity))
 
-    async def invite(
-        self, scope: str, thread: Thread, sender: Identity, identity: Identity
+    async def added(
+        self, scope: str, thread: Thread, sender: Identity, identity: Identity, seq: int
     ) -> None:
-        self._invite_here(scope, thread, sender, identity.id)
+        await self._added_here(scope, thread, sender, identity.id, seq)
         await self._publish(
             scope,
             thread.id,
             {
-                "kind": "invited",
+                "kind": "added",
                 "thread_id": thread.id,
                 "sender": sender.model_dump(mode="json"),
                 "to": identity.id,
+                "seq": seq,
             },
         )
 
-    def _invite_here(self, scope: str, thread: Thread, sender: Identity, identity_id: str) -> None:
-        payload = Invited(thread_id=thread.id, sender=sender, thread=thread).model_dump(mode="json")
+    async def _added_here(
+        self, scope: str, thread: Thread, sender: Identity, identity_id: str, seq: int | None
+    ) -> None:
         for session in list(self.sessions):
             if (
-                session.scope == scope
-                and session.identity.id == identity_id
-                and thread.id not in session.joined
+                session.scope != scope
+                or session.identity.id != identity_id
+                or thread.id in session.joined
             ):
-                session.push_signal(payload)
+                continue
+            if session.following:
+                since = None if seq is None else seq - 1
+                session.push_joined(await self._enter(session, thread, since))
+            elif identity_id != sender.id:
+                session.push_signal(
+                    Invited(thread_id=thread.id, sender=sender, thread=thread).model_dump(
+                        mode="json"
+                    )
+                )
 
     async def deleted(self, scope: str, thread_id: str, sender: Identity) -> None:
         signal = ThreadDeleted(thread_id=thread_id, sender=sender)
@@ -256,6 +290,7 @@ class Hub:
             for session in self._room(scope, thread_id):
                 session.push_signal(payload)
                 session.joined.pop(thread_id, None)
+                session.present.discard(thread_id)
                 session.working.discard(thread_id)
                 session.streams = {s for s in session.streams if s[0] != thread_id}
             self._rooms.pop((scope, thread_id), None)
@@ -312,14 +347,16 @@ class Hub:
                 async with self._lock(scope, thread_id):
                     self.state.refresh(scope, thread_id, str(origin), payload["entries"])
                 return
-            if kind == "invited":
+            if kind in ("added", "invited"):
                 thread = await self.storage.get_thread(scope, thread_id)
                 if thread is not None:
-                    self._invite_here(
+                    seq = payload.get("seq")
+                    await self._added_here(
                         scope,
                         thread,
                         Identity.model_validate(payload["sender"]),
                         str(payload["to"]),
+                        None if seq is None else int(seq),
                     )
                 return
             signal = SIGNALS.validate_python(payload)

@@ -8,7 +8,7 @@ export type Hello = { type: 'hello'; protocol: number }
 export type Request = { type: 'request'; id: string; method: string; payload: Payload }
 export type Response = { type: 'response'; id: string; payload: Payload }
 export type ErrorFrame = { type: 'error'; id: string; error: { code: string; message: string } }
-export type Push = { type: 'push'; name: 'event' | 'signal'; payload: Payload }
+export type Push = { type: 'push'; name: 'event' | 'signal' | 'joined'; payload: Payload }
 export type Notify = { type: 'notify'; method: string; payload: Payload }
 export type Frame = Hello | Request | Response | ErrorFrame | Push | Notify
 

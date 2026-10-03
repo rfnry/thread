@@ -115,7 +115,7 @@ class Verbs:
             scope, Member(thread_id=thread.id, identity=identity, added_at=now(), added_by=by)
         )
         if created:
-            await self._append(
+            added = await self._append(
                 scope,
                 {
                     "kind": "member_added",
@@ -125,8 +125,7 @@ class Verbs:
                     "identity": identity,
                 },
             )
-            if identity.id != by.id:
-                await self._hub.invite(scope, thread, by, identity)
+            await self._hub.added(scope, thread, by, identity, added.seq)
         return member
 
     async def get_thread(self, actor: Identity, scope: str, thread_id: str) -> Thread:
@@ -238,6 +237,34 @@ class Verbs:
             raise InputError("server: since cannot be negative")
         thread = await self.thread(session.identity, session.scope, thread_id, "read")
         return await self._hub.join(session, thread, since)
+
+    async def follow(
+        self, session: Session, resume: bool, since: dict[str, int] | None
+    ) -> list[Joined]:
+        if since is not None and any(seq < 0 for seq in since.values()):
+            raise InputError("server: since cannot be negative")
+        actor, scope = session.identity, session.scope
+        session.following = True
+        if resume and since is None:
+            await self._storage.baseline_marks(scope, actor.id)
+        start = since or {}
+        threads = await self._memberships(actor, scope)
+        return await self._hub.follow(
+            session,
+            [(t, start.get(t.id, t.marked if resume else None)) for t in threads],
+        )
+
+    async def _memberships(self, actor: Identity, scope: str) -> list[Thread]:
+        found: list[Thread] = []
+        before: str | None = None
+        while True:
+            page = await self._storage.list_threads(scope, actor.id, before, PAGE_LIMIT)
+            for thread in page:
+                if self._authorize is None or await self._authorize(actor, "read", thread):
+                    found.append(thread)
+            if len(page) < PAGE_LIMIT:
+                return found
+            before = page[-1].id
 
     async def leave(self, session: Session, thread_id: str) -> None:
         await self._hub.leave(session, thread_id)

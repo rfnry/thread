@@ -242,3 +242,18 @@ async def test_signals_and_events_cross_again_after_the_listeners_drop(
     messages = [p for p in await helper.quiet(0.5) if p["kind"] == "message"]
     assert [p["content"][0]["text"] for p in messages] == ["during", "after"]
     await pool.close()
+
+
+async def test_a_membership_added_on_one_replica_reaches_a_follower_on_another(
+    replicas: tuple[Server, Server],
+) -> None:
+    near, far = replicas
+    helper = await Peer.open(far, HELPER)
+    await helper.call("thread.follow")
+    ana = await Peer.open(near, ANA)
+    await ana.call("thread.create", thread_id="t1")
+    await ana.call("member.add", thread_id="t1", identity=HELPER.model_dump(mode="json"))
+    await say(ana, "t1", "across")
+    pushes = await helper.quiet(0.5)
+    assert [j["thread"]["id"] for j in helper.joined] == ["t1"]
+    assert [p["content"][0]["text"] for p in pushes if p["kind"] == "message"] == ["across"]

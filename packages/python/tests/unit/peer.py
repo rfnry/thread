@@ -16,6 +16,7 @@ class Peer:
     def __init__(self, end: End) -> None:
         self.end = end
         self.pushes: list[dict[str, Any]] = []
+        self.joined: list[dict[str, Any]] = []
         self._ids = itertools.count(1)
 
     @classmethod
@@ -35,7 +36,7 @@ class Peer:
         while True:
             frame = await self.frame()
             if frame["type"] == "push":
-                self.pushes.append(frame["payload"])
+                (self.joined if frame["name"] == "joined" else self.pushes).append(frame["payload"])
             elif frame.get("id") == request_id and frame["type"] == "error":
                 raise raised(frame["error"]["code"], frame["error"]["message"])
             elif frame.get("id") == request_id:
@@ -52,7 +53,9 @@ class Peer:
                         return self.pushes.pop(index)
                 frame = await self.frame(timeout)
                 if frame["type"] == "push":
-                    self.pushes.append(frame["payload"])
+                    (self.joined if frame["name"] == "joined" else self.pushes).append(
+                        frame["payload"]
+                    )
 
         return await asyncio.wait_for(find(), timeout)
 
@@ -61,7 +64,9 @@ class Peer:
             while True:
                 frame = await self.frame(wait)
                 if frame["type"] == "push":
-                    self.pushes.append(frame["payload"])
+                    (self.joined if frame["name"] == "joined" else self.pushes).append(
+                        frame["payload"]
+                    )
         except Exception:
             found, self.pushes = self.pushes, []
             return found

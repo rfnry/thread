@@ -18,6 +18,7 @@ METHODS = frozenset(
         "thread.update",
         "thread.delete",
         "thread.join",
+        "thread.follow",
         "thread.leave",
         "thread.history",
         "thread.present",
@@ -61,7 +62,7 @@ class ErrorFrame(BaseModel):
 
 class Push(BaseModel):
     type: Literal["push"] = "push"
-    name: Literal["event", "signal"]
+    name: Literal["event", "signal", "joined"]
     payload: dict[str, Any]
 
 
