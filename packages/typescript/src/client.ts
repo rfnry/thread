@@ -186,7 +186,7 @@ export class Client {
   private nextId = 1
   private readonly listeners = new Map<Listener, boolean>()
   private readonly cursors = new Map<string, number>()
-  private readonly rewinds = new Map<string, { since: number; held: number; taken: Set<number> }>()
+  private rewinds: Array<{ threadId: string; since: number; held: number; taken: Set<number> }> = []
   private following = false
   private readonly held = new Set<string>()
   private readonly left = new Set<string>()
@@ -284,9 +284,14 @@ export class Client {
     if (frame.name === 'event') {
       const event = frame.payload as unknown as Event
       if (this.leaving.has(event.thread_id)) return
-      const rewind = this.rewinds.get(event.thread_id)
-      if (rewind && event.seq > rewind.since && event.seq <= rewind.held) {
-        if (rewind.taken.has(event.seq)) return
+      const rewind = this.rewinds.find(
+        (pending) =>
+          pending.threadId === event.thread_id &&
+          event.seq > pending.since &&
+          event.seq <= pending.held &&
+          !pending.taken.has(event.seq)
+      )
+      if (rewind) {
         rewind.taken.add(event.seq)
         this.emit(event)
         return
@@ -455,10 +460,10 @@ export class Client {
     const held = this.cursors.get(threadId)
     const rewind =
       since !== null && held !== undefined && since < held
-        ? { since, held, taken: new Set<number>() }
+        ? { threadId, since, held, taken: new Set<number>() }
         : null
     if (held === undefined) this.cursors.set(threadId, since ?? 0)
-    if (rewind) this.rewinds.set(threadId, rewind)
+    if (rewind) this.rewinds.push(rewind)
     let joined: Joined
     try {
       joined = (await this.request('thread.join', {
@@ -466,7 +471,7 @@ export class Client {
         since,
       })) as unknown as Joined
     } finally {
-      if (rewind && this.rewinds.get(threadId) === rewind) this.rewinds.delete(threadId)
+      this.rewinds = this.rewinds.filter((other) => other !== rewind)
     }
     this.cursors.set(
       threadId,

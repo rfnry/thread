@@ -423,6 +423,48 @@ async def test_a_follower_joining_since_a_seq_while_a_live_event_lands_gets_each
     assert [item.seq for item in await drain(page) if isinstance(item, Message)] == [7]
 
 
+async def test_overlapping_joins_since_a_followed_thread_each_replay_their_own_window(
+    server: Server,
+) -> None:
+    ana = await server.connect(identity=ANA, scope="acme")
+    await ana.create_thread(thread_id="t1")
+    await ana.add_member("t1", HELPER)
+    for n in range(18):
+        await ana.send("t1", f"m{n}")
+    page = await server.connect(identity=HELPER, scope="acme")
+    await page.follow()
+    await drain(page)
+    assert page._cursors["t1"] == 20
+    request = page._request
+    landed = asyncio.Event()
+    joining: list[int] = []
+    second: list[asyncio.Task[Any]] = []
+    live: list[Message] = []
+
+    async def overlap(method: str, payload: dict[str, Any]) -> dict[str, Any]:
+        if method == "thread.join":
+            joining.append(payload["since"])
+        if joining == [5]:
+            second.append(asyncio.create_task(page.join("t1", since=10)))
+            await until(lambda: joining == [5, 10])
+            live.append(await ana.send("t1", "live"))
+            await until(lambda: page._cursors.get("t1") == live[0].seq)
+            landed.set()
+        elif method == "thread.join":
+            await landed.wait()
+        return await request(method, payload)
+
+    page._request = overlap  # type: ignore[method-assign]
+    first = await page.join("t1", since=5)
+    other = await second[0]
+    assert (first.seq, other.seq) == (21, 21)
+    seqs = sorted(item.seq for item in await drain(page) if isinstance(item, Message))
+    assert seqs == sorted([*range(6, 21), *range(11, 21), 21])
+    assert not page._rewinds
+    await ana.send("t1", "after")
+    assert [item.seq for item in await drain(page) if isinstance(item, Message)] == [22]
+
+
 async def test_a_failed_join_keeps_the_cursor_of_a_thread_the_client_follows(
     storage: InMemoryStorage,
 ) -> None:

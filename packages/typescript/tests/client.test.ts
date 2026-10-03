@@ -644,6 +644,42 @@ describe('client', () => {
     await client.close()
   })
 
+  it('replays each overlapping join since a followed thread its own window once', async () => {
+    const log = Array.from({ length: 20 }, (_, n) => message(n + 1, `m${n + 1}`))
+    const t1 = { id: 't1', scope: 'acme', metadata: {}, created_at: '2026-01-01T12:00:00Z' }
+    server.handlers.set('thread.follow', () => ({
+      joined: [{ thread: t1, seq: 20, truncated: false }],
+    }))
+    server.handlers.set('thread.join', ({ since }) => {
+      if (log.length === 20) {
+        const live = message(21, 'live')
+        log.push(live)
+        server.push('event', live)
+      }
+      for (const event of log.filter((event) => event.seq > (since ?? log.length)))
+        server.push('event', event)
+      return { thread: t1, seq: log.length, truncated: false }
+    })
+    const client = await connect({ url: 'ws://fake', protocols: ['thread', 'tok'] })
+    const items: Item[] = []
+    client.subscribe((item) => items.push(item))
+    await client.follow()
+    const first = client.join('t1', { since: 5 })
+    const second = client.join('t1', { since: 10 })
+    expect([(await first).seq, (await second).seq]).toEqual([21, 21])
+    const seqs = items.flatMap((item) => ('author' in item ? [item.seq] : []))
+    const expected = [
+      ...Array.from({ length: 15 }, (_, n) => n + 6),
+      ...Array.from({ length: 10 }, (_, n) => n + 11),
+      21,
+    ]
+    expect([...seqs].sort((a, b) => a - b)).toEqual(expected.sort((a, b) => a - b))
+    server.push('event', message(22, 'after'))
+    await vi.waitFor(() => expect(items.at(-1)).toMatchObject({ seq: 22 }))
+    expect(items.filter((item) => 'author' in item && item.seq > 20)).toHaveLength(2)
+    await client.close()
+  })
+
   it('keeps the cursor of a followed thread when a join of it fails', async () => {
     const thread = (id: string) => ({
       id,

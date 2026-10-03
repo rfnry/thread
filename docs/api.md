@@ -380,9 +380,9 @@ Receives the thread live from now and returns a `Joined`. With `since`, the even
 arrive first (`since=0` for the whole log, at most the server's `replay_limit`, beyond which the
 latest and `truncated=True`), then the current state, then live traffic. A thread the connection
 already receives, by following, keeps arriving live, and `since` hands its events after that `seq`
-up to where the connection is, once. Raises `InputError` when `since` is negative, `NotFoundError`
-when the scope holds no such thread, `ForbiddenError` when the caller is not a member or
-`authorize` refuses `read`.
+up to where the connection is, once; joins of it in flight at the same time each get their own.
+Raises `InputError` when `since` is negative, `NotFoundError` when the scope holds no such thread,
+`ForbiddenError` when the caller is not a member or `authorize` refuses `read`.
 
 ### `Client.leave`
 
@@ -1608,9 +1608,9 @@ async join(threadId: string, options: { since?: number } = {}): Promise<Joined>
 Receives the thread live from now and returns a `Joined`. With `since`, the events after that `seq`
 arrive first (`since: 0` for the whole log), then the current state, then live traffic. A thread
 the connection already receives, by following, keeps arriving live, and `since` hands its events
-after that `seq` up to where the connection is, once. Raises `InputError` when `since` is negative,
-`NotFoundError` when the scope holds no such thread, `ForbiddenError` when the caller is not a
-member or `authorize` refuses `read`.
+after that `seq` up to where the connection is, once; joins of it in flight at the same time each
+get their own. Raises `InputError` when `since` is negative, `NotFoundError` when the scope holds
+no such thread, `ForbiddenError` when the caller is not a member or `authorize` refuses `read`.
 
 ### `Client.leave`
 

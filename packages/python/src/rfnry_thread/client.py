@@ -197,7 +197,7 @@ class Client:
         self._ids = itertools.count(1)
         self._inbox: asyncio.Queue[Item | None] = asyncio.Queue()
         self._cursors: dict[str, int] = {}
-        self._rewinds: dict[str, tuple[range, set[int]]] = {}
+        self._rewinds: list[tuple[str, range, set[int]]] = []
         self._following = False
         self._present: set[str] = set()
         self._left: set[str] = set()
@@ -286,12 +286,11 @@ class Client:
             event = EVENTS.validate_python(push.payload)
             if event.thread_id in self._leaving:
                 return
-            window, taken = self._rewinds.get(event.thread_id, (range(0), set()))
-            if event.seq in window:
-                if event.seq not in taken:
+            for rewound, window, taken in self._rewinds:
+                if rewound == event.thread_id and event.seq in window and event.seq not in taken:
                     taken.add(event.seq)
                     self._inbox.put_nowait(event)
-                return
+                    return
             cursor = self._cursors.get(event.thread_id)
             if cursor is not None:
                 if event.seq <= cursor:
@@ -475,16 +474,16 @@ class Client:
 
     async def _join(self, thread_id: str, since: int | None) -> Joined:
         held = self._cursors.get(thread_id)
-        rewind: tuple[range, set[int]] | None = None
+        rewind: tuple[str, range, set[int]] | None = None
         if held is None:
             self._cursors[thread_id] = since or 0
         elif since is not None and since < held:
-            rewind = self._rewinds[thread_id] = (range(since + 1, held + 1), set())
+            rewind = (thread_id, range(since + 1, held + 1), set())
+            self._rewinds.append(rewind)
         try:
             reply = await self._request("thread.join", {"thread_id": thread_id, "since": since})
         finally:
-            if rewind is not None and self._rewinds.get(thread_id) is rewind:
-                del self._rewinds[thread_id]
+            self._rewinds = [other for other in self._rewinds if other is not rewind]
         joined = Joined.model_validate(reply)
         if joined.seq < (since or 0):
             self._cursors[thread_id] = joined.seq

@@ -378,12 +378,13 @@ async for item in helper.events():
 `follow()` receives every thread you are a member of from now on, and a thread you are added to
 later from the moment you were added, as a `Joined` on the stream: there is no `Invited` to answer.
 Following is not presence; a page that opens a thread still joins it, and `join(thread_id, since=)`
-hands it the thread's events after `since` once while the thread keeps arriving live. `leave` stops
-one followed thread, across dropped sockets, until you join it, follow again or are added to it
-again. `follow(resume=True)` first hands you what each thread said after your **mark**, your
-private read position: `mark(thread_id, seq)` stores it, never lowers it, and when it moved tells
-your other connections with `Marked`. A thread you were added to starts from the add; a gap longer
-than the replay limit arrives as its latest events with `truncated=True`, and
+hands it the thread's events after `since` once while the thread keeps arriving live; two such joins
+at the same time each get their own. `leave` stops one followed thread, across dropped sockets,
+until you join it, follow again or are added to it again. `follow(resume=True)` first hands you
+what each thread said after your **mark**, your private read position: `mark(thread_id, seq)`
+stores it, never lowers it, and when it moved tells your other connections with `Marked`. A thread
+you were added to starts from the add; a gap longer than the replay limit arrives as its latest
+events with `truncated=True`, and
 `history(thread_id, after=mark, before=...)` reads the rest. Resuming is at least once: an event
 handled just before a crash comes again, so handle idempotently, and when you handle events
 concurrently, mark only up to the lowest one not yet handled.
