@@ -431,6 +431,33 @@ describe('client', () => {
     await client.close()
   })
 
+  it('tries the re-follow again after a transport loss instead of joining', async () => {
+    let calls = 0
+    server.handlers.set('thread.follow', () => {
+      if (++calls === 2) {
+        server.drop()
+        return new Promise(() => undefined)
+      }
+      return {
+        joined: [
+          {
+            thread: { id: 't1', scope: 'acme', metadata: {}, created_at: '2026-01-01T12:00:00Z' },
+            seq: 4,
+            truncated: false,
+          },
+        ],
+      }
+    })
+    const client = await connect({ url: 'ws://fake', protocols: ['thread', 'tok'] })
+    await client.follow()
+    server.drop()
+    await vi.waitFor(() => expect(server.sent('thread.follow')).toHaveLength(3))
+    await vi.waitFor(() => expect(client.status).toBe('open'))
+    expect(server.sent('thread.join')).toEqual([])
+    expect(server.sent('thread.follow').at(-1)?.payload).toEqual({ resume: true, since: { t1: 4 } })
+    await client.close()
+  })
+
   it('marks, and hears its own marks from its other connections', async () => {
     server.handlers.set('thread.mark', (payload) => ({ seq: payload.seq, unread: 0 }))
     const client = await connect({ url: 'ws://fake', protocols: ['thread', 'tok'] })
