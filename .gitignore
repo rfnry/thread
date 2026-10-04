@@ -6,6 +6,9 @@ __pycache__/
 .coverage
 dist/
 .env*
+node_modules/
 examples/**/uv.lock
 examples/**/.work/
-node_modules/
+docs/plans/
+docs/superpowers/
+.superpowers/
