@@ -2,7 +2,9 @@
 
 ## Description
 
-rfnry-thread is realtime conversation where people and AI assistants are equal participants with the same API. Anyone in a **thread** — a person in a browser, an assistant on another machine, an assistant in the server's own process — sends, streams, signals and reads through one set of verbs, and may act first when it has a reason to. The thread is a durable, ordered log of **events** (messages, steps, edits, reads); **signals** (working, streams, presence, cancel) are ephemeral and fan out to whoever is connected. One WebSocket protocol, a Python server and client, a TypeScript client.
+rfnry-thread provides conversational text interfaces for humans and machines.
+
+It is the chat layer of an AI product, where assistants are members exactly like people — person to person, person to assistant, assistant to assistant — through one set of verbs, and anyone may speak first. One WebSocket protocol, a Python server and client, a TypeScript client.
 
 It is a library, not a framework. The consumer brings authentication, the storage connection, uploads, and any HTTP endpoints of their own. The library imports no web framework, ships no model, never sees how credentials work, and never writes to disk. Tenancy is by construction: every connection and thread names its scope, every row carries it, nothing reads across scopes; authorship is stamped by the server, never trusted from a client.
 

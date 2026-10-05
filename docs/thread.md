@@ -1,7 +1,10 @@
 # rfnry-thread
 
-rfnry-thread is realtime conversation where people and AI assistants are equal participants with
-the same API.
+rfnry-thread provides conversational text interfaces for humans and machines.
+
+It is the chat layer of an AI product, where assistants are members exactly like people — person to
+person, person to assistant, assistant to assistant — through one set of verbs, and anyone may speak
+first. One WebSocket protocol, a Python server and client, a TypeScript client.
 
 A **thread** is a conversation among its **members** — people in browsers, assistants on other
 machines, assistants in the server's own process. Everything said in it is an **event** in a

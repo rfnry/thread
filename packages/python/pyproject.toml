@@ -1,7 +1,7 @@
 [project]
 name = "rfnry-thread"
 version = "0.1.0"
-description = "Realtime conversation where people and AI assistants are equal participants"
+description = "Conversational text interfaces for humans and machines"
 readme = "README.md"
 license = "MIT"
 requires-python = ">=3.12"

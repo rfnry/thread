@@ -2,7 +2,7 @@
   "name": "@rfnry/thread",
   "version": "0.1.0",
   "type": "module",
-  "description": "Realtime conversation where people and AI assistants are equal participants",
+  "description": "Conversational text interfaces for humans and machines",
   "license": "MIT",
   "engines": { "node": ">=22.12.0" },
   "exports": { ".": { "types": "./dist/index.d.ts", "default": "./dist/index.js" } },
