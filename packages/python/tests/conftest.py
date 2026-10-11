@@ -19,7 +19,7 @@ START = (
 
 
 async def admin(statement: str) -> None:
-    conn = await asyncpg.connect(URL)
+    conn = await asyncpg.connect(URL, timeout=5)
     try:
         await conn.execute(statement)
     finally:
@@ -40,10 +40,16 @@ def pytest_sessionstart(session: pytest.Session) -> None:
         raise pytest.UsageError(f"tests: RFNRY_TEST_POSTGRES_URL is not set; {START}")
     try:
         asyncio.run(create())
-    except (OSError, asyncpg.PostgresError) as error:
+    except (
+        OSError,
+        asyncpg.PostgresError,
+        asyncpg.InterfaceError,
+        ValueError,
+        TimeoutError,
+    ) as error:
         raise pytest.UsageError(
-            f"tests: the database is not reachable ({error}); {START}"
-        ) from error
+            f"tests: cannot connect to RFNRY_TEST_POSTGRES_URL ({type(error).__name__}: {error}); {START}"
+        ) from None
 
 
 def pytest_sessionfinish(session: pytest.Session) -> None:

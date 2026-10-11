@@ -11,4 +11,4 @@ TABLES = "thread_marks, thread_events, thread_members, thread_threads"
 
 
 async def open_pool() -> Any:
-    return await asyncpg.create_pool(DSN, min_size=1, max_size=10)
+    return await asyncpg.create_pool(DSN, min_size=1, max_size=10, timeout=5)
