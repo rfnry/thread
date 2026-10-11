@@ -1363,8 +1363,8 @@ Implements `Storage` on Postgres through an asyncpg-compatible pool you built, i
 where missing, under an advisory lock, so it is safe to run again. An event is stored and announced
 with `NOTIFY` in one transaction, on two channels named for the connection's current schema, so
 deployments in different schemas of one database do not hear each other and replicas sharing a
-schema do; `listen` holds one connection from the pool, taking another
-with jittered backoff when it drops. Raises `StorageError` when the database fails, and from
+schema do; `listen` holds one connection from the pool, taking another with jittered backoff when
+it drops. Raises `StorageError` when the database fails, and from
 `publish`, when a notification is over 7900 bytes.
 
 ## Errors

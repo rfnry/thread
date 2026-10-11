@@ -11,6 +11,7 @@ from unit.factories import ANA, HELPER
 from unit.peer import Peer
 from until import until
 
+from rfnry_thread.errors import StorageError
 from rfnry_thread.models import Identity, Message, Part, Text, Thread
 from rfnry_thread.postgres import PostgresStorage
 from rfnry_thread.server import Server
@@ -260,12 +261,13 @@ async def test_deployments_in_different_schemas_do_not_hear_each_other(
 ) -> None:
     other = f"{SCHEMA}_other"
     admin = await asyncpg.connect(URL, timeout=5)
-    await admin.execute(f"CREATE SCHEMA {other}")
-    dsn = f"{URL}{'&' if '?' in URL else '?'}search_path={other}"
-    other_pool = await asyncpg.create_pool(dsn, min_size=1, max_size=4, timeout=5)
-    sibling_pool = await open_pool()
+    other_pool = sibling_pool = None
     stops = []
     try:
+        await admin.execute(f"CREATE SCHEMA {other}")
+        dsn = f"{URL}{'&' if '?' in URL else '?'}search_path={other}"
+        other_pool = await asyncpg.create_pool(dsn, min_size=1, max_size=4, timeout=5)
+        sibling_pool = await open_pool()
         foreign = PostgresStorage(other_pool)
         sibling = PostgresStorage(sibling_pool)
         assert await foreign._channels() != await storage._channels()
@@ -296,7 +298,18 @@ async def test_deployments_in_different_schemas_do_not_hear_each_other(
     finally:
         for stop in stops:
             await stop()
-        await asyncio.wait_for(other_pool.close(), 5)
-        await asyncio.wait_for(sibling_pool.close(), 5)
-        await admin.execute(f"DROP SCHEMA {other} CASCADE")
+        for closing in (other_pool, sibling_pool):
+            if closing is not None:
+                await asyncio.wait_for(closing.close(), 5)
+        await admin.execute(f"DROP SCHEMA IF EXISTS {other} CASCADE")
         await admin.close()
+
+
+async def test_a_search_path_without_a_schema_is_a_storage_error() -> None:
+    dsn = f"{URL}{'&' if '?' in URL else '?'}search_path={SCHEMA}_missing"
+    missing = await asyncpg.create_pool(dsn, min_size=1, max_size=2, timeout=5)
+    try:
+        with pytest.raises(StorageError, match="^postgres: no schema on the search_path exists$"):
+            await PostgresStorage(missing)._channels()
+    finally:
+        await asyncio.wait_for(missing.close(), 5)

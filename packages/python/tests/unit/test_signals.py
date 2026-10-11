@@ -221,9 +221,13 @@ async def test_authorize_send_applies_to_signals_that_speak(storage: PostgresSto
         return not (identity.id == "helper" and action == "send")
 
     server = Server(storage, authorize=authorize)
-    _, helper = await joined(server, ANA, HELPER)
-    with pytest.raises(ForbiddenError, match="^server: 'helper' may not send in thread 't1'$"):
-        await helper.call("signal.send", thread_id="t1", kind="working")
+    ana, helper = await joined(server, ANA, HELPER)
+    try:
+        with pytest.raises(ForbiddenError, match="^server: 'helper' may not send in thread 't1'$"):
+            await helper.call("signal.send", thread_id="t1", kind="working")
+    finally:
+        await ana.close()
+        await helper.close()
 
 
 async def test_a_signal_that_outlives_its_join_is_refused(storage: PostgresStorage) -> None:

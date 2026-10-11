@@ -659,8 +659,10 @@ run = await engine.run("support", scope="acme", input=message.content,
 Postgres is the storage: `PostgresStorage(pool)` takes an asyncpg-compatible pool you built
 (`rfnry-thread[postgres]` installs asyncpg). `initialize()` creates four tables — `thread_threads`,
 `thread_members`, `thread_events`, `thread_marks` — and is safe to run again. The prefix lets one
-database and one pool serve rfnry-engine's and rfnry-memory's tables too. Deployments in different schemas of one
-database do not hear each other's notices, and replicas sharing a schema do:
+database and one pool serve rfnry-engine's and rfnry-memory's tables too.
+
+Deployments in different schemas of one database do not hear each other's notices, and replicas
+sharing a schema do. Build the storage like this:
 
 ```python
 pool = await asyncpg.create_pool(dsn)

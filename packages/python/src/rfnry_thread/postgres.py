@@ -111,6 +111,8 @@ class PostgresStorage:
         if self._names is None:
             async with self._guard("channels"), self._pool.acquire() as conn:
                 schema = await conn.fetchval("SELECT current_schema()")
+            if schema is None:
+                raise StorageError("postgres: no schema on the search_path exists")
             tag = hashlib.sha256(schema.encode()).hexdigest()[:12]
             self._names = (f"{EVENTS_PREFIX}{tag}", f"{SIGNALS_PREFIX}{tag}")
         return self._names
