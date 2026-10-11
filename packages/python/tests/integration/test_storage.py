@@ -20,8 +20,6 @@ from rfnry_thread.models import (
 )
 from rfnry_thread.storage import Storage
 
-from .conftest import fresh, postgres_pool
-
 
 def thread(thread_id: str, scope: str = "acme", minutes: int = 0) -> Thread:
     return Thread(
@@ -272,36 +270,31 @@ def test_it_is_a_storage(storage: Storage) -> None:
     assert isinstance(storage, Storage)
 
 
-@pytest.mark.postgres
-async def test_initialize_adds_the_metadata_index_to_an_existing_database() -> None:
-    pool = await postgres_pool()
-    storage = await fresh(pool)
+async def test_initialize_adds_the_metadata_index_to_an_existing_database(
+    pool: Any, storage: Storage
+) -> None:
     async with pool.acquire() as conn:
         await conn.execute("DROP INDEX ix_thread_threads_metadata")
     await storage.initialize()
     async with pool.acquire() as conn:
         definition = await conn.fetchval(
-            "SELECT indexdef FROM pg_indexes WHERE indexname = 'ix_thread_threads_metadata'"
+            "SELECT indexdef FROM pg_indexes WHERE schemaname = current_schema() "
+            "AND indexname = 'ix_thread_threads_metadata'"
         )
-    await pool.close()
     assert definition is not None and "USING gin (metadata)" in definition
 
 
-@pytest.mark.postgres
-async def test_initialize_backfills_the_latest_message_time_on_an_existing_database() -> None:
-    pool = await postgres_pool()
-    try:
-        storage = await fresh(pool)
-        await room(storage, "t1")
-        await storage.append_event("acme", say("t1", "c1"))
-        async with pool.acquire() as conn:
-            await conn.execute("DROP INDEX IF EXISTS ix_thread_threads_activity")
-            await conn.execute("ALTER TABLE thread_threads DROP COLUMN last_message_at")
-        await storage.initialize()
-        [listed] = await storage.list_threads("acme", None)
-        assert listed.last_message_at == AT
-    finally:
-        await pool.close()
+async def test_initialize_backfills_the_latest_message_time_on_an_existing_database(
+    pool: Any, storage: Storage
+) -> None:
+    await room(storage, "t1")
+    await storage.append_event("acme", say("t1", "c1"))
+    async with pool.acquire() as conn:
+        await conn.execute("DROP INDEX IF EXISTS ix_thread_threads_activity")
+        await conn.execute("ALTER TABLE thread_threads DROP COLUMN last_message_at")
+    await storage.initialize()
+    [listed] = await storage.list_threads("acme", None)
+    assert listed.last_message_at == AT
 
 
 async def test_a_mark_moves_forward_only_counts_what_others_said_after_it_and_says_if_it_moved(

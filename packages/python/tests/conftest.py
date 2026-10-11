@@ -1,0 +1,64 @@
+import asyncio
+from collections.abc import AsyncIterator
+from typing import Any
+
+import asyncpg
+import pytest
+from database import SCHEMA, TABLES, URL, open_pool
+
+from rfnry_thread import postgres
+from rfnry_thread.postgres import PostgresStorage
+
+postgres.EVENTS_CHANNEL = f"{SCHEMA}_events"
+postgres.SIGNALS_CHANNEL = f"{SCHEMA}_signals"
+
+START = (
+    "start the database with `docker start rfnry-thread-pg` and set "
+    "RFNRY_TEST_POSTGRES_URL=postgresql://thread:thread@127.0.0.1:55436/thread"
+)
+
+
+async def admin(statement: str) -> None:
+    conn = await asyncpg.connect(URL)
+    try:
+        await conn.execute(statement)
+    finally:
+        await conn.close()
+
+
+async def create() -> None:
+    await admin(f"CREATE SCHEMA {SCHEMA}")
+    pool = await open_pool()
+    try:
+        await PostgresStorage(pool).initialize()
+    finally:
+        await pool.close()
+
+
+def pytest_sessionstart(session: pytest.Session) -> None:
+    if not URL:
+        raise pytest.UsageError(f"tests: RFNRY_TEST_POSTGRES_URL is not set; {START}")
+    try:
+        asyncio.run(create())
+    except (OSError, asyncpg.PostgresError) as error:
+        raise pytest.UsageError(
+            f"tests: the database is not reachable ({error}); {START}"
+        ) from error
+
+
+def pytest_sessionfinish(session: pytest.Session) -> None:
+    asyncio.run(admin(f"DROP SCHEMA {SCHEMA} CASCADE"))
+
+
+@pytest.fixture
+async def pool() -> AsyncIterator[Any]:
+    pool = await open_pool()
+    async with pool.acquire() as conn:
+        await conn.execute(f"TRUNCATE {TABLES}")
+    yield pool
+    await asyncio.wait_for(pool.close(), 5)
+
+
+@pytest.fixture
+def storage(pool: Any) -> PostgresStorage:
+    return PostgresStorage(pool)

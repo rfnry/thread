@@ -4,25 +4,25 @@ from datetime import UTC, datetime
 from typing import Any
 
 import pytest
+from database import open_pool
 from unit.conftest import say
 from unit.factories import ANA, HELPER
 from unit.peer import Peer
 from until import until
 
+from rfnry_thread import postgres
 from rfnry_thread.models import Identity, Message, Part, Text, Thread
 from rfnry_thread.postgres import PostgresStorage
 from rfnry_thread.server import Server
-
-from .conftest import fresh, postgres_pool
-
-pytestmark = pytest.mark.postgres
 
 
 async def listeners(pool: Any) -> list[int]:
     async with pool.acquire() as conn:
         rows = await conn.fetch(
             "SELECT pid FROM pg_stat_activity WHERE datname = current_database() "
-            "AND pid <> pg_backend_pid() AND query = 'LISTEN \"thread_signals\"'"
+            "AND application_name = current_setting('application_name') "
+            "AND pid <> pg_backend_pid() AND query = $1",
+            f'LISTEN "{postgres.SIGNALS_CHANNEL}"',
         )
     return [row["pid"] for row in rows]
 
@@ -45,16 +45,15 @@ async def relistened(pool: Any, killed: list[int], expected: int, timeout: float
 
 
 @pytest.fixture
-async def replicas() -> AsyncIterator[tuple[Server, Server]]:
-    near_pool, far_pool = await postgres_pool(), await postgres_pool()
-    near = Server(await fresh(near_pool))
+async def replicas(storage: PostgresStorage) -> AsyncIterator[tuple[Server, Server]]:
+    far_pool = await open_pool()
+    near = Server(storage)
     far = Server(PostgresStorage(far_pool))
     await near.start()
     await far.start()
     yield near, far
     await near.stop()
     await far.stop()
-    await near_pool.close()
     await far_pool.close()
 
 
@@ -92,7 +91,7 @@ async def test_a_message_reaches_the_other_replica_with_its_metadata(
     assert [e["metadata"] for e in history] == [{"run_id": "r1", "reviewed": False}]
 
 
-async def test_a_second_replica_receives_only_the_redacted_form() -> None:
+async def test_a_second_replica_receives_only_the_redacted_form(storage: PostgresStorage) -> None:
     async def redact(author: Identity, thread: Thread, content: list[Part]) -> list[Part]:
         return [
             Text(text=p.text.replace("4111111111111111", "**** 1111"))
@@ -100,8 +99,8 @@ async def test_a_second_replica_receives_only_the_redacted_form() -> None:
             if isinstance(p, Text)
         ]
 
-    near_pool, far_pool = await postgres_pool(), await postgres_pool()
-    near = Server(await fresh(near_pool), redact=redact)
+    far_pool = await open_pool()
+    near = Server(storage, redact=redact)
     far = Server(PostgresStorage(far_pool))
     await near.start()
     await far.start()
@@ -129,7 +128,6 @@ async def test_a_second_replica_receives_only_the_redacted_form() -> None:
     finally:
         await near.stop()
         await far.stop()
-        await near_pool.close()
         await far_pool.close()
 
 
@@ -189,9 +187,9 @@ async def test_removal_cuts_off_a_member_on_another_replica(
     assert "member_removed" in kinds and "message" not in kinds
 
 
-async def test_a_dropped_listener_listens_again_and_resumes() -> None:
-    pool = await postgres_pool()
-    storage = await fresh(pool)
+async def test_a_dropped_listener_listens_again_and_resumes(
+    pool: Any, storage: PostgresStorage
+) -> None:
     await storage.create_thread("acme", Thread(id="t1", scope="acme", created_at=datetime.now(UTC)))
     seen: list[int] = []
     heard: list[dict[str, Any]] = []
@@ -225,14 +223,12 @@ async def test_a_dropped_listener_listens_again_and_resumes() -> None:
     await until(lambda: heard == [{"kind": "idle"}] and seen == [1])
     await stop()
     assert await listeners(pool) == []
-    await pool.close()
 
 
 async def test_signals_and_events_cross_again_after_the_listeners_drop(
-    replicas: tuple[Server, Server],
+    replicas: tuple[Server, Server], pool: Any
 ) -> None:
     ana, helper = await room(*replicas)
-    pool = await postgres_pool()
     killed = await terminate(pool, 2)
     await say(ana, "t1", "during")
     await relistened(pool, killed, 2)
@@ -241,7 +237,6 @@ async def test_signals_and_events_cross_again_after_the_listeners_drop(
     await say(ana, "t1", "after")
     messages = [p for p in await helper.quiet(0.5) if p["kind"] == "message"]
     assert [p["content"][0]["text"] for p in messages] == ["during", "after"]
-    await pool.close()
 
 
 async def test_a_membership_added_on_one_replica_reaches_a_follower_on_another(

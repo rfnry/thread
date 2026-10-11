@@ -34,10 +34,9 @@ asyncio_mode = "auto"
 testpaths = ["tests"]
 pythonpath = ["src", "tests"]
 markers = [
-    "postgres: needs a real Postgres (set RFNRY_TEST_POSTGRES_URL)",
     "live: runs the TypeScript client against a live server (needs node and npm)",
 ]
-addopts = "-m 'not postgres and not live'"
+addopts = "-m 'not live'"
 
 [tool.ruff]
 line-length = 100
@@ -56,7 +55,6 @@ check = { cmd = "ruff check src tests" }
 "check:fix" = { cmd = "ruff check --fix src tests" }
 typecheck = { cmd = "mypy" }
 test = { cmd = "pytest -q" }
-"test:integration" = { cmd = "pytest -q -m postgres" }
 "test:e2e" = { cmd = "pytest -q -m live" }
 fixtures = { cmd = "pytest -q tests/unit/test_golden.py", env = { RFNRY_WRITE_FIXTURES = "1" } }
 

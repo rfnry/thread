@@ -8,7 +8,7 @@ from websockets.asyncio.server import ServerConnection, serve
 from websockets.http11 import Request, Response
 from websockets.typing import Subprotocol
 
-from rfnry_thread import Custom, Identity, InMemoryStorage, Invited, Message, Server, Text
+from rfnry_thread import Custom, Identity, Invited, Message, PostgresStorage, Server, Text
 
 pytestmark = pytest.mark.live
 
@@ -75,8 +75,8 @@ async def assistant(server: Server, open_sockets: list[Socket]) -> None:
             await me.idle(item.thread_id)
 
 
-async def test_the_typescript_client_against_a_live_server() -> None:
-    server = Server(InMemoryStorage())
+async def test_the_typescript_client_against_a_live_server(storage: PostgresStorage) -> None:
+    server = Server(storage)
     open_sockets: list[Socket] = []
 
     async def handler(socket: ServerConnection) -> None:
