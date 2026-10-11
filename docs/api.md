@@ -1329,8 +1329,9 @@ class Storage(Protocol):
     async def publish(self, scope: str, thread_id: str, payload: dict[str, Any]) -> None: ...
 ```
 
-The protocol both storages implement; `scope` is the first argument of every method that reads or
-writes a row, and the log is append-only: an event is removed only with its thread or its scope.
+The protocol `PostgresStorage` implements, and a storage of your own implements to take its place;
+`scope` is the first argument of every method that reads or writes a row, and the log is
+append-only: an event is removed only with its thread or its scope.
 `create_thread`, `add_member` and `append_event` return the row stored and whether it is new (an
 existing thread, membership, or event of the same author and `client_id` comes back with `False`,
 and a new event gets the thread's next `seq`); the getters return `None` for what the scope does not
@@ -1350,17 +1351,6 @@ first mark, or a higher one); `get_mark` returns it, `None` without one; `baseli
 each thread's last `seq` as the mark of every membership of `identity_id` that has none, and returns
 how many it stored. `mark` raises `NotFoundError` when the identity is not a member of the thread.
 
-### `InMemoryStorage`
-
-```python
-class InMemoryStorage:
-    def __init__(self) -> None: ...
-```
-
-Implements `Storage` in this process's memory, for tests, examples and one process; `initialize`
-does nothing. Servers that share one instance and call `start` link as replicas, as they would on
-one database.
-
 ### `PostgresStorage`
 
 ```python
@@ -1368,12 +1358,12 @@ class PostgresStorage:
     def __init__(self, pool: Any) -> None: ...
 ```
 
-Implements `Storage` on Postgres through an asyncpg-compatible pool you built, in three tables,
-`thread_threads`, `thread_members` and `thread_events`, which `initialize` creates where missing,
-under an advisory lock, so it is safe to run again. An event is stored and announced with `NOTIFY`
-in one transaction, and `listen` holds one connection from the pool, taking another with jittered
-backoff when it drops. Raises `StorageError` when the database fails, and from `publish`, when a
-notification is over 7900 bytes.
+Implements `Storage` on Postgres through an asyncpg-compatible pool you built, in four tables,
+`thread_threads`, `thread_members`, `thread_events` and `thread_marks`, which `initialize` creates
+where missing, under an advisory lock, so it is safe to run again. An event is stored and announced
+with `NOTIFY` in one transaction, and `listen` holds one connection from the pool, taking another
+with jittered backoff when it drops. Raises `StorageError` when the database fails, and from
+`publish`, when a notification is over 7900 bytes.
 
 ## Errors
 

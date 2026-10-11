@@ -4,13 +4,16 @@ import re
 from pathlib import Path
 from typing import Any
 
+import asyncpg
 import pytest
+from database import DSN
 
 import rfnry_thread
 from rfnry_thread import Identity, PostgresStorage, Server
 
 DOCS = Path(__file__).parents[4] / "docs" / "thread.md"
 EXAMPLES = Path(__file__).parents[4] / "examples"
+QUICKSTART = "postgresql://postgres:thread@localhost:5432/postgres"
 BLOCKS: list[tuple[str, str]] = re.findall(
     r"```(\w*)\n(.*?)```", DOCS.read_text(encoding="utf-8"), re.S
 )
@@ -50,6 +53,7 @@ async def context(storage: PostgresStorage) -> dict[str, Any]:
     message = await ana.send(thread.id, "My invoice was charged twice.")
     return {
         **{name: getattr(rfnry_thread, name) for name in rfnry_thread.__all__},
+        "asyncpg": asyncpg,
         "server": server,
         "ana": ana,
         "helper": helper,
@@ -88,12 +92,19 @@ def test_every_example_a_reason_names_exists() -> None:
 async def test_the_block_runs(block: str, storage: PostgresStorage) -> None:
     namespace = await context(storage)
     opened = [namespace["ana"], namespace["helper"]]
-    code = compile(block, "<docs/thread.md>", "exec", flags=ast.PyCF_ALLOW_TOP_LEVEL_AWAIT)
+    code = compile(
+        block.replace(QUICKSTART, DSN),
+        "<docs/thread.md>",
+        "exec",
+        flags=ast.PyCF_ALLOW_TOP_LEVEL_AWAIT,
+    )
     result = eval(code, namespace)
     if inspect.iscoroutine(result):
         await result
     for client in [*opened, namespace["ana"], namespace["helper"]]:
         await client.close()
+    if "pool" in namespace:
+        await namespace["pool"].close()
 
 
 @pytest.mark.parametrize(

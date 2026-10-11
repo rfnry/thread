@@ -9,7 +9,6 @@ from rfnry_thread.errors import (
     ThreadException,
     TransportError,
 )
-from rfnry_thread.inmemory import InMemoryStorage
 from rfnry_thread.models import (
     Audio,
     Cancel,
@@ -98,7 +97,6 @@ __all__ = [
     "Tool",
     "Tools",
     "Storage",
-    "InMemoryStorage",
     "PostgresStorage",
     "ThreadException",
     "NotFoundError",

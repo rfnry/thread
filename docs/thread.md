@@ -117,8 +117,17 @@ A **signal** is ephemeral. Every signal carries `thread_id` and `sender`, stampe
 
 ## Getting started
 
+Threads live in Postgres. Start one:
+
+```bash
+docker run -d --name thread-postgres -e POSTGRES_PASSWORD=thread -p 5432:5432 postgres:16
+```
+
 ```python
-server = Server(InMemoryStorage())
+pool = await asyncpg.create_pool("postgresql://postgres:thread@localhost:5432/postgres")
+storage = PostgresStorage(pool)
+await storage.initialize()
+server = Server(storage)
 
 ana = await server.connect(identity=Identity(role="user", id="ana", name="Ana"), scope="acme")
 helper = await server.connect(identity=Identity(role="assistant", id="helper", name="Helper"), scope="acme")
@@ -134,7 +143,7 @@ async for item in helper.events():
         break
 ```
 
-A server over a storage, and two participants connected to it in the same process. A browser or an
+A server over Postgres, and two participants connected to it in the same process. A browser or an
 assistant elsewhere reaches the same server over a WebSocket and gets the same `Client`
 ([Many replicas](#many-replicas) and [The TypeScript client](#the-typescript-client)).
 
@@ -441,8 +450,6 @@ replica that stops repeating — it crashed — is forgotten within thirty. A mi
 latency, never an event: resume reads from storage. A replica whose `LISTEN` connection drops takes
 another with jittered backoff, listens again and repeats its own state at once, so the others
 rebuild it. `start()` holds one connection from the pool for `LISTEN`; `stop()` gives it back.
-Servers sharing one `InMemoryStorage` in one process link the same way, which is how the tests run
-two replicas without a database.
 
 #### One handler per thread
 
@@ -649,11 +656,10 @@ run = await engine.run("support", scope="acme", input=message.content,
 
 ## Storage
 
-Two storages ship: `InMemoryStorage()` for tests, examples and one process, `PostgresStorage(pool)`
-for everything else, taking an asyncpg-compatible pool you built (`rfnry-thread[postgres]` installs
-asyncpg). `initialize()` creates three tables — `thread_threads`, `thread_members`, `thread_events`
-— and is safe to run again. The prefix lets one database and one pool serve rfnry-engine's and
-rfnry-memory's tables too:
+Postgres is the storage: `PostgresStorage(pool)` takes an asyncpg-compatible pool you built
+(`rfnry-thread[postgres]` installs asyncpg). `initialize()` creates four tables — `thread_threads`,
+`thread_members`, `thread_events`, `thread_marks` — and is safe to run again. The prefix lets one
+database and one pool serve rfnry-engine's and rfnry-memory's tables too:
 
 ```python
 pool = await asyncpg.create_pool(dsn)
@@ -662,9 +668,10 @@ await storage.initialize()
 server = Server(storage)
 ```
 
-`Storage` is the protocol both implement; `scope` is the first argument of every method that reads
-or writes a row. The log is append-only: an event is never updated or deleted on its own, only with
-its thread or its scope.
+`Storage` is the protocol `PostgresStorage` implements; a storage of your own implements it too, and
+`Server` takes it the same way. `scope` is the first argument of every method that reads or writes a
+row. The log is append-only: an event is never updated or deleted on its own, only with its thread
+or its scope.
 
 ## Tenancy
 
@@ -689,7 +696,7 @@ Everything the package exports, by role.
 - **The log:** `Message`, `Step`, `Edit`, `Retract`, `Read`, `MemberAdded`, `MemberRemoved`, `ThreadUpdated`, `Custom`, `Event`; `resolve`.
 - **Right now:** `Working`, `Idle`, `StreamStart`, `StreamDelta`, `StreamEnd`, `Cancel`, `Present`, `Left`, `Invited`, `Marked`, `ThreadDeleted`, `Signal`.
 - **Give models a thread:** `ThreadTools`, `Tool`, `Tools`.
-- **Store:** `Storage`, `InMemoryStorage`, `PostgresStorage`.
+- **Store:** `Storage`, `PostgresStorage`.
 - **Fail loudly:** `ThreadException`, `NotFoundError`, `InputError`, `ConfigurationError`, `ForbiddenError`, `StorageError`, `TransportError`.
 
 The TypeScript package is a client: it exports `connect`, the `Client` and `Stream` classes,

@@ -51,7 +51,6 @@ EXPECTED = {
     "Tool",
     "Tools",
     "Storage",
-    "InMemoryStorage",
     "PostgresStorage",
     "ThreadException",
     "NotFoundError",
