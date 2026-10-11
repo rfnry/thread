@@ -7,11 +7,16 @@ Acme Home's support assistant, in a chat with one customer in the customer's own
 ## Running
 
 ```bash
+docker run -d --name rfnry-thread-pg -e POSTGRES_USER=thread -e POSTGRES_PASSWORD=thread -p 55436:5432 postgres:16-alpine
+export RFNRY_EXAMPLES_POSTGRES_URL=postgresql://thread:thread@127.0.0.1:55436/thread
 export ANTHROPIC_API_KEY=...
 npm --prefix ../../packages/typescript install
 npm --prefix ../../packages/typescript run build
 uv run src/main.py
 ```
+
+Threads are stored in that Postgres and outlive a restart; `docker start rfnry-thread-pg` starts it
+again after a reboot.
 
 ## Example
 

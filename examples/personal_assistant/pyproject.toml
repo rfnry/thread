@@ -3,7 +3,7 @@ name = "personal_assistant"
 version = "0"
 requires-python = ">=3.12"
 dependencies = [
-    "rfnry-thread",
+    "rfnry-thread[postgres]",
     "rfnry-engine",
     "anthropic",
     "fastapi",

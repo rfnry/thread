@@ -1,16 +1,23 @@
 import asyncio
 
-from rfnry_thread import Client, Identity, InMemoryStorage, Message, Server
+from rfnry_thread import Client, Identity, Message, PostgresStorage, Server
 
 import harness
 
 SCOPE = "jordan"
 ASSISTANT = Identity(role="assistant", id="assistant", name="Assistant")
 
-server = Server(InMemoryStorage())
+server: Server
 assistants: dict[str, Client] = {}
 conversations: dict[str, list] = {}
 running: set[asyncio.Task] = set()
+
+
+async def setup(pool) -> None:
+    global server
+    storage = PostgresStorage(pool)
+    await storage.initialize()
+    server = Server(storage)
 
 
 def person(name: str) -> Identity:

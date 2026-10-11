@@ -1,6 +1,6 @@
 import asyncio
 
-from rfnry_thread import Client, Identity, InMemoryStorage, Invited, Message, Server, Text, Thread
+from rfnry_thread import Client, Identity, Invited, Message, PostgresStorage, Server, Text, Thread
 
 import harness
 from utils import mask, slug
@@ -13,9 +13,16 @@ async def redact(author: Identity, thread: Thread, content: list) -> list:
     return [Text(text=mask(part.text)) if part.type == "text" else part for part in content]
 
 
-server = Server(InMemoryStorage(), redact=redact)
+server: Server
 conversations: dict[str, list] = {}
 running: set[asyncio.Task] = set()
+
+
+async def setup(pool) -> None:
+    global server
+    storage = PostgresStorage(pool)
+    await storage.initialize()
+    server = Server(storage, redact=redact)
 
 
 def person(name: str) -> Identity:

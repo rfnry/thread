@@ -1,18 +1,25 @@
 import asyncio
 
 from rfnry_engine import Stop, TextDelta, ToolCallStarted, ToolResultReady
-from rfnry_thread import Cancel, Client, Identity, InMemoryStorage, Message, Server
+from rfnry_thread import Cancel, Client, Identity, Message, PostgresStorage, Server
 
 import harness
 
 SCOPE = "acme-home"
 ASSISTANT = Identity(role="assistant", id="support", name="Acme Home support")
 
-server = Server(InMemoryStorage())
+server: Server
 conversations: dict[str, list] = {}
 turns: dict[str, asyncio.Lock] = {}
 stops: dict[str, Stop] = {}
 running: set[asyncio.Task] = set()
+
+
+async def setup(pool) -> None:
+    global server
+    storage = PostgresStorage(pool)
+    await storage.initialize()
+    server = Server(storage)
 
 
 def person(name: str) -> Identity:

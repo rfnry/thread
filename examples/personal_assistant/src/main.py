@@ -1,7 +1,9 @@
 import asyncio
+import os
 from contextlib import asynccontextmanager
 from pathlib import Path
 
+import asyncpg
 import uvicorn
 from fastapi import FastAPI
 from fastapi.staticfiles import StaticFiles
@@ -14,9 +16,11 @@ ROOT = Path(__file__).resolve().parent.parent
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    listening = asyncio.create_task(server.listen())
-    yield
-    listening.cancel()
+    async with asyncpg.create_pool(os.environ["RFNRY_EXAMPLES_POSTGRES_URL"]) as pool:
+        await server.setup(pool)
+        listening = asyncio.create_task(server.listen())
+        yield
+        listening.cancel()
 
 
 app = FastAPI(lifespan=lifespan)

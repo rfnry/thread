@@ -2,7 +2,7 @@ import asyncio
 import json
 from pathlib import Path
 
-from rfnry_thread import Client, Identity, InMemoryStorage, Invited, Message, Server, ThreadTools
+from rfnry_thread import Client, Identity, Invited, Message, PostgresStorage, Server, ThreadTools
 
 import harness
 
@@ -11,8 +11,15 @@ PLANT = json.loads((ROOT / "data" / "plant.json").read_text())["plant"]
 SCOPE = "plant-reno"
 ASSISTANT = Identity(role="assistant", id="maintenance", name="Maintenance")
 
-server = Server(InMemoryStorage())
+server: Server
 running: set[asyncio.Task] = set()
+
+
+async def setup(pool) -> None:
+    global server
+    storage = PostgresStorage(pool)
+    await storage.initialize()
+    server = Server(storage)
 
 
 def person(name: str) -> Identity:
