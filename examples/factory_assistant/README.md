@@ -15,8 +15,8 @@ npm --prefix ../../packages/typescript run build
 uv run src/main.py
 ```
 
-Threads are stored in that Postgres and outlive a restart; `docker start rfnry-thread-pg` starts it
-again after a reboot.
+Threads are stored in that Postgres and outlive a restart (`docker start rfnry-thread-pg` once the
+container exists).
 
 ## Example
 
