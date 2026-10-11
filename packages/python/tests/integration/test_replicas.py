@@ -3,26 +3,27 @@ from collections.abc import AsyncIterator
 from datetime import UTC, datetime
 from typing import Any
 
+import asyncpg
 import pytest
-from database import open_pool
+from database import SCHEMA, URL, open_pool
 from unit.conftest import say
 from unit.factories import ANA, HELPER
 from unit.peer import Peer
 from until import until
 
-from rfnry_thread import postgres
 from rfnry_thread.models import Identity, Message, Part, Text, Thread
 from rfnry_thread.postgres import PostgresStorage
 from rfnry_thread.server import Server
 
 
 async def listeners(pool: Any) -> list[int]:
+    _, signals = await PostgresStorage(pool)._channels()
     async with pool.acquire() as conn:
         rows = await conn.fetch(
             "SELECT pid FROM pg_stat_activity WHERE datname = current_database() "
             "AND application_name = current_setting('application_name') "
             "AND pid <> pg_backend_pid() AND query = $1",
-            f'LISTEN "{postgres.SIGNALS_CHANNEL}"',
+            f'LISTEN "{signals}"',
         )
     return [row["pid"] for row in rows]
 
@@ -252,3 +253,50 @@ async def test_a_membership_added_on_one_replica_reaches_a_follower_on_another(
     pushes = await helper.quiet(0.5)
     assert [j["thread"]["id"] for j in helper.joined] == ["t1"]
     assert [p["content"][0]["text"] for p in pushes if p["kind"] == "message"] == ["across"]
+
+
+async def test_deployments_in_different_schemas_do_not_hear_each_other(
+    pool: Any, storage: PostgresStorage
+) -> None:
+    other = f"{SCHEMA}_other"
+    admin = await asyncpg.connect(URL, timeout=5)
+    await admin.execute(f"CREATE SCHEMA {other}")
+    dsn = f"{URL}{'&' if '?' in URL else '?'}search_path={other}"
+    other_pool = await asyncpg.create_pool(dsn, min_size=1, max_size=4, timeout=5)
+    sibling_pool = await open_pool()
+    stops = []
+    try:
+        foreign = PostgresStorage(other_pool)
+        sibling = PostgresStorage(sibling_pool)
+        assert await foreign._channels() != await storage._channels()
+        assert await sibling._channels() == await storage._channels()
+        heard: dict[str, list[dict[str, Any]]] = {"near": [], "sibling": [], "foreign": []}
+        events: list[int] = []
+
+        def listener(name: str) -> Any:
+            async def on_signal(scope: str, thread_id: str, payload: dict[str, Any]) -> None:
+                heard[name].append(payload)
+
+            return on_signal
+
+        async def on_event(scope: str, thread_id: str, seq: int) -> None:
+            events.append(seq)
+
+        for name, store in (("near", storage), ("sibling", sibling), ("foreign", foreign)):
+            stops.append(await store.listen(on_event, listener(name)))
+        await storage.publish("acme", "t1", {"kind": "idle"})
+        await until(lambda: bool(heard["near"] and heard["sibling"]))
+        await asyncio.sleep(0.3)
+        assert heard["near"] == heard["sibling"] == [{"kind": "idle"}]
+        assert heard["foreign"] == []
+        await foreign.publish("acme", "t1", {"kind": "working"})
+        await asyncio.sleep(0.3)
+        assert heard["foreign"] == [{"kind": "working"}]
+        assert heard["near"] == [{"kind": "idle"}]
+    finally:
+        for stop in stops:
+            await stop()
+        await asyncio.wait_for(other_pool.close(), 5)
+        await asyncio.wait_for(sibling_pool.close(), 5)
+        await admin.execute(f"DROP SCHEMA {other} CASCADE")
+        await admin.close()

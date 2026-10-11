@@ -6,11 +6,7 @@ import asyncpg
 import pytest
 from database import SCHEMA, TABLES, URL, open_pool
 
-from rfnry_thread import postgres
 from rfnry_thread.postgres import PostgresStorage
-
-postgres.EVENTS_CHANNEL = f"{SCHEMA}_events"
-postgres.SIGNALS_CHANNEL = f"{SCHEMA}_signals"
 
 START = (
     "start the database with `docker start rfnry-thread-pg` and set "

@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import hashlib
 import json
 import random
 from collections.abc import AsyncIterator, Sequence
@@ -13,8 +14,8 @@ from rfnry_thread.models import EVENTS, Event, Member, Order, Thread
 from rfnry_thread.resolve import last_message
 from rfnry_thread.storage import PREVIEW_DEPTH, UNREAD_CAP, OnEvent, OnResume, OnSignal, Stop
 
-EVENTS_CHANNEL = "thread_events"
-SIGNALS_CHANNEL = "thread_signals"
+EVENTS_PREFIX = "thread_events_"
+SIGNALS_PREFIX = "thread_signals_"
 NOTIFY_LIMIT = 7900
 RELISTEN = 0.5
 RELISTEN_CAP = 30.0
@@ -104,6 +105,15 @@ def _count(status: str) -> int:
 class PostgresStorage:
     def __init__(self, pool: Any) -> None:
         self._pool = pool
+        self._names: tuple[str, str] | None = None
+
+    async def _channels(self) -> tuple[str, str]:
+        if self._names is None:
+            async with self._guard("channels"), self._pool.acquire() as conn:
+                schema = await conn.fetchval("SELECT current_schema()")
+            tag = hashlib.sha256(schema.encode()).hexdigest()[:12]
+            self._names = (f"{EVENTS_PREFIX}{tag}", f"{SIGNALS_PREFIX}{tag}")
+        return self._names
 
     @asynccontextmanager
     async def _guard(self, operation: str) -> AsyncIterator[None]:
@@ -307,6 +317,7 @@ class PostgresStorage:
             )
 
     async def append_event(self, scope: str, event: Event) -> tuple[Event, bool]:
+        events_channel, _ = await self._channels()
         async with self._guard("append_event"), self._pool.acquire() as conn, conn.transaction():
             last = await conn.fetchval(
                 "SELECT last_seq FROM thread_threads WHERE scope = $1 AND id = $2 FOR UPDATE",
@@ -355,7 +366,7 @@ class PostgresStorage:
                 )
             await conn.execute(
                 "SELECT pg_notify($1, $2)",
-                EVENTS_CHANNEL,
+                events_channel,
                 json.dumps({"s": scope, "t": stored.thread_id, "q": stored.seq}),
             )
         return stored, True
@@ -486,13 +497,14 @@ class PostgresStorage:
     async def listen(
         self, on_event: OnEvent, on_signal: OnSignal, on_resume: OnResume | None = None
     ) -> Stop:
+        events_channel, signals_channel = await self._channels()
         tasks: set[asyncio.Future[None]] = set()
         lost = asyncio.Event()
         held: list[Any] = [None]
 
         def receive(_connection: Any, _pid: int, channel: str, text: str) -> None:
             data = json.loads(text)
-            if channel == EVENTS_CHANNEL:
+            if channel == events_channel:
                 future = asyncio.ensure_future(on_event(data["s"], data["t"], int(data["q"])))
             else:
                 future = asyncio.ensure_future(on_signal(data["s"], data["t"], data["p"]))
@@ -506,8 +518,8 @@ class PostgresStorage:
             conn = await self._pool.acquire()
             try:
                 conn.add_termination_listener(terminated)
-                await conn.add_listener(EVENTS_CHANNEL, receive)
-                await conn.add_listener(SIGNALS_CHANNEL, receive)
+                await conn.add_listener(events_channel, receive)
+                await conn.add_listener(signals_channel, receive)
             except BaseException:
                 with contextlib.suppress(Exception):
                     await self._pool.release(conn)
@@ -520,8 +532,8 @@ class PostgresStorage:
                 return
             with contextlib.suppress(Exception):
                 conn.remove_termination_listener(terminated)
-                await conn.remove_listener(EVENTS_CHANNEL, receive)
-                await conn.remove_listener(SIGNALS_CHANNEL, receive)
+                await conn.remove_listener(events_channel, receive)
+                await conn.remove_listener(signals_channel, receive)
             with contextlib.suppress(Exception):
                 await self._pool.release(conn)
 
@@ -561,5 +573,6 @@ class PostgresStorage:
             raise StorageError(
                 f"postgres: a notification is at most {NOTIFY_LIMIT} bytes; this one is {size}"
             )
+        _, signals_channel = await self._channels()
         async with self._guard("publish"), self._pool.acquire() as conn:
-            await conn.execute("SELECT pg_notify($1, $2)", SIGNALS_CHANNEL, text)
+            await conn.execute("SELECT pg_notify($1, $2)", signals_channel, text)
