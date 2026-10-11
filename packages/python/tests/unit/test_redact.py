@@ -5,7 +5,6 @@ import pytest
 
 from rfnry_thread.client import Client
 from rfnry_thread.errors import ConfigurationError, InputError, ThreadException
-from rfnry_thread.inmemory import InMemoryStorage
 from rfnry_thread.models import (
     Custom,
     Edit,
@@ -19,6 +18,7 @@ from rfnry_thread.models import (
     Text,
     Thread,
 )
+from rfnry_thread.postgres import PostgresStorage
 from rfnry_thread.resolve import resolve
 from rfnry_thread.server import Server
 
@@ -42,20 +42,21 @@ class Redactor:
         return [Text(text=mask(p.text)) if isinstance(p, Text) else p for p in content]
 
 
-async def served(redact: Any) -> tuple[InMemoryStorage, Server, Client, Client]:
-    storage = InMemoryStorage()
+async def served(storage: PostgresStorage, redact: Any) -> tuple[Server, Client, Client]:
     server = Server(storage, redact=redact)
     ana, helper = await pair(server)
-    return storage, server, ana, helper
+    return server, ana, helper
 
 
-async def stored(storage: InMemoryStorage) -> str:
+async def stored(storage: PostgresStorage) -> str:
     return str(await storage.list_events("acme", "t1", limit=500))
 
 
-async def test_what_is_stored_delivered_returned_and_resolved_is_the_redacted_form() -> None:
+async def test_what_is_stored_delivered_returned_and_resolved_is_the_redacted_form(
+    storage: PostgresStorage,
+) -> None:
     redactor = Redactor()
-    storage, _, ana, helper = await served(redactor)
+    _, ana, helper = await served(storage, redactor)
     image = Image(media_type="image/png", url="https://files.example.com/card.png")
     sent = await ana.send("t1", [Text(text=f"My card is {CARD}."), image])
     assert sent.content == [Text(text=f"My card is {MASKED}."), image]
@@ -72,8 +73,10 @@ async def test_what_is_stored_delivered_returned_and_resolved_is_the_redacted_fo
     assert len(redactor.calls) == 2
 
 
-async def test_the_message_a_stream_ends_in_is_redacted_and_its_deltas_are_not() -> None:
-    storage, _, ana, helper = await served(Redactor())
+async def test_the_message_a_stream_ends_in_is_redacted_and_its_deltas_are_not(
+    storage: PostgresStorage,
+) -> None:
+    _, ana, helper = await served(storage, Redactor())
     async with helper.stream("t1") as reply:
         await reply.write(f"Your card {CARD} ")
         await reply.write("was refunded.")
@@ -85,9 +88,11 @@ async def test_the_message_a_stream_ends_in_is_redacted_and_its_deltas_are_not()
     assert message.client_id == reply.id and CARD not in await stored(storage)
 
 
-async def test_metadata_custom_payloads_and_steps_are_the_writers_own_and_not_redacted() -> None:
+async def test_metadata_custom_payloads_and_steps_are_the_writers_own_and_not_redacted(
+    storage: PostgresStorage,
+) -> None:
     redactor = Redactor()
-    _, _, ana, helper = await served(redactor)
+    _, ana, helper = await served(storage, redactor)
     sent = await ana.send("t1", "hi", metadata={"card": CARD})
     custom = await ana.custom("t1", "payment", {"card": CARD})
     step = await helper.step("t1", name="Charge", input={"card": CARD}, output=[Text(text=CARD)])
@@ -98,16 +103,20 @@ async def test_metadata_custom_payloads_and_steps_are_the_writers_own_and_not_re
     assert len(redactor.calls) == 1
 
 
-async def test_a_repeated_client_id_returns_the_stored_event_without_redacting_again() -> None:
+async def test_a_repeated_client_id_returns_the_stored_event_without_redacting_again(
+    storage: PostgresStorage,
+) -> None:
     redactor = Redactor()
-    _, _, ana, _ = await served(redactor)
+    _, ana, _ = await served(storage, redactor)
     first = await ana.send("t1", f"card {CARD}", client_id="c1")
     again = await ana.send("t1", f"card {CARD}", client_id="c1")
     assert again == first and len(redactor.calls) == 1
     assert [e.id for e in await ana.history("t1") if isinstance(e, Message)] == [first.id]
 
 
-async def test_raising_refuses_the_write_and_the_sender_gets_the_error_once() -> None:
+async def test_raising_refuses_the_write_and_the_sender_gets_the_error_once(
+    storage: PostgresStorage,
+) -> None:
     calls: list[str] = []
 
     async def refuse(author: Identity, thread: Thread, content: list[Part]) -> list[Part]:
@@ -117,7 +126,7 @@ async def test_raising_refuses_the_write_and_the_sender_gets_the_error_once() ->
             raise InputError("redact: a social security number cannot be sent here")
         raise RuntimeError(f"scanner is down while reading {text}")
 
-    storage, _, ana, helper = await served(refuse)
+    _, ana, helper = await served(storage, refuse)
     with pytest.raises(InputError, match="^redact: a social security number cannot be sent here$"):
         await ana.send("t1", "my ssn is 078-05-1120")
     with pytest.raises(ThreadException, match="^server: request failed$") as failed:
@@ -133,11 +142,13 @@ async def test_raising_refuses_the_write_and_the_sender_gets_the_error_once() ->
     assert "078-05-1120" not in await stored(storage) and CARD not in await stored(storage)
 
 
-async def test_a_refused_finishing_message_ends_the_stream_with_nothing_stored() -> None:
+async def test_a_refused_finishing_message_ends_the_stream_with_nothing_stored(
+    storage: PostgresStorage,
+) -> None:
     async def refuse(author: Identity, thread: Thread, content: list[Part]) -> list[Part]:
         raise InputError("redact: refused")
 
-    _, _, ana, helper = await served(refuse)
+    _, ana, helper = await served(storage, refuse)
     with pytest.raises(InputError, match="^redact: refused$"):
         async with helper.stream("t1") as reply:
             await reply.write("secret")
@@ -146,13 +157,12 @@ async def test_a_refused_finishing_message_ends_the_stream_with_nothing_stored()
     assert not any(isinstance(i, Message) for i in items)
 
 
-async def test_what_redact_returns_is_validated_like_any_content() -> None:
+async def test_what_redact_returns_is_validated_like_any_content(storage: PostgresStorage) -> None:
     returned: list[Any] = []
 
     async def odd(author: Identity, thread: Thread, content: list[Part]) -> Any:
         return returned[0]
 
-    storage = InMemoryStorage()
     server = Server(storage, redact=odd, max_inline_bytes=4)
     ana, _ = await pair(server)
     returned[:] = ["masked"]
@@ -178,9 +188,11 @@ async def test_what_redact_returns_is_validated_like_any_content() -> None:
     assert [m.content for m in messages] == [[Text(text="fine")]]
 
 
-async def test_every_writer_passes_through_it_and_membership_events_do_not() -> None:
+async def test_every_writer_passes_through_it_and_membership_events_do_not(
+    storage: PostgresStorage,
+) -> None:
     redactor = Redactor()
-    storage, server, _, _ = await served(redactor)
+    server, _, _ = await served(storage, redactor)
     await server.create_thread("acme", thread_id="t2", metadata={"channel": "support"})
     await server.add_member("acme", "t2", HELPER)
     assistant = await server.connect(identity=HELPER, scope="acme")

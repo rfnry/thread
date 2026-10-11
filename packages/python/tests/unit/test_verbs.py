@@ -5,9 +5,9 @@ from typing import Any
 import pytest
 
 from rfnry_thread.errors import ConfigurationError, ForbiddenError, InputError, NotFoundError
-from rfnry_thread.inmemory import InMemoryStorage
 from rfnry_thread.models import Identity, Thread
 from rfnry_thread.pipe import pipe
+from rfnry_thread.postgres import PostgresStorage
 from rfnry_thread.server import Server
 from rfnry_thread.tools import ThreadTools
 
@@ -109,7 +109,7 @@ async def test_authorship_is_stamped_and_a_repeat_is_answered_with_the_stored_ev
 
 
 async def test_events_are_validated_before_they_are_stored(
-    server: Server, storage: InMemoryStorage
+    server: Server, storage: PostgresStorage
 ) -> None:
     small = Server(storage, max_inline_bytes=4)
     ana = await room(small)
@@ -235,7 +235,7 @@ async def test_history_pages_back_and_filters(server: Server) -> None:
         await ana.call("thread.history", thread_id="t1", limit=0)
 
 
-async def test_authorize_decides_each_of_the_five_actions(storage: InMemoryStorage) -> None:
+async def test_authorize_decides_each_of_the_five_actions(storage: PostgresStorage) -> None:
     asked: list[tuple[str, str]] = []
 
     async def authorize(identity: Identity, action: str, thread: Thread) -> bool:
@@ -252,7 +252,7 @@ async def test_authorize_decides_each_of_the_five_actions(storage: InMemoryStora
 
 
 async def test_listing_skips_what_authorize_refuses_and_reads_on_to_fill_the_page(
-    storage: InMemoryStorage,
+    storage: PostgresStorage,
 ) -> None:
     async def authorize(identity: Identity, action: str, thread: Thread) -> bool:
         return not (action == "read" and thread.metadata.get("archived"))
@@ -319,9 +319,9 @@ async def test_a_removed_member_stops_receiving_over_the_server(server: Server) 
     ] == ["member_removed"]
 
 
-class HeldAtTheDoor(InMemoryStorage):
-    def __init__(self, who: str) -> None:
-        super().__init__()
+class HeldAtTheDoor(PostgresStorage):
+    def __init__(self, pool: Any, who: str) -> None:
+        super().__init__(pool)
         self.who: str | None = who
         self.waiting = asyncio.Event()
         self.release = asyncio.Event()
@@ -335,8 +335,8 @@ class HeldAtTheDoor(InMemoryStorage):
         return answer
 
 
-async def test_a_member_removed_while_joining_is_refused_and_receives_nothing() -> None:
-    storage = HeldAtTheDoor("bruno")
+async def test_a_member_removed_while_joining_is_refused_and_receives_nothing(pool: Any) -> None:
+    storage = HeldAtTheDoor(pool, "bruno")
     server = Server(storage)
     ana = await room(server, BRUNO)
     bruno = await Peer.open(server, BRUNO)
@@ -380,7 +380,7 @@ async def test_the_server_verbs_act_as_the_system(server: Server) -> None:
 
 
 async def test_the_server_updates_metadata_and_removes_members_as_the_system(
-    storage: InMemoryStorage,
+    storage: PostgresStorage,
 ) -> None:
     asked: list[str] = []
 
@@ -460,7 +460,7 @@ async def test_the_server_lists_every_thread_of_a_scope_by_metadata(server: Serv
 
 
 async def test_the_servers_list_never_asks_authorize_while_a_members_list_does(
-    storage: InMemoryStorage,
+    storage: PostgresStorage,
 ) -> None:
     asked: list[tuple[str, str]] = []
 
@@ -492,7 +492,7 @@ async def test_a_members_own_list_is_unchanged_and_takes_no_metadata(server: Ser
 
 @pytest.mark.parametrize("scope", ["", " "])
 async def test_every_way_a_scope_enters_the_server_refuses_an_empty_one_and_stores_nothing(
-    storage: InMemoryStorage, server: Server, scope: str
+    storage: PostgresStorage, server: Server, scope: str
 ) -> None:
     await server.create_thread("acme", thread_id="t1")
     _, theirs = pipe()
@@ -544,7 +544,7 @@ async def test_an_empty_thread_id_names_no_thread_except_where_a_thread_is_creat
 
 
 async def test_creating_an_existing_thread_returns_it_only_to_a_member_who_may_read_it(
-    storage: InMemoryStorage,
+    storage: PostgresStorage,
 ) -> None:
     async def authorize(identity: Identity, action: str, thread: Thread) -> bool:
         return not (identity.id == "helper" and action == "read")

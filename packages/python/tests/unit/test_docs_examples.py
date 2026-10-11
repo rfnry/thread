@@ -7,7 +7,7 @@ from typing import Any
 import pytest
 
 import rfnry_thread
-from rfnry_thread import Identity, InMemoryStorage, Server
+from rfnry_thread import Identity, PostgresStorage, Server
 
 DOCS = Path(__file__).parents[4] / "docs" / "thread.md"
 EXAMPLES = Path(__file__).parents[4] / "examples"
@@ -37,8 +37,8 @@ async def now(args: dict[str, Any]) -> str:
     return "2026-09-24T12:00:00Z"
 
 
-async def context() -> dict[str, Any]:
-    server = Server(InMemoryStorage())
+async def context(storage: PostgresStorage) -> dict[str, Any]:
+    server = Server(storage)
     ana = await server.connect(identity=Identity(role="user", id="ana", name="Ana"), scope="acme")
     helper = await server.connect(
         identity=Identity(role="assistant", id="helper", name="Helper"), scope="acme"
@@ -55,7 +55,7 @@ async def context() -> dict[str, Any]:
         "helper": helper,
         "thread": thread,
         "message": message,
-        "storage": InMemoryStorage(),
+        "storage": storage,
         "now": now,
         "wav": b"RIFF",
         "url": "https://files.example.com/receipt.png",
@@ -85,8 +85,8 @@ def test_every_example_a_reason_names_exists() -> None:
 
 
 @pytest.mark.parametrize("block", runnable())
-async def test_the_block_runs(block: str) -> None:
-    namespace = await context()
+async def test_the_block_runs(block: str, storage: PostgresStorage) -> None:
+    namespace = await context(storage)
     opened = [namespace["ana"], namespace["helper"]]
     code = compile(block, "<docs/thread.md>", "exec", flags=ast.PyCF_ALLOW_TOP_LEVEL_AWAIT)
     result = eval(code, namespace)

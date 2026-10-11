@@ -8,7 +8,6 @@ from until import until
 
 from rfnry_thread.client import Client, Item
 from rfnry_thread.errors import ConfigurationError, ForbiddenError, InputError, TransportError
-from rfnry_thread.inmemory import InMemoryStorage
 from rfnry_thread.models import (
     SYSTEM,
     Cancel,
@@ -33,6 +32,7 @@ from rfnry_thread.models import (
     Thread,
     Working,
 )
+from rfnry_thread.postgres import PostgresStorage
 from rfnry_thread.protocol import Push
 from rfnry_thread.resolve import resolve
 from rfnry_thread.server import Server
@@ -361,7 +361,7 @@ async def test_mark_returns_the_stored_position_and_tells_the_markers_other_clie
 
 
 async def test_marked_reads_the_callers_own_mark_without_moving_it(
-    server: Server, storage: InMemoryStorage
+    server: Server, storage: PostgresStorage
 ) -> None:
     ana = await server.connect(identity=ANA, scope="acme")
     helper = await server.connect(identity=HELPER, scope="acme")
@@ -487,7 +487,7 @@ async def test_overlapping_joins_since_a_followed_thread_each_replay_their_own_w
 
 
 async def test_a_failed_join_keeps_the_cursor_of_a_thread_the_client_follows(
-    storage: InMemoryStorage,
+    storage: PostgresStorage,
 ) -> None:
     refusing = False
 
@@ -565,7 +565,7 @@ async def test_a_follower_that_joins_with_resume_reads_the_thread_from_its_mark_
 
 
 async def test_a_join_with_resume_beyond_the_replay_limit_hands_the_mark_to_read_the_rest(
-    storage: InMemoryStorage,
+    storage: PostgresStorage,
 ) -> None:
     server = Server(storage, replay_limit=2)
     ana = await server.connect(identity=ANA, scope="acme")

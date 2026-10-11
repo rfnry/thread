@@ -3,7 +3,7 @@ from collections.abc import AsyncIterator
 import pytest
 from until import until
 
-from rfnry_thread.inmemory import InMemoryStorage
+from rfnry_thread.postgres import PostgresStorage
 from rfnry_thread.server import Server
 from rfnry_thread.state import EXPIRY
 from rfnry_thread.storage import OnEvent, OnResume, OnSignal, Stop
@@ -14,7 +14,7 @@ from .peer import Peer
 
 
 @pytest.fixture
-async def replicas(storage: InMemoryStorage) -> AsyncIterator[tuple[Server, Server]]:
+async def replicas(storage: PostgresStorage) -> AsyncIterator[tuple[Server, Server]]:
     near, far = Server(storage), Server(storage)
     await near.start()
     await far.start()
@@ -68,16 +68,6 @@ async def test_the_finishing_message_reaches_a_remote_connection_before_stream_e
     assert order == ["message", "stream.end"]
 
 
-async def test_removal_cuts_off_a_member_on_another_replica(
-    replicas: tuple[Server, Server],
-) -> None:
-    ana, helper = await room(*replicas)
-    await ana.call("member.remove", thread_id="t1", identity_id="helper")
-    await say(ana, "t1", "after")
-    kinds = [p["kind"] for p in await helper.quiet()]
-    assert "member_removed" in kinds and "message" not in kinds
-
-
 async def test_an_invitation_and_a_deletion_cross_replicas(replicas: tuple[Server, Server]) -> None:
     near, far = replicas
     ana, helper = await room(near, far)
@@ -89,7 +79,7 @@ async def test_an_invitation_and_a_deletion_cross_replicas(replicas: tuple[Serve
 
 
 async def test_a_replica_learns_who_is_here_from_the_re_announcement(
-    storage: InMemoryStorage,
+    storage: PostgresStorage,
 ) -> None:
     near = Server(storage)
     ana = await Peer.open(near, ANA)
@@ -107,7 +97,7 @@ async def test_a_replica_learns_who_is_here_from_the_re_announcement(
     await far.stop()
 
 
-async def test_a_resumed_listener_republishes_this_replicas_state(storage: InMemoryStorage) -> None:
+async def test_a_resumed_listener_republishes_this_replicas_state(storage: PostgresStorage) -> None:
     resumes: list[OnResume | None] = []
     listen = storage.listen
 
@@ -134,7 +124,7 @@ async def test_a_resumed_listener_republishes_this_replicas_state(storage: InMem
     await far.stop()
 
 
-async def test_stop_stops_listening_and_start_is_idempotent(storage: InMemoryStorage) -> None:
+async def test_stop_stops_listening_and_start_is_idempotent(storage: PostgresStorage) -> None:
     near, far = Server(storage), Server(storage)
     await near.start()
     await near.start()

@@ -3,8 +3,8 @@ import asyncio
 import pytest
 
 from rfnry_thread.errors import ForbiddenError, InputError
-from rfnry_thread.inmemory import InMemoryStorage
 from rfnry_thread.models import Identity, Thread
+from rfnry_thread.postgres import PostgresStorage
 from rfnry_thread.server import Server
 
 from .factories import ANA, BRUNO, HELPER
@@ -216,7 +216,7 @@ async def test_deletion_tells_the_room_and_ends_its_joins(server: Server) -> Non
         await helper.call("signal.send", thread_id="t1", kind="working")
 
 
-async def test_authorize_send_applies_to_signals_that_speak(storage: InMemoryStorage) -> None:
+async def test_authorize_send_applies_to_signals_that_speak(storage: PostgresStorage) -> None:
     async def authorize(identity: Identity, action: str, thread: Thread) -> bool:
         return not (identity.id == "helper" and action == "send")
 
@@ -226,7 +226,7 @@ async def test_authorize_send_applies_to_signals_that_speak(storage: InMemorySto
         await helper.call("signal.send", thread_id="t1", kind="working")
 
 
-async def test_a_signal_that_outlives_its_join_is_refused(storage: InMemoryStorage) -> None:
+async def test_a_signal_that_outlives_its_join_is_refused(storage: PostgresStorage) -> None:
     asked, release = asyncio.Event(), asyncio.Event()
 
     async def authorize(identity: Identity, action: str, thread: Thread) -> bool:

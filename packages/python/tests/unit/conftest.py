@@ -3,19 +3,14 @@ from typing import Any
 
 import pytest
 
-from rfnry_thread.inmemory import InMemoryStorage
+from rfnry_thread.postgres import PostgresStorage
 from rfnry_thread.server import Server
 
 from .peer import Peer
 
 
 @pytest.fixture
-def storage() -> InMemoryStorage:
-    return InMemoryStorage()
-
-
-@pytest.fixture
-def server(storage: InMemoryStorage) -> Server:
+def server(storage: PostgresStorage) -> Server:
     return Server(storage)
 
 

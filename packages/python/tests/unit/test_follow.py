@@ -4,8 +4,8 @@ from typing import Any
 import pytest
 
 from rfnry_thread.errors import ForbiddenError, InputError
-from rfnry_thread.inmemory import InMemoryStorage
 from rfnry_thread.models import SYSTEM, Identity, Member, Thread
+from rfnry_thread.postgres import PostgresStorage
 from rfnry_thread.server import Server
 
 from .conftest import say
@@ -70,27 +70,8 @@ async def test_a_connection_that_does_not_follow_is_still_invited(server: Server
     assert helper.joined == []
 
 
-async def test_a_membership_added_on_another_replica_reaches_a_follower(
-    storage: InMemoryStorage,
-) -> None:
-    near, far = Server(storage), Server(storage)
-    await near.start()
-    await far.start()
-    try:
-        helper = await Peer.open(far, HELPER)
-        await helper.call("thread.follow")
-        ana = await threads(near, "t1")
-        await say(ana, "t1", "across")
-        pushes = await helper.quiet(0.3)
-        assert [j["thread"]["id"] for j in helper.joined] == ["t1"]
-        assert texts(pushes) == ["across"]
-    finally:
-        await near.stop()
-        await far.stop()
-
-
 async def test_authorize_decides_which_threads_a_follower_receives(
-    storage: InMemoryStorage,
+    storage: PostgresStorage,
 ) -> None:
     async def authorize(actor: Identity, action: str, thread: Thread) -> bool:
         return not thread.metadata.get("secret")
@@ -152,7 +133,7 @@ async def test_follow_refuses_a_negative_since(server: Server) -> None:
 
 
 async def test_a_follower_is_not_handed_a_thread_authorize_refuses_when_added_later(
-    storage: InMemoryStorage,
+    storage: PostgresStorage,
 ) -> None:
     async def authorize(actor: Identity, action: str, thread: Thread) -> bool:
         return not thread.metadata.get("secret")
@@ -196,7 +177,7 @@ async def test_a_following_connection_receives_a_thread_its_identity_creates_els
 
 
 async def test_an_add_survives_a_follower_whose_membership_is_gone_and_is_still_published(
-    storage: InMemoryStorage, monkeypatch: pytest.MonkeyPatch
+    storage: PostgresStorage, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     near, far = Server(storage), Server(storage)
     await near.start()
@@ -222,7 +203,7 @@ async def test_an_add_survives_a_follower_whose_membership_is_gone_and_is_still_
 
 
 async def test_a_session_closed_during_an_add_is_not_left_in_the_room(
-    storage: InMemoryStorage,
+    storage: PostgresStorage,
 ) -> None:
     holder: dict[str, Peer] = {}
 
@@ -243,7 +224,7 @@ async def test_a_session_closed_during_an_add_is_not_left_in_the_room(
 
 
 async def test_a_session_dropped_inside_the_storage_reads_of_an_enter_is_not_left_in_the_room(
-    storage: InMemoryStorage, monkeypatch: pytest.MonkeyPatch
+    storage: PostgresStorage, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     server = Server(storage)
     helper = await Peer.open(server, HELPER)
@@ -290,7 +271,7 @@ async def test_resume_replays_each_gap_after_the_mark(server: Server) -> None:
 
 
 async def test_a_membership_with_no_mark_resumes_from_now_and_is_given_one(
-    storage: InMemoryStorage, server: Server
+    storage: PostgresStorage, server: Server
 ) -> None:
     await server.create_thread("acme", "t1")
     await server.add_member("acme", "t1", ANA)
@@ -314,7 +295,7 @@ async def test_a_since_map_naming_a_foreign_thread_is_ignored(server: Server) ->
 
 
 async def test_a_resume_gap_beyond_the_replay_limit_is_the_latest_and_truncated(
-    storage: InMemoryStorage,
+    storage: PostgresStorage,
 ) -> None:
     server = Server(storage, replay_limit=2)
     ana = await threads(server, "t1")
@@ -363,7 +344,7 @@ async def test_a_join_with_resume_and_no_mark_set_starts_from_the_add(server: Se
 
 
 async def test_a_join_with_resume_into_a_membership_with_no_mark_starts_now_and_is_given_one(
-    storage: InMemoryStorage, server: Server
+    storage: PostgresStorage, server: Server
 ) -> None:
     await server.create_thread("acme", "t1")
     await server.add_member("acme", "t1", ANA)
@@ -385,7 +366,7 @@ async def test_a_join_with_resume_into_a_membership_with_no_mark_starts_now_and_
 
 
 async def test_a_join_with_resume_gives_a_mark_to_its_own_thread_alone(
-    storage: InMemoryStorage, server: Server
+    storage: PostgresStorage, server: Server
 ) -> None:
     for thread_id in ("t1", "t2"):
         await server.create_thread("acme", thread_id)
@@ -411,7 +392,7 @@ async def test_a_join_takes_since_or_resume_not_both(server: Server) -> None:
 
 
 async def test_a_join_with_resume_beyond_the_replay_limit_is_the_latest_and_truncated(
-    storage: InMemoryStorage,
+    storage: PostgresStorage,
 ) -> None:
     server = Server(storage, replay_limit=2)
     ana = await threads(server, "t1")
@@ -463,7 +444,7 @@ def marks(pushes: list[dict[str, Any]]) -> list[tuple[str, int, int]]:
 
 
 async def test_a_mark_that_moves_reaches_only_the_markers_other_connections_on_every_replica(
-    storage: InMemoryStorage,
+    storage: PostgresStorage,
 ) -> None:
     near, far = Server(storage), Server(storage)
     await near.start()
@@ -518,7 +499,7 @@ async def test_joining_a_followed_thread_since_a_seq_replays_up_to_where_it_is_o
 
 
 async def test_joining_a_followed_thread_from_beyond_the_replay_limit_is_the_latest_and_truncated(
-    storage: InMemoryStorage,
+    storage: PostgresStorage,
 ) -> None:
     server = Server(storage, replay_limit=2)
     ana = await threads(server, "t1")

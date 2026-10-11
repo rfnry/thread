@@ -4,9 +4,9 @@ import json
 import pytest
 
 from rfnry_thread.errors import ConfigurationError, InputError
-from rfnry_thread.inmemory import InMemoryStorage
 from rfnry_thread.models import SYSTEM
 from rfnry_thread.pipe import pipe
+from rfnry_thread.postgres import PostgresStorage
 from rfnry_thread.protocol import Hello, encode
 from rfnry_thread.server import Server
 
@@ -14,11 +14,11 @@ from .factories import ANA, lookalike
 from .peer import Peer
 
 
-def test_limits_are_positive() -> None:
+def test_limits_are_positive(storage: PostgresStorage) -> None:
     with pytest.raises(ConfigurationError, match="^server: max_inline_bytes must be positive$"):
-        Server(InMemoryStorage(), max_inline_bytes=0)
+        Server(storage, max_inline_bytes=0)
     with pytest.raises(ConfigurationError, match="^server: replay_limit must be positive$"):
-        Server(InMemoryStorage(), replay_limit=0)
+        Server(storage, replay_limit=0)
 
 
 async def test_a_hello_is_answered_with_who_and_where_the_consumer_said(server: Server) -> None:

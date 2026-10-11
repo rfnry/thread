@@ -18,8 +18,8 @@ from rfnry_thread.errors import (
     ThreadException,
     TransportError,
 )
-from rfnry_thread.inmemory import InMemoryStorage
 from rfnry_thread.models import Identity, Joined, Message, StatusChanged, Text
+from rfnry_thread.postgres import PostgresStorage
 from rfnry_thread.server import Server
 
 from .factories import BRUNO
@@ -227,8 +227,10 @@ async def test_a_dropped_socket_resumes_every_joined_thread_in_order_once(live: 
 async def test_a_socket_dropped_during_the_rejoin_reconnects_again(live: Live) -> None:
     ana, bruno = await room(live)
     live.drop_join = True
+    live.paused = True
     await live.drop()
     await bruno.send("t1", "while away")
+    live.paused = False
     items = await until_joined(ana)
     assert [first_text(i) for i in items if isinstance(i, Message)] == ["while away"]
     await bruno.send("t1", "live")
@@ -256,7 +258,7 @@ async def test_a_dropped_socket_is_reconnecting_until_every_thread_is_resumed_th
     assert told == ["reconnecting", "Message", "Joined", "open"]
 
 
-async def test_a_resume_beyond_the_replay_limit_says_truncated(storage: InMemoryStorage) -> None:
+async def test_a_resume_beyond_the_replay_limit_says_truncated(storage: PostgresStorage) -> None:
     async with running(Server(storage, replay_limit=3)) as live:
         ana, bruno = await room(live)
         live.paused = True
