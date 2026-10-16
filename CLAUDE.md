@@ -2,17 +2,15 @@
 
 ## Description
 
-rfnry-thread provides conversational text interfaces for humans and machines.
-
-It is the chat layer of an AI product, where assistants are members exactly like people — person to person, person to assistant, assistant to assistant — through one set of verbs, and anyone may speak first. One WebSocket protocol, a Python server and client, a TypeScript client.
+Conversational text interfaces for humans and machines.
 
 It is a library, not a framework. The consumer brings authentication, the storage connection, uploads, and any HTTP endpoints of their own. The library imports no web framework, ships no model, never sees how credentials work, and never writes to disk. Tenancy is by construction: every connection and thread names its scope, every row carries it, nothing reads across scopes; authorship is stamped by the server, never trusted from a client.
 
 ## Documentation
 
-`docs/thread.md` is the library's contract with its consumers: description, philosophy, every public verb, minimal examples. It documents the API as designed and is updated in the same change as any change to the public surface. It is also the complexity gauge: if a change makes the documentation harder to write or an example longer, the design is wrong — rework the change, not the docs. `docs/api.md` is the reference: every public name with its exact signature, what it returns and what it raises; a test keeps it in step with the code, and it changes in the same change as the public surface.
+Documentation in `docs/thread.md` and `docs/api.md`.
 
-Designs and implementation plans live only in `docs/plans/`, as `YYYY-MM-DD-<topic>-design.md` and `YYYY-MM-DD-<topic>-plan.md` — not in `docs/superpowers/`, not at the repo root. The folder is gitignored: plans are local working documents, not part of the library.
+Designs and implementation plans live only in `docs/plans/`, as `YYYY-MM-DD-<topic>-design.md` and `YYYY-MM-DD-<topic>-plan.md`. The folder is gitignored: plans are local working documents, not part of the library.
 
 ## Checklists
 
