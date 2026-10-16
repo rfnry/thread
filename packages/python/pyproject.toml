@@ -11,6 +11,11 @@ dependencies = [
     "websockets>=15.0",
 ]
 
+[project.urls]
+Repository = "https://github.com/rfnry/thread"
+Documentation = "https://github.com/rfnry/thread/blob/main/docs/thread.md"
+Issues = "https://github.com/rfnry/thread/issues"
+
 [project.optional-dependencies]
 postgres = ["asyncpg>=0.31.0,<1.0"]
 dev = [
