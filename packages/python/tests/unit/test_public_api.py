@@ -1,3 +1,4 @@
+import annotationlib
 import inspect
 import subprocess
 import sys
@@ -136,7 +137,8 @@ def test_the_identity_the_verbs_take_is_exported() -> None:
         rfnry_thread.ThreadTools.__init__: "triggered_by",
     }
     for verb, name in takes.items():
-        annotation = inspect.signature(verb).parameters[name].annotation
+        signature = inspect.signature(verb, annotation_format=annotationlib.Format.STRING)
+        annotation = signature.parameters[name].annotation
         assert annotation.removesuffix(" | None") == "IdentityLike", verb
 
 

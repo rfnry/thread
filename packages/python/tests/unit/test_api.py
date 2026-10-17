@@ -1,5 +1,4 @@
-import __future__
-
+import annotationlib
 import ast
 import dataclasses
 import inspect
@@ -15,6 +14,7 @@ import rfnry_thread
 from .test_docs import ROOT, TYPESCRIPT, typescript_exports
 
 API = ROOT / "docs" / "api.md"
+SOURCE = annotationlib.Format.STRING
 PUBLIC: dict[str, Any] = {name: getattr(rfnry_thread, name) for name in rfnry_thread.__all__}
 FENCES = {"python": "python", "typescript": "ts"}
 
@@ -75,7 +75,10 @@ def unwrap(value: object) -> Callable[..., Any] | None:
 
 def methods(owner: type) -> dict[str, tuple[bool, str]]:
     return {
-        name: (inspect.iscoroutinefunction(function), str(inspect.signature(function)))
+        name: (
+            inspect.iscoroutinefunction(function),
+            str(inspect.signature(function, annotation_format=SOURCE)),
+        )
         for name, member in vars(owner).items()
         if not name.startswith("_") and (function := unwrap(member)) is not None
     }
@@ -108,11 +111,10 @@ def mismatch(node: Function, value: object) -> str | None:
     ):
         return "async differs"
     node.decorator_list = []
-    postponed = real.__globals__.get("annotations") is __future__.annotations
-    flags = __future__.annotations.compiler_flag if postponed else 0
     namespace: dict[str, Any] = dict(real.__globals__)
-    exec(compile(ast.unparse(node), str(API), "exec", flags=flags, dont_inherit=True), namespace)
-    written, actual = inspect.signature(namespace[node.name]), inspect.signature(real)
+    exec(compile(ast.unparse(node), str(API), "exec", dont_inherit=True), namespace)
+    written = inspect.signature(namespace[node.name], annotation_format=SOURCE)
+    actual = inspect.signature(real, annotation_format=SOURCE)
     return None if str(written) == str(actual) else f"{written} != {actual}"
 
 

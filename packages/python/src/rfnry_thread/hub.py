@@ -1,5 +1,3 @@
-from __future__ import annotations
-
 import asyncio
 import json
 import logging
@@ -167,7 +165,7 @@ class Hub:
         for thread, since in threads:
             try:
                 joined, _ = await self._enter(session, thread, since)
-            except (ForbiddenError, NotFoundError):
+            except ForbiddenError, NotFoundError:
                 continue
             found.append(joined)
         return found
@@ -313,7 +311,7 @@ class Hub:
                     joined, entered = await self._enter(
                         session, thread, None if seq is None else seq - 1
                     )
-                except (ForbiddenError, NotFoundError):
+                except ForbiddenError, NotFoundError:
                     continue
                 if entered:
                     session.push_joined(joined)

@@ -31,7 +31,7 @@ def upgrade(socket: ServerConnection, request: Request) -> Response | None:
 
 
 class Socket:
-    def __init__(self, socket: ServerConnection, open_sockets: list["Socket"]) -> None:
+    def __init__(self, socket: ServerConnection, open_sockets: list[Socket]) -> None:
         self.socket = socket
         open_sockets.append(self)
 

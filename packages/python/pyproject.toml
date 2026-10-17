@@ -4,7 +4,7 @@ version = "0.1.0"
 description = "Conversational text interfaces for humans and machines"
 readme = "README.md"
 license = "MIT"
-requires-python = ">=3.12"
+requires-python = ">=3.14"
 authors = [{name = "rfnry", email = "contact@rfnry.dev"}]
 dependencies = [
     "pydantic>=2.13.4",
@@ -45,7 +45,7 @@ addopts = "-m 'not live'"
 
 [tool.ruff]
 line-length = 100
-target-version = "py312"
+target-version = "py314"
 
 [tool.ruff.lint]
 select = ["E", "F", "I", "W", "B", "UP", "SIM"]

@@ -151,6 +151,8 @@ Who a connection is, is yours to decide. Your web framework authenticates the We
 an ordinary HTTP request, with your cookies, headers and tokens — and hands the accepted socket to
 the server with who it is and in which scope. The library never sees how credentials work.
 
+The Python package needs Python 3.14 or later.
+
 ## Core features
 
 ### Serving and connecting

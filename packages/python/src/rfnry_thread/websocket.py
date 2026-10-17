@@ -1,5 +1,3 @@
-from __future__ import annotations
-
 from websockets.asyncio.client import ClientConnection, connect
 from websockets.exceptions import ConnectionClosed, InvalidStatus
 
