@@ -51,7 +51,7 @@ from rfnry_thread.server import Server
 from rfnry_thread.storage import Storage
 from rfnry_thread.tools import ThreadTools, Tool, Tools
 
-__version__ = "0.1.0"
+__version__ = "0.1.1"
 
 __all__ = [
     "Server",
