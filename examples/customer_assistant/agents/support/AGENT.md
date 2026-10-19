@@ -1,5 +1,4 @@
 ---
-name: support
 kind: generation
 description: Answers Acme Home customers about their orders
 ---

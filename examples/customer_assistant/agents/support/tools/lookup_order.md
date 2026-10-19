@@ -1,5 +1,4 @@
 ---
-name: lookup_order
 description: Fetch an order by its id
 input:
   order_id: {type: string, description: "The order id, such as A-1001", required: true}

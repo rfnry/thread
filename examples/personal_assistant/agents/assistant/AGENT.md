@@ -1,5 +1,4 @@
 ---
-name: assistant
 kind: generation
 description: Jordan Ellis's personal assistant for the home, receipts and paperwork
 ---

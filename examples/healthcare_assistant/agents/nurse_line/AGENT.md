@@ -1,5 +1,4 @@
 ---
-name: nurse_line
 kind: generation
 description: Prepares a nurse's callback to a patient with symptoms or a question about their care
 ---

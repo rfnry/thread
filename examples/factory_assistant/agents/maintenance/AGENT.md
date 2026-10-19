@@ -1,5 +1,4 @@
 ---
-name: maintenance
 kind: generation
 description: Helps maintenance technicians at an Acme Plastics plant find faults and follow procedures
 ---
