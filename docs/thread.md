@@ -266,6 +266,10 @@ is set once, when the message is written; an edit changes the content, never the
 answer = await helper.send(thread.id, "Refunded in full.", in_reply_to=message.id, metadata={"run_id": "9f2c"})
 ```
 
+`get_event(thread_id, event_id)` reads one event by its id, as it is stored — the message an
+`in_reply_to` names, or the reply a rating is filed against — and `server.get_event(scope,
+thread_id, event_id)` reads it as the system, for your own endpoints.
+
 `client_id=` on `send`, `step`, `edit`, `retract` and `custom` (`clientId` in TypeScript) is the
 write's idempotency key, generated when you leave it out; name it yourself and the same write sent
 twice — a scheduled job that runs again, a retry after a crash — is stored once, and the second call

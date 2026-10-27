@@ -254,6 +254,16 @@ async def list_members(self, scope: str, thread_id: str) -> list[Member]: ...
 Lists the thread's members as the system, oldest first. Raises `InputError` when the scope is
 empty, `NotFoundError` when the scope holds no such thread.
 
+### `Server.get_event`
+
+```python
+async def get_event(self, scope: str, thread_id: str, event_id: str) -> Event: ...
+```
+
+Reads one event of a thread of the scope by its id as the system, member or not. Raises
+`InputError` when the scope is empty, `NotFoundError` when the scope holds no such thread or the
+thread no such event.
+
 ### `Server.delete_thread`
 
 ```python
@@ -476,6 +486,16 @@ kinds. With `after` (a `seq`), the first `limit` events after it, in `seq` order
 `after` together are a range. Raises `InputError` when `after` is negative or `limit` is not between 1 and 500, `NotFoundError` when the scope
 holds no such thread, `ForbiddenError` when the caller is not a member or `authorize` refuses
 `read`.
+
+### `Client.get_event`
+
+```python
+async def get_event(self, thread_id: str, event_id: str) -> Event: ...
+```
+
+Reads one event of the thread by its id, as it is stored, like `history`. Raises `NotFoundError`
+when the scope holds no such thread or the thread no such event, `ForbiddenError` when the caller is
+not a member or `authorize` refuses `read`.
 
 ### `Client.present`
 
@@ -1713,6 +1733,16 @@ Returns the latest `limit` events (50 when left out) below `before` (a `seq`), i
 order; `before` and `after` together are a range. Raises `InputError` when `after` is negative or
 `limit` is not between 1 and 500, `NotFoundError` when the scope holds no such thread, `ForbiddenError` when the caller is not a
 member or `authorize` refuses `read`.
+
+### `Client.getEvent`
+
+```ts
+async getEvent(threadId: string, eventId: string): Promise<Event>
+```
+
+Reads one event of the thread by its id, as it is stored, like `history`. Raises `NotFoundError`
+when the scope holds no such thread or the thread no such event, `ForbiddenError` when the caller is
+not a member or `authorize` refuses `read`.
 
 ### `Client.present`
 

@@ -245,6 +245,13 @@ class Verbs:
             scope, thread_id, since=after, before=before, limit=_limit(limit), kinds=kinds
         )
 
+    async def get_event(self, actor: Identity, scope: str, thread_id: str, event_id: str) -> Event:
+        await self.thread(actor, scope, thread_id, "read")
+        event = await self._storage.get_event(scope, thread_id, event_id)
+        if event is None:
+            raise NotFoundError(f"server: event {event_id!r} was not found")
+        return event
+
     async def mark(self, session: Session, thread_id: str, seq: int) -> tuple[int, int]:
         actor, scope = session.identity, session.scope
         await self.thread(actor, scope, thread_id, "read")

@@ -63,6 +63,7 @@ describe('client', () => {
     const { client } = await joined()
     await client.createThread({ threadId: 't1', metadata: { topic: 'billing' } })
     await client.history('t1', { before: 5, limit: 2 })
+    await client.getEvent('t1', 'e1')
     await client.working('t1', 'Reading')
     await client.cancel('t1', helper)
     const methods = server.sent().map((frame) => [frame.method, frame.payload])
@@ -74,6 +75,7 @@ describe('client', () => {
       'thread.history',
       { thread_id: 't1', before: 5, limit: 2, kinds: null },
     ])
+    expect(methods).toContainEqual(['event.get', { thread_id: 't1', event_id: 'e1' }])
     expect(methods).toContainEqual([
       'signal.send',
       { thread_id: 't1', kind: 'working', label: 'Reading' },

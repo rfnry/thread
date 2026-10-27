@@ -1,0 +1,9 @@
+{
+  "id": "8",
+  "method": "event.get",
+  "payload": {
+    "event_id": "e1",
+    "thread_id": "t1"
+  },
+  "type": "request"
+}

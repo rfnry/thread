@@ -11,6 +11,7 @@ from rfnry_thread.errors import ConfigurationError, InputError, ThreadException
 from rfnry_thread.hub import Hub, Session
 from rfnry_thread.models import (
     SYSTEM,
+    Event,
     Identity,
     IdentityLike,
     Member,
@@ -93,6 +94,10 @@ class _Add(_Ref):
 
 class _Remove(_Ref):
     identity_id: str
+
+
+class _EventRef(_Ref):
+    event_id: str
 
 
 def _args[T: _Args](model: type[T], method: str, payload: dict[str, Any]) -> T:
@@ -325,6 +330,11 @@ class Server:
             return {"members": [_dump(m) for m in members]}
         if method == "event.send":
             return {"event": _dump(await verbs.send(actor, scope, payload))}
+        if method == "event.get":
+            ref = _args(_EventRef, method, payload)
+            return {
+                "event": _dump(await verbs.get_event(actor, scope, ref.thread_id, ref.event_id))
+            }
         if method == "thread.present":
             present = await verbs.present(actor, scope, _args(_Ref, method, payload).thread_id)
             return {"identities": [_dump(identity) for identity in present]}
@@ -400,6 +410,9 @@ class Server:
 
     async def list_members(self, scope: str, thread_id: str) -> list[Member]:
         return await self._verbs.list_members(SYSTEM, _scope(scope), thread_id)
+
+    async def get_event(self, scope: str, thread_id: str, event_id: str) -> Event:
+        return await self._verbs.get_event(SYSTEM, _scope(scope), thread_id, event_id)
 
     async def delete_thread(self, scope: str, thread_id: str) -> None:
         await self._verbs.delete_thread(SYSTEM, _scope(scope), thread_id)

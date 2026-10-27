@@ -44,7 +44,7 @@ def test_an_error_frame_carries_the_code_and_message() -> None:
     )
 
 
-def test_the_methods_are_the_designed_seventeen() -> None:
+def test_the_methods_are_the_designed_eighteen() -> None:
     assert {
         "thread.create",
         "thread.get",
@@ -62,5 +62,6 @@ def test_the_methods_are_the_designed_seventeen() -> None:
         "member.remove",
         "member.list",
         "event.send",
+        "event.get",
         "signal.send",
     } == METHODS

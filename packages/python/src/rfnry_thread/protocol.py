@@ -27,6 +27,7 @@ METHODS = frozenset(
         "member.remove",
         "member.list",
         "event.send",
+        "event.get",
         "signal.send",
     }
 )

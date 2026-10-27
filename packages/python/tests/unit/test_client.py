@@ -7,7 +7,13 @@ import pytest
 from until import until
 
 from rfnry_thread.client import Client, Item
-from rfnry_thread.errors import ConfigurationError, ForbiddenError, InputError, TransportError
+from rfnry_thread.errors import (
+    ConfigurationError,
+    ForbiddenError,
+    InputError,
+    NotFoundError,
+    TransportError,
+)
 from rfnry_thread.models import (
     SYSTEM,
     Cancel,
@@ -224,6 +230,23 @@ async def test_a_message_carries_its_metadata_through_send_stream_and_history(
         ([Text(text="Refunded in full.")], {"run_id": "r2"}),
         ([Text(text="Here it is")], {"run_id": "r3"}),
     ]
+
+
+async def test_a_member_reads_an_event_by_its_id(server: Server) -> None:
+    ana, helper = await pair(server)
+    reply = await helper.send("t1", "Refunded.", metadata={"run_id": "r1"})
+    read = await ana.get_event("t1", reply.id)
+    await ana.create_thread(thread_id="t2")
+    elsewhere = await ana.send("t2", "Hello.")
+    with pytest.raises(NotFoundError, match=f"^server: event '{elsewhere.id}' was not found$"):
+        await ana.get_event("t1", elsewhere.id)
+    bruno = await server.connect(identity=BRUNO, scope="acme")
+    with pytest.raises(ForbiddenError):
+        await bruno.get_event("t1", reply.id)
+    assert read == reply and read.metadata == {"run_id": "r1"}
+    assert await server.get_event("acme", "t1", reply.id) == reply
+    with pytest.raises(NotFoundError):
+        await server.get_event("globex", "t1", reply.id)
 
 
 def test_metadata_is_keyword_only_at_the_end() -> None:

@@ -602,6 +602,11 @@ export class Client {
     return reply.events as Event[]
   }
 
+  async getEvent(threadId: string, eventId: string): Promise<Event> {
+    const reply = await this.request('event.get', { thread_id: threadId, event_id: eventId })
+    return reply.event as Event
+  }
+
   async present(threadId: string): Promise<Identity[]> {
     return (await this.request('thread.present', { thread_id: threadId })).identities as Identity[]
   }

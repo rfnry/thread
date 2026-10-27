@@ -600,6 +600,10 @@ class Client:
         reply = await self._request("thread.history", payload)
         return [EVENTS.validate_python(e) for e in reply["events"]]
 
+    async def get_event(self, thread_id: str, event_id: str) -> Event:
+        reply = await self._request("event.get", {"thread_id": thread_id, "event_id": event_id})
+        return EVENTS.validate_python(reply["event"])
+
     async def present(self, thread_id: str) -> list[Identity]:
         reply = await self._request("thread.present", {"thread_id": thread_id})
         return [Identity.model_validate(i) for i in reply["identities"]]
