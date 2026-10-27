@@ -487,8 +487,16 @@ connection for the whole run: take it from a direct session, not a transaction-p
 pool reserved for these locks and sized to the runs a replica allows at once, not the pool the
 server and storage use.
 
-A replica that dies releases its lock with its connection. Effects stay idempotent all the same: a
-resume can hand the next holder an event the last one handled just before it died.
+A replica that dies releases its lock with its connection, and so does a connection that goes back
+to the pool: asyncpg's reset releases its session locks, and a connection it cannot reset is closed,
+so an unlock that fails or is cancelled never leaves the thread held. A pool given its own `reset=`
+keeps `pg_advisory_unlock_all()` in it. Effects stay idempotent all the same: a resume can hand the
+next holder an event the last one handled just before it died.
+
+A run that answers several messages at once replies `in_reply_to` the last one it read. The
+holder's check is then for its own latest reply after the mark: everything up to the event that
+reply answers is done, and the run starts after it — the log says how far it got, with nothing
+kept beside it.
 
 ### Permissions
 
@@ -576,6 +584,9 @@ Securing the upgrade is yours, like the rest of authentication. A short checklis
   `ForbiddenError` from one to refuse the connection for good, as the example below does for an
   expired session; an error that is not the library's, a failed token fetch while the network is
   down say, counts as a failed attempt and the client keeps reconnecting.
+- A token is checked once, on the upgrade, and a socket outlives it. To bound a connection to its
+  credential, close the socket when the token expires: `serve` returns, and the client reconnects
+  with fresh `headers` or `protocols`.
 
 ### The TypeScript client
 
