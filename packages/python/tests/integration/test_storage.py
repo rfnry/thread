@@ -121,7 +121,8 @@ async def test_threads_are_listed_by_metadata_for_anyone_or_for_a_member(
     assert await listed(metadata={"count": 1.0, "ratio": 1}) == ["d"]
     assert await listed(metadata={"elevated": True}, limit=1) == ["c"]
     assert await listed(metadata={"elevated": True}, before="c") == ["a"]
-    assert await listed(metadata={"elevated": True}, before="ghost") == []
+    with pytest.raises(NotFoundError, match="^postgres: thread 'ghost' was not found$"):
+        await listed(metadata={"elevated": True}, before="ghost")
     assert await listed("ana") == ["b", "a"]
     assert await listed("ana", metadata={"elevated": True}) == ["a"]
     assert [t.id for t in await storage.list_threads("globex", None)] == ["g"]
@@ -419,6 +420,35 @@ async def test_activity_order_follows_the_latest_message_and_pages(storage: Stor
     assert [t.id for t in await storage.list_threads("acme", "ana")] == ["c", "b", "a"]
     [first] = await storage.list_threads("acme", "ana", order="activity", limit=1)
     assert first.last_message_at == AT + timedelta(hours=1)
+    with pytest.raises(NotFoundError, match="^postgres: thread 'ghost' was not found$"):
+        await listed(before="ghost")
+
+
+@pytest.mark.parametrize("order", ["created", "activity"])
+async def test_a_listed_thread_places_the_next_page_after_it_is_deleted_or_moves(
+    storage: Storage, order: Any
+) -> None:
+    for minutes, thread_id in enumerate(["a", "b", "c", "d"]):
+        await storage.create_thread("acme", thread(thread_id, minutes=minutes))
+        await storage.add_member(
+            "acme", Member(thread_id=thread_id, identity=ANA, added_at=AT, added_by=SYSTEM)
+        )
+        later = AT + timedelta(hours=1, minutes=minutes)
+        await storage.append_event(
+            "acme", say(thread_id, thread_id).model_copy(update={"created_at": later})
+        )
+
+    async def listed(**query: Any) -> list[Thread]:
+        return await storage.list_threads("acme", "ana", order=order, **query)
+
+    first = await listed(limit=2)
+    assert [t.id for t in first] == ["d", "c"]
+    await storage.delete_thread("acme", "c")
+    assert [t.id for t in await listed(before=first[-1])] == ["b", "a"]
+    [anchor] = await listed(before=first[-1], limit=1)
+    moved = say("b", "again").model_copy(update={"created_at": AT + timedelta(hours=2)})
+    await storage.append_event("acme", moved)
+    assert [t.id for t in await listed(before=anchor)] == ["a"]
 
 
 async def test_a_preview_shows_the_latest_message_with_its_edit_and_skips_a_retracted_one(

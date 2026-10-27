@@ -172,7 +172,7 @@ class PostgresStorage:
         self,
         scope: str,
         member_id: str | None,
-        before: str | None = None,
+        before: str | Thread | None = None,
         limit: int = 50,
         metadata: dict[str, Any] | None = None,
         order: Order = "created",
@@ -201,17 +201,27 @@ class PostgresStorage:
             args.append(json.dumps(metadata))
             where.append(f"t.metadata @> ${len(args)}::jsonb")
         key = "t.created_at" if order == "created" else "COALESCE(t.last_message_at, t.created_at)"
-        anchor = (
-            "a.created_at" if order == "created" else "COALESCE(a.last_message_at, a.created_at)"
-        )
-        if before is not None:
-            args.append(before)
-            where.append(
-                f"({key}, t.id) < (SELECT {anchor}, a.id FROM thread_threads a "
-                f"WHERE a.scope = $1 AND a.id = ${len(args)})"
-            )
-        args.append(max(limit, 0))
         async with self._guard("list_threads"), self._pool.acquire() as conn:
+            if isinstance(before, str):
+                row = await conn.fetchrow(
+                    "SELECT id, created_at, last_message_at FROM thread_threads "
+                    "WHERE scope = $1 AND id = $2",
+                    scope,
+                    before,
+                )
+                if row is None:
+                    raise NotFoundError(f"postgres: thread {before!r} was not found")
+                before = Thread(
+                    id=row["id"],
+                    scope=scope,
+                    created_at=row["created_at"],
+                    last_message_at=row["last_message_at"],
+                )
+            if before is not None:
+                latest = before.last_message_at if order == "activity" else None
+                args.extend([latest or before.created_at, before.id])
+                where.append(f"({key}, t.id) < (${len(args) - 1}::timestamptz, ${len(args)}::text)")
+            args.append(max(limit, 0))
             rows = await conn.fetch(
                 f"SELECT t.scope, t.id, t.metadata, t.created_at, t.last_seq, t.last_message_at, "
                 f"{marks} FROM thread_threads t {join}WHERE {' AND '.join(where)} "

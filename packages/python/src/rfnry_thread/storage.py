@@ -24,7 +24,7 @@ class Storage(Protocol):
         self,
         scope: str,
         member_id: str | None,
-        before: str | None = None,
+        before: str | Thread | None = None,
         limit: int = 50,
         metadata: dict[str, Any] | None = None,
         order: Order = "created",

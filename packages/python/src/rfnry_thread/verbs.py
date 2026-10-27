@@ -145,7 +145,7 @@ class Verbs:
     ) -> list[Thread]:
         limit = _limit(limit)
 
-        async def page(member_id: str | None, after: str | None) -> list[Thread]:
+        async def page(member_id: str | None, after: str | Thread | None) -> list[Thread]:
             return await self._storage.list_threads(
                 scope, member_id, after, limit, metadata, order, preview
             )
@@ -155,8 +155,9 @@ class Verbs:
         if self._authorize is None:
             return await page(actor.id, before)
         readable: list[Thread] = []
+        anchor: str | Thread | None = before
         while True:
-            found = await page(actor.id, before)
+            found = await page(actor.id, anchor)
             for thread in found:
                 if await self._authorize(actor, "read", thread):
                     readable.append(thread)
@@ -164,7 +165,7 @@ class Verbs:
                         return readable
             if len(found) < limit:
                 return readable
-            before = found[-1].id
+            anchor = found[-1]
 
     async def update_thread(
         self, actor: Identity, scope: str, thread_id: str, metadata: dict[str, Any]
@@ -307,7 +308,7 @@ class Verbs:
 
     async def _memberships(self, actor: Identity, scope: str) -> list[Thread]:
         found: list[Thread] = []
-        before: str | None = None
+        before: Thread | None = None
         while True:
             page = await self._storage.list_threads(scope, actor.id, before, PAGE_LIMIT)
             for thread in page:
@@ -315,7 +316,7 @@ class Verbs:
                     found.append(thread)
             if len(page) < PAGE_LIMIT:
                 return found
-            before = page[-1].id
+            before = page[-1]
 
     async def leave(self, session: Session, thread_id: str) -> None:
         await self._hub.leave(session, thread_id)

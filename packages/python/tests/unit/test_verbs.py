@@ -10,9 +10,10 @@ from rfnry_thread.pipe import pipe
 from rfnry_thread.postgres import PostgresStorage
 from rfnry_thread.server import Server
 from rfnry_thread.tools import ThreadTools
+from rfnry_thread.verbs import now
 
 from .conftest import say
-from .factories import ANA, BRUNO, HELPER, lookalike
+from .factories import ANA, BRUNO, HELPER, lookalike, message
 from .peer import Peer
 
 
@@ -272,13 +273,13 @@ async def test_listing_skips_what_authorize_refuses_and_reads_on_to_fill_the_pag
     async def counted(
         scope: str,
         member_id: str | None,
-        before: str | None = None,
+        before: str | Thread | None = None,
         limit: int = 50,
         metadata: dict[str, Any] | None = None,
         order: Any = "created",
         preview: bool = False,
     ) -> list[Thread]:
-        reads.append(before)
+        reads.append(before.id if isinstance(before, Thread) else before)
         return await original(scope, member_id, before, limit, metadata, order, preview)
 
     storage.list_threads = counted  # type: ignore[method-assign]
@@ -291,6 +292,66 @@ async def test_listing_skips_what_authorize_refuses_and_reads_on_to_fill_the_pag
     assert await page(None) == ["a3", "a2"] and reads == [None, "r3", "r1"]
     assert await page("a2") == ["a1"] and reads == ["a2"]
     assert await page("a1") == [] and reads == ["a1"]
+
+
+def after_the_first_page(
+    storage: PostgresStorage,
+    monkeypatch: pytest.MonkeyPatch,
+    then: Callable[[list[Thread]], Awaitable[None]],
+) -> None:
+    original = storage.list_threads
+    pages: list[list[Thread]] = []
+
+    async def listing(*args: Any) -> list[Thread]:
+        pages.append(await original(*args))
+        if len(pages) == 1:
+            await then(pages[0])
+        return pages[-1]
+
+    monkeypatch.setattr(storage, "list_threads", listing)
+
+
+async def archive(storage: PostgresStorage, *threads: tuple[str, bool]) -> Peer:
+    async def authorize(identity: Identity, action: str, thread: Thread) -> bool:
+        return not (action == "read" and thread.metadata.get("archived"))
+
+    ana = await Peer.open(Server(storage, authorize=authorize), ANA)
+    for thread_id, archived in threads:
+        await ana.call("thread.create", thread_id=thread_id, metadata={"archived": archived})
+    return ana
+
+
+async def test_listing_reads_on_past_a_page_whose_last_thread_is_deleted_meanwhile(
+    storage: PostgresStorage, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    ana = await archive(
+        storage, ("a1", False), ("a2", False), ("r1", True), ("a3", False), ("r2", True)
+    )
+
+    async def delete(page: list[Thread]) -> None:
+        await storage.delete_thread("acme", page[-1].id)
+
+    after_the_first_page(storage, monkeypatch, delete)
+    listed = (await ana.call("thread.list", limit=2))["threads"]
+    assert [t["id"] for t in listed] == ["a3", "a2"]
+    with pytest.raises(NotFoundError, match="^postgres: thread 'a3' was not found$"):
+        await ana.call("thread.list", before="a3", limit=2)
+
+
+async def test_listing_by_activity_lists_a_thread_once_when_the_page_it_ended_on_moves_up(
+    storage: PostgresStorage, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    ana = await archive(storage, ("a1", False), ("a2", False), ("r1", True), ("a3", False))
+
+    async def move(page: list[Thread]) -> None:
+        await storage.append_event(
+            "acme",
+            message(1, "up").model_copy(update={"thread_id": page[-1].id, "created_at": now()}),
+        )
+
+    after_the_first_page(storage, monkeypatch, move)
+    listed = (await ana.call("thread.list", limit=2, order="activity"))["threads"]
+    assert [t["id"] for t in listed] == ["a3", "a2"]
 
 
 async def test_joined_members_receive_events_in_order_and_a_join_since_replays(

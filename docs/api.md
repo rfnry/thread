@@ -209,7 +209,8 @@ async def list_threads(
 
 Returns every thread of the scope, member or not, newest first, up to `limit`; `metadata` is
 containment compared as JSON, and `before` a thread id for the next page. Raises `InputError` when
-the scope is empty or `limit` is not between 1 and 500.
+the scope is empty or `limit` is not between 1 and 500, and `NotFoundError` when `before` names no
+thread, one deleted since it was listed: list again from the top.
 
 `order` is an `Order`, which is `Literal["created", "activity"]`: `"activity"` lists by the latest
 message. `preview=True` fills `last_message`; a system listing has no `marked` or `unread`.
@@ -382,7 +383,9 @@ id, for the next page. `order` is an `Order`, which is `Literal["created", "acti
 `"activity"` orders them by their latest message. Each carries
 `last_seq`, `last_message_at`, `marked` and `unread`, and with `preview=True` its `last_message`.
 With an `authorize`, the threads it refuses to `read` are skipped and a page still holds up to
-`limit`. Raises `InputError` when `limit` is not between 1 and 500 or `order` is neither.
+`limit`. Raises `InputError` when `limit` is not between 1 and 500 or `order` is neither, and
+`NotFoundError` when `before` names no thread, one deleted since it was listed: list again from the
+top.
 
 ### `Client.update_thread`
 
@@ -1313,7 +1316,7 @@ class Storage(Protocol):
         self,
         scope: str,
         member_id: str | None,
-        before: str | None = None,
+        before: str | Thread | None = None,
         limit: int = 50,
         metadata: dict[str, Any] | None = None,
         order: Order = "created",
@@ -1380,13 +1383,15 @@ and a new event gets the thread's next `seq`); the getters return `None` for wha
 hold, `list_threads` returns threads newest first and `list_events` events in `seq` order, with
 `since` the first after it and without it the latest. `order` is an `Order`, which is
 `Literal["created", "activity"]`: `"activity"` lists by the latest message instead, a thread without
-messages by its creation; `preview=True` fills each thread's
-`last_message`. `listen` takes an `OnEvent`, `on_event(scope,
+messages by its creation; `preview=True` fills each thread's `last_message`. A page continues below
+`before`: a thread id, at that thread's place now, or a `Thread` a page listed, at the place its own
+`created_at`, `last_message_at` and `id` give it, so paging holds when that thread is deleted or
+moves meanwhile. `listen` takes an `OnEvent`, `on_event(scope,
 thread_id, seq)`, and an `OnSignal`, `on_signal(scope, thread_id, payload)`, called for what any
 server on the storage appends or publishes, and an `OnResume`, `on_resume()`, called once a dropped
 listener is back; it returns a `Stop`, `stop()`, that ends it, and all four are async functions
-returning `None`. Raises `NotFoundError`, from `add_member` and `append_event`, when the scope holds
-no such thread, and `StorageError`, from `create_thread`, when the thread's scope is not `scope`.
+returning `None`. Raises `NotFoundError`, from `add_member`, `append_event` and `list_threads` with
+a `before` id, when the scope holds no such thread, and `StorageError`, from `create_thread`, when the thread's scope is not `scope`.
 `mark` stores the identity's private read position in the thread, never lowering it, and returns
 it with the count of `message` events by others after it, at most 100, and whether it moved (a
 first mark, or a higher one); `get_mark` returns it, `None` without one; `baseline_marks` stores
@@ -1648,7 +1653,8 @@ Returns the threads the caller is a member of, newest first, up to `limit` (50 w
 message. Each carries `last_seq`, `last_message_at`, `marked` and `unread`, and with `preview: true`
 its `last_message`. With an `authorize`, the threads it refuses to `read` are skipped and a page
 still holds up to `limit`. Raises `InputError` when `limit` is not between 1 and 500 or `order` is
-neither.
+neither, and `NotFoundError` when `before` names no thread, one deleted since it was listed: list
+again from the top.
 
 ### `Client.updateThread`
 

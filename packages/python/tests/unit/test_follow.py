@@ -3,6 +3,7 @@ from typing import Any
 
 import pytest
 
+from rfnry_thread import verbs
 from rfnry_thread.errors import ForbiddenError, InputError
 from rfnry_thread.models import SYSTEM, Identity, Member, Thread
 from rfnry_thread.postgres import PostgresStorage
@@ -68,6 +69,29 @@ async def test_a_connection_that_does_not_follow_is_still_invited(server: Server
     await threads(server, "t1")
     assert [p["kind"] for p in await helper.quiet()] == ["invited"]
     assert helper.joined == []
+
+
+async def test_follow_reads_on_past_a_page_whose_last_thread_is_deleted_meanwhile(
+    storage: PostgresStorage, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    server = Server(storage)
+    await threads(server, "t1", "t2", "t3", "t4", "t5")
+    monkeypatch.setattr(verbs, "PAGE_LIMIT", 2)
+    original = storage.list_threads
+    deleted: list[str] = []
+
+    async def listing(*args: Any) -> list[Thread]:
+        page = await original(*args)
+        if not deleted:
+            deleted.append(page[-1].id)
+            await storage.delete_thread("acme", page[-1].id)
+        return page
+
+    monkeypatch.setattr(storage, "list_threads", listing)
+    helper = await Peer.open(server, HELPER)
+    reply = await helper.call("thread.follow")
+    assert deleted == ["t4"]
+    assert sorted(j["thread"]["id"] for j in reply["joined"]) == ["t1", "t2", "t3", "t5"]
 
 
 async def test_authorize_decides_which_threads_a_follower_receives(
