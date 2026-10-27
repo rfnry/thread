@@ -59,7 +59,7 @@ from rfnry_thread.websocket import open_socket
 
 Dial = Callable[[], Awaitable[Connection]]
 HeadersSource = dict[str, str] | Callable[[], Awaitable[dict[str, str]]]
-ProtocolsSource = list[str] | Callable[[], Awaitable[list[str]]]
+ProtocolsSource = str | list[str] | Callable[[], Awaitable[str | list[str]]]
 Item = Event | Signal | Joined | StatusChanged
 
 HANDSHAKE = 10.0
@@ -152,8 +152,8 @@ class Stream:
     ) -> Message:
         if self._ended:
             raise InputError(f"client: stream {self.id!r} has already ended")
-        self._ended = True
         merged = self._metadata if metadata is None else {**(self._metadata or {}), **metadata}
+        self._ended = True
         try:
             return await self._client._message(
                 self._thread_id,

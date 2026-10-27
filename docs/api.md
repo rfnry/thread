@@ -335,7 +335,8 @@ Connects over a WebSocket to `url` and returns the client. `headers` go with the
 `HeadersSource` is `dict[str, str] | Callable[[], Awaitable[dict[str, str]]]`, a dict or an async
 function returning one, called on every attempt so a token can refresh. `protocols` are the
 subprotocols offered, as a browser offers them; a `ProtocolsSource` is
-`list[str] | Callable[[], Awaitable[list[str]]]`, called on every attempt the same way. Raises `ForbiddenError` when
+`str | list[str] | Callable[[], Awaitable[str | list[str]]]` — one subprotocol, a list, or an async
+function returning either, called on every attempt the same way. Raises `ForbiddenError` when
 the upgrade is refused with HTTP 401 or 403 or the socket is closed with 1008 before the hello is
 answered, and `TransportError` when the socket cannot be opened or the hello goes unanswered. The
 `headers` or `protocols` function refuses by raising `ForbiddenError`: a `ThreadException` it raises is raised as

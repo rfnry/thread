@@ -192,7 +192,9 @@ async def by_subprotocol(server: Server) -> AsyncIterator[tuple[Live, list[list[
         return protocols[0] if protocols and protocols[0] == "bearer" else None
 
     async def handler(socket: ServerConnection) -> None:
-        token = offered[-1][1]
+        assert socket.request is not None
+        sent = socket.request.headers.get("Sec-WebSocket-Protocol", "").split(",")
+        token = sent[1].strip() if len(sent) > 1 else "anonymous"
         served = Served(socket, live)
         live.open.append(served)
         await server.serve(served, identity=Identity(role="user", id=token), scope="acme")
@@ -222,6 +224,13 @@ async def test_subprotocols_go_with_every_attempt(server: Server) -> None:
     assert (first, again) == ("ana-1", "ana-2")
 
 
+async def test_one_subprotocol_can_be_a_string(server: Server) -> None:
+    async with by_subprotocol(server) as (live, offered):
+        alone = await Client.connect(live.url, protocols="bearer")
+        await alone.close()
+    assert offered == [["bearer"]] and alone.identity.id == "anonymous"
+
+
 async def test_a_protocols_function_that_refuses_ends_for_good(server: Server) -> None:
     async def refusing() -> list[str]:
         raise ForbiddenError("app: session expired")
@@ -236,6 +245,25 @@ async def test_a_protocols_function_that_refuses_ends_for_good(server: Server) -
             TransportError, match="^client: the protocols function raised: network is unreachable$"
         ):
             await Client.connect(live.url, protocols=failing)
+
+
+async def test_a_protocols_function_that_refuses_on_reconnect_closes_the_client(
+    server: Server,
+) -> None:
+    calls: list[int] = []
+
+    async def protocols() -> list[str]:
+        calls.append(1)
+        if len(calls) > 1:
+            raise ForbiddenError("app: session expired")
+        return ["bearer", "ana"]
+
+    async with by_subprotocol(server) as (live, _):
+        ana = await Client.connect(live.url, protocols=protocols)
+        await live.drop()
+        with pytest.raises(ForbiddenError, match="^app: session expired$"):
+            await asyncio.wait_for(read_to_the_end(ana, []), 3.0)
+    assert ana.status == "closed"
 
 
 async def test_a_headers_function_that_fails_on_a_reconnect_is_called_again(live: Live) -> None:

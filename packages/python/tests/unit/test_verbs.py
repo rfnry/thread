@@ -48,6 +48,7 @@ async def test_a_non_member_is_forbidden_everywhere_and_a_missing_thread_is_not_
         ("thread.history", {}),
         ("thread.join", {}),
         ("member.list", {}),
+        ("event.get", {"event_id": "e1"}),
         ("thread.update", {"metadata": {}}),
         ("thread.delete", {}),
         ("thread.create", {}),

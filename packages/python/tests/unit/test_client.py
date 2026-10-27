@@ -258,6 +258,19 @@ async def test_metadata_over_the_cap_after_the_merge_abandons_the_stream(server:
     assert [i for i in items if isinstance(i, StreamEnd)]
 
 
+async def test_a_finish_that_cannot_merge_its_metadata_still_ends_the_stream(
+    server: Server,
+) -> None:
+    ana, helper = await pair(server)
+    with pytest.raises(TypeError):
+        async with helper.stream("t1", metadata={"run_id": "r1"}) as reply:
+            await reply.write("Refunded.")
+            await reply.finish(metadata=cast(Any, ["through"]))
+    items = await drain(ana)
+    assert not [i for i in items if isinstance(i, Message)]
+    assert [i for i in items if isinstance(i, StreamEnd)]
+
+
 async def test_a_member_reads_an_event_by_its_id(server: Server) -> None:
     ana, helper = await pair(server)
     reply = await helper.send("t1", "Refunded.", metadata={"run_id": "r1"})

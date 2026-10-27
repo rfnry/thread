@@ -44,9 +44,10 @@ class _Socket:
 
 
 async def open_socket(
-    url: str, headers: dict[str, str] | None = None, protocols: list[str] | None = None
+    url: str, headers: dict[str, str] | None = None, protocols: str | list[str] | None = None
 ) -> Connection:
-    offered = [Subprotocol(p) for p in protocols] if protocols else None
+    named = [protocols] if isinstance(protocols, str) else protocols
+    offered = [Subprotocol(p) for p in named] if named else None
     try:
         socket = await connect(
             url,

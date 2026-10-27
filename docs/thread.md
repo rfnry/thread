@@ -179,7 +179,7 @@ violation — `CLOSE_REFUSED` in both packages:
 ```python
 offered = websocket.scope.get("subprotocols", [])
 await websocket.accept(subprotocol=offered[0] if offered else None)
-await websocket.close(code=1008)
+await websocket.close(code=CLOSE_REFUSED)
 ```
 
 Close only after the accept, which names a subprotocol the client offered: a close before the accept
@@ -490,12 +490,13 @@ server and storage use.
 A replica that dies releases its lock with its connection, and so does a connection that goes back
 to the pool: asyncpg's reset releases its session locks, and a connection it cannot reset is closed,
 so an unlock that fails or is cancelled never leaves the thread held. A pool given its own `reset=`
-keeps `pg_advisory_unlock_all()` in it. Effects stay idempotent all the same: a resume can hand the
+replaces that query, so it must run `pg_advisory_unlock_all()` itself. Effects stay idempotent all the same: a resume can hand the
 next holder an event the last one handled just before it died.
 
 A run that answers several messages at once replies `in_reply_to` the last one it read. The
 holder's check is then for its own latest reply after the mark: everything up to the event that
-reply answers is done, and the run starts after it — the log says how far it got, with nothing
+reply answers — `(await assistant.get_event(thread_id, reply.in_reply_to)).seq` — is done, and the
+run starts after it — the log says how far it got, with nothing
 kept beside it.
 
 ### Permissions
@@ -609,7 +610,7 @@ const message = await client.send(threadId, 'Can you check my invoice?')
 ```
 
 The verbs are the Python ones in camelCase — `createThread`, `getThread`, `listThreads`,
-`updateThread`, `deleteThread`, `join`, `leave`, `follow`, `mark`, `marked`, `history`, `present`,
+`updateThread`, `deleteThread`, `join`, `leave`, `follow`, `mark`, `marked`, `history`, `getEvent`, `present`,
 `addMember`, `removeMember`, `listMembers`, `send`, `stream`, `step`, `edit`, `retract`, `read`,
 `custom`, `working`, `idle`, `cancel`, `close` — with the same outbox, reconnect and resume. Events
 and signals are the wire shapes, fields as they travel (`thread_id`, `in_reply_to`); options are
@@ -627,7 +628,8 @@ reply.write('in full.')
 await reply.finish()
 ```
 
-`finish(content)` stores other content; `abort()` abandons. `client.status` is the connection's —
+`finish(content)` stores other content, and `finish(content, { metadata })` adds metadata known only
+at the end, merged over the stream's; `abort()` abandons. `client.status` is the connection's —
 `'open'`, `'reconnecting'` or `'closed'` — and every listener hears each change as a
 `StatusChanged`, `{ kind: 'status', status }`: the one item without a thread, so a listener that
 follows one thread checks for it first. `client.closed` resolves when the client stops for good —
