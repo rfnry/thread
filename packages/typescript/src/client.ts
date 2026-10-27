@@ -208,8 +208,7 @@ export class Client {
   private rewinds: Array<{ threadId: string; since: number; held: number; taken: Set<number> }> = []
   private following = false
   private readonly held = new Set<string>()
-  private readonly left = new Set<string>()
-  private leaving = new Set<string>()
+  private readonly left = new Map<string, number>()
   private stopped = false
   private current: Status = 'open'
   private failure: ThreadException | null = null
@@ -293,7 +292,6 @@ export class Client {
     if (frame.name === 'joined') {
       const joined = frame.payload as unknown as Joined
       this.left.delete(joined.thread.id)
-      this.leaving.delete(joined.thread.id)
       this.cursors.set(
         joined.thread.id,
         Math.max(this.cursors.get(joined.thread.id) ?? 0, joined.seq)
@@ -303,7 +301,6 @@ export class Client {
     }
     if (frame.name === 'event') {
       const event = frame.payload as unknown as Event
-      if (this.leaving.has(event.thread_id)) return
       const rewind = this.rewinds.find(
         (pending) =>
           pending.threadId === event.thread_id &&
@@ -321,14 +318,18 @@ export class Client {
         if (event.seq <= cursor) return
         this.cursors.set(event.thread_id, event.seq)
       }
-      if (event.kind === 'member_removed' && event.identity.id === this.identity.id)
+      if (event.kind === 'member_removed' && event.identity.id === this.identity.id) {
         this.cursors.delete(event.thread_id)
+        this.held.delete(event.thread_id)
+      }
       this.emit(event)
       return
     }
     const signal = frame.payload as unknown as Signal
-    if (this.leaving.has(signal.thread_id) && signal.kind !== 'marked') return
-    if (signal.kind === 'thread.deleted') this.cursors.delete(signal.thread_id)
+    if (signal.kind === 'thread.deleted') {
+      this.cursors.delete(signal.thread_id)
+      this.held.delete(signal.thread_id)
+    }
     this.emit(signal)
   }
 
@@ -389,22 +390,12 @@ export class Client {
   private async rejoin(): Promise<void> {
     let followed = false
     if (this.following) {
-      this.leaving = new Set(this.left)
       try {
-        await this.followFrom(true, Object.fromEntries(this.cursors))
+        await this.followFrom(true, Object.fromEntries(this.cursors), Object.fromEntries(this.left))
         followed = true
       } catch (error) {
         if (error instanceof TransportError) return
       }
-      for (const threadId of [...this.leaving].sort()) {
-        if (!this.leaving.has(threadId)) continue
-        try {
-          await this.request('thread.leave', { thread_id: threadId })
-        } catch (error) {
-          if (error instanceof TransportError) return
-        }
-      }
-      this.leaving = new Set()
     }
     for (const threadId of [...this.cursors.keys()]) {
       const cursor = this.cursors.get(threadId)
@@ -543,7 +534,6 @@ export class Client {
     options: { since?: number; resume?: boolean } = {}
   ): Promise<Joined> {
     this.left.delete(threadId)
-    this.leaving.delete(threadId)
     const known = this.cursors.has(threadId)
     try {
       const joined = await this.joinFrom(threadId, options.since ?? null, options.resume ?? false)
@@ -556,27 +546,31 @@ export class Client {
   }
 
   async leave(threadId: string): Promise<void> {
+    const seq = this.cursors.get(threadId) ?? 0
     this.cursors.delete(threadId)
     this.held.delete(threadId)
-    if (this.following) this.left.add(threadId)
+    if (this.following) this.left.set(threadId, seq)
     await this.request('thread.leave', { thread_id: threadId })
   }
 
   async follow(options: { resume?: boolean } = {}): Promise<Joined[]> {
     this.left.clear()
-    this.leaving.clear()
-    return this.followFrom(options.resume ?? false, null)
+    return this.followFrom(options.resume ?? false, null, {})
   }
 
   private async followFrom(
     resume: boolean,
-    since: Record<string, number> | null
+    since: Record<string, number> | null,
+    left: Record<string, number>
   ): Promise<Joined[]> {
-    const reply = await this.request('thread.follow', { resume, since })
+    const payload: Record<string, unknown> = { resume, since }
+    if (Object.keys(left).length > 0) payload.left = left
+    const reply = await this.request('thread.follow', payload)
     this.following = true
-    const found = (reply.joined as Joined[]).filter((joined) => !this.leaving.has(joined.thread.id))
+    const found = reply.joined as Joined[]
     for (const joined of found) {
       const id = joined.thread.id
+      this.left.delete(id)
       const sent = since?.[id]
       this.cursors.set(
         id,

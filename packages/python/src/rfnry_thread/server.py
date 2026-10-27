@@ -75,6 +75,7 @@ class _Join(_Ref):
 class _Follow(_Args):
     resume: bool = False
     since: dict[str, int] | None = None
+    left: dict[str, int] | None = None
 
 
 class _History(_Ref):
@@ -292,7 +293,7 @@ class Server:
             return _dump(await verbs.join(session, join.thread_id, join.since, join.resume))
         if method == "thread.follow":
             follow = _args(_Follow, method, payload)
-            joined = await verbs.follow(session, follow.resume, follow.since)
+            joined = await verbs.follow(session, follow.resume, follow.since, follow.left)
             return {"joined": [_dump(j) for j in joined]}
         if method == "thread.leave":
             await verbs.leave(session, _args(_Ref, method, payload).thread_id)

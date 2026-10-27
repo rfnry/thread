@@ -134,6 +134,11 @@ def golden() -> dict[str, Frame]:
         "request-thread-follow": Request(
             id="4", method="thread.follow", payload={"resume": True, "since": {"t1": 9}}
         ),
+        "request-thread-follow-left": Request(
+            id="4",
+            method="thread.follow",
+            payload={"resume": True, "since": {"t1": 9}, "left": {"t2": 4}},
+        ),
         "response-thread-follow": Response(
             id="4",
             payload={"joined": [Joined(thread=thread, seq=12).model_dump(mode="json")]},

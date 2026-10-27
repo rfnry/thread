@@ -1,0 +1,14 @@
+{
+  "id": "4",
+  "method": "thread.follow",
+  "payload": {
+    "left": {
+      "t2": 4
+    },
+    "resume": true,
+    "since": {
+      "t1": 9
+    }
+  },
+  "type": "request"
+}

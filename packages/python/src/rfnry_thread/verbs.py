@@ -22,6 +22,7 @@ from rfnry_thread.models import (
     Joined,
     Marked,
     Member,
+    MemberAdded,
     Message,
     Order,
     Part,
@@ -291,20 +292,41 @@ class Verbs:
         return await self._hub.join(session, thread, since)
 
     async def follow(
-        self, session: Session, resume: bool, since: dict[str, int] | None
+        self,
+        session: Session,
+        resume: bool,
+        since: dict[str, int] | None,
+        left: dict[str, int] | None,
     ) -> list[Joined]:
         if since is not None and any(seq < 0 for seq in since.values()):
             raise InputError("server: since cannot be negative")
+        if left is not None and any(seq < 0 for seq in left.values()):
+            raise InputError("server: left cannot be negative")
         actor, scope = session.identity, session.scope
         session.following = True
         if resume and since is None:
             await self._storage.baseline_marks(scope, actor.id)
-        start = since or {}
-        threads = await self._memberships(actor, scope)
+        start, gone = since or {}, left or {}
+        threads = [
+            t
+            for t in await self._memberships(actor, scope)
+            if t.id not in gone or await self._added_since(scope, t.id, actor.id, gone[t.id])
+        ]
         return await self._hub.follow(
             session,
             [(t, start.get(t.id, t.marked if resume else None)) for t in threads],
         )
+
+    async def _added_since(self, scope: str, thread_id: str, identity_id: str, seq: int) -> bool:
+        while True:
+            added = await self._storage.list_events(
+                scope, thread_id, since=seq, limit=PAGE_LIMIT, kinds=["member_added"]
+            )
+            if any(isinstance(e, MemberAdded) and e.identity.id == identity_id for e in added):
+                return True
+            if len(added) < PAGE_LIMIT:
+                return False
+            seq = added[-1].seq
 
     async def _memberships(self, actor: Identity, scope: str) -> list[Thread]:
         found: list[Thread] = []

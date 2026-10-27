@@ -202,8 +202,7 @@ class Client:
         self._rewinds: list[tuple[str, range, set[int]]] = []
         self._following = False
         self._present: set[str] = set()
-        self._left: set[str] = set()
-        self._leaving: set[str] = set()
+        self._left: dict[str, int] = {}
         self._outbox: dict[str, asyncio.Lock] = {}
         self._connected = asyncio.Event()
         self._reader: asyncio.Task[None] | None = None
@@ -287,15 +286,12 @@ class Client:
         if push.name == "joined":
             joined = Joined.model_validate(push.payload)
             thread_id = joined.thread.id
-            self._left.discard(thread_id)
-            self._leaving.discard(thread_id)
+            self._left.pop(thread_id, None)
             self._cursors[thread_id] = max(self._cursors.get(thread_id, 0), joined.seq)
             self._inbox.put_nowait(joined)
             return
         if push.name == "event":
             event = EVENTS.validate_python(push.payload)
-            if event.thread_id in self._leaving:
-                return
             for rewound, window, taken in self._rewinds:
                 if rewound == event.thread_id and event.seq in window and event.seq not in taken:
                     taken.add(event.seq)
@@ -308,13 +304,13 @@ class Client:
                 self._cursors[event.thread_id] = event.seq
             if isinstance(event, MemberRemoved) and event.identity.id == self.identity.id:
                 self._cursors.pop(event.thread_id, None)
+                self._present.discard(event.thread_id)
             self._inbox.put_nowait(event)
             return
         signal = SIGNALS.validate_python(push.payload)
-        if signal.thread_id in self._leaving and not isinstance(signal, Marked):
-            return
         if isinstance(signal, ThreadDeleted):
             self._cursors.pop(signal.thread_id, None)
+            self._present.discard(signal.thread_id)
         self._inbox.put_nowait(signal)
 
     def _change(self, status: Status) -> None:
@@ -361,24 +357,13 @@ class Client:
     async def _rejoin(self) -> None:
         followed = False
         if self._following:
-            self._leaving = set(self._left)
             try:
-                await self._follow(True, dict(self._cursors))
+                await self._follow(True, dict(self._cursors), dict(self._left))
                 followed = True
             except TransportError:
                 return
             except ThreadException:
                 pass
-            for thread_id in sorted(self._leaving):
-                if thread_id not in self._leaving:
-                    continue
-                try:
-                    await self._request("thread.leave", {"thread_id": thread_id})
-                except TransportError:
-                    return
-                except ThreadException:
-                    pass
-            self._leaving = set()
         for thread_id in list(self._cursors):
             cursor = self._cursors.get(thread_id)
             if cursor is None or (followed and thread_id not in self._present):
@@ -542,8 +527,7 @@ class Client:
         self._cursors.pop(thread_id, None)
 
     async def join(self, thread_id: str, since: int | None = None, resume: bool = False) -> Joined:
-        self._left.discard(thread_id)
-        self._leaving.discard(thread_id)
+        self._left.pop(thread_id, None)
         known = thread_id in self._cursors
         try:
             joined = await self._join(thread_id, since, resume)
@@ -555,27 +539,28 @@ class Client:
         return joined
 
     async def leave(self, thread_id: str) -> None:
-        self._cursors.pop(thread_id, None)
+        seq = self._cursors.pop(thread_id, None)
         self._present.discard(thread_id)
         if self._following:
-            self._left.add(thread_id)
+            self._left[thread_id] = seq or 0
         await self._request("thread.leave", {"thread_id": thread_id})
 
     async def follow(self, resume: bool = False) -> list[Joined]:
         self._left.clear()
-        self._leaving.clear()
-        return await self._follow(resume, None)
+        return await self._follow(resume, None, None)
 
-    async def _follow(self, resume: bool, since: dict[str, int] | None) -> list[Joined]:
-        reply = await self._request("thread.follow", {"resume": resume, "since": since})
+    async def _follow(
+        self, resume: bool, since: dict[str, int] | None, left: dict[str, int] | None
+    ) -> list[Joined]:
+        payload: dict[str, Any] = {"resume": resume, "since": since}
+        if left:
+            payload["left"] = left
+        reply = await self._request("thread.follow", payload)
         self._following = True
-        found = [
-            joined
-            for joined in map(Joined.model_validate, reply["joined"])
-            if joined.thread.id not in self._leaving
-        ]
+        found = [Joined.model_validate(joined) for joined in reply["joined"]]
         for joined in found:
             thread_id = joined.thread.id
+            self._left.pop(thread_id, None)
             sent = (since or {}).get(thread_id)
             if sent is not None and joined.seq < sent:
                 self._cursors[thread_id] = joined.seq

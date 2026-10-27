@@ -616,7 +616,7 @@ async def test_a_rejoin_reads_the_cursor_a_live_event_moved_during_the_rejoin_be
 async def test_a_follow_that_fails_leaves_the_client_not_following(live: Live) -> None:
     ana = await Client.connect(live.url, headers=ANA_HEADERS)
     with pytest.raises(InputError):
-        await ana._follow(False, {"t1": -1})
+        await ana._follow(False, {"t1": -1}, None)
     assert ana._following is False
 
 
@@ -635,7 +635,9 @@ async def test_a_failed_refollow_falls_back_to_joining_every_thread(live: Live) 
         sent.append(method)
         return await request(method, payload)
 
-    async def refuse(resume: bool, since: dict[str, int] | None) -> list[Joined]:
+    async def refuse(
+        resume: bool, since: dict[str, int] | None, left: dict[str, int] | None
+    ) -> list[Joined]:
         raise ThreadException("client: refused")
 
     ana._request = record  # type: ignore[method-assign]
@@ -706,8 +708,8 @@ async def test_a_followed_thread_left_stays_left_after_a_drop_until_joined_or_fo
 
     ana._request = record  # type: ignore[method-assign]
     await drop_and_reopen(live, ana)
-    assert [m for m, _ in sent] == ["thread.follow", "thread.leave"]
-    assert sent[1][1] == {"thread_id": "t1"}
+    assert [m for m, _ in sent] == ["thread.follow"]
+    assert sent[0][1]["left"] == {"t1": 2}
     await bruno.send("t1", "after the drop")
     await bruno.send("t2", "elsewhere")
     items = await drain(ana)
@@ -741,3 +743,63 @@ async def test_a_left_thread_the_follower_is_added_to_again_is_delivered_after_a
     await drop_and_reopen(live, ana)
     await bruno.send("t1", "after the drop")
     assert [first_text(m) for m in await drain(ana) if isinstance(m, Message)] == ["after the drop"]
+
+
+async def test_a_left_thread_the_follower_is_added_to_again_while_away_is_delivered_after_the_drop(
+    live: Live,
+) -> None:
+    ana_identity = Identity(role="user", id="ana", name="Ana")
+    ana = await Client.connect(live.url, headers=ANA_HEADERS)
+    bruno = await live.server.connect(identity=BRUNO, scope="acme")
+    await bruno.create_thread(thread_id="t1")
+    await bruno.add_member("t1", ana_identity)
+    await ana.follow()
+    await drain(ana)
+    await ana.leave("t1")
+    live.paused = True
+    await live.drop()
+    await until(lambda: ana.status == "reconnecting")
+    await bruno.remove_member("t1", ana_identity)
+    await bruno.add_member("t1", ana_identity)
+    away = await bruno.send("t1", "while away")
+    elsewhere = await live.server.connect(identity=ana_identity, scope="acme")
+    await elsewhere.mark("t1", away.seq)
+    live.paused = False
+    await until(lambda: ana.status == "open", timeout=3.0)
+    await bruno.send("t1", "after the drop")
+    items = await drain(ana)
+    assert [j.thread.id for j in items if isinstance(j, Joined)] == ["t1"]
+    assert [first_text(m) for m in items if isinstance(m, Message)] == ["after the drop"]
+
+
+@pytest.mark.parametrize("gone", ["removed", "deleted"])
+async def test_a_thread_opened_before_it_was_removed_or_deleted_is_not_reopened_after_a_drop(
+    live: Live, gone: str
+) -> None:
+    ana_identity = Identity(role="user", id="ana", name="Ana")
+    ana = await Client.connect(live.url, headers=ANA_HEADERS)
+    bruno = await live.server.connect(identity=BRUNO, scope="acme")
+    await bruno.create_thread(thread_id="t1")
+    await bruno.add_member("t1", ana_identity)
+    await ana.follow()
+    await ana.join("t1")
+    await drain(ana)
+    if gone == "removed":
+        await bruno.remove_member("t1", ana_identity)
+    else:
+        await bruno.delete_thread("t1")
+        await bruno.create_thread(thread_id="t1")
+    await bruno.add_member("t1", ana_identity)
+    await until(lambda: "t1" in ana._cursors)
+    await drain(ana)
+    sent: list[str] = []
+    request = ana._request
+
+    async def record(method: str, payload: dict[str, Any]) -> dict[str, Any]:
+        sent.append(method)
+        return await request(method, payload)
+
+    ana._request = record  # type: ignore[method-assign]
+    await drop_and_reopen(live, ana)
+    assert sent == ["thread.follow"]
+    assert await bruno.present("t1") == []

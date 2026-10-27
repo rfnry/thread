@@ -94,6 +94,21 @@ async def test_follow_reads_on_past_a_page_whose_last_thread_is_deleted_meanwhil
     assert sorted(j["thread"]["id"] for j in reply["joined"]) == ["t1", "t2", "t3", "t5"]
 
 
+async def test_a_refollow_skips_a_left_thread_unless_the_follower_was_added_to_it_again(
+    server: Server,
+) -> None:
+    ana = await threads(server, "t1", "t2", "t3")
+    one = (await say(ana, "t1", "one"))["seq"]
+    two = (await say(ana, "t2", "two"))["seq"]
+    await ana.call("member.remove", thread_id="t2", identity_id="helper")
+    await ana.call("member.add", thread_id="t2", identity=who(HELPER))
+    helper = await Peer.open(server, HELPER)
+    reply = await helper.call("thread.follow", resume=True, left={"t1": one, "t2": two})
+    assert sorted(j["thread"]["id"] for j in reply["joined"]) == ["t2", "t3"]
+    with pytest.raises(InputError, match="^server: left cannot be negative$"):
+        await helper.call("thread.follow", left={"t1": -1})
+
+
 async def test_authorize_decides_which_threads_a_follower_receives(
     storage: PostgresStorage,
 ) -> None:
