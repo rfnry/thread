@@ -2,7 +2,7 @@ import { readdirSync, readFileSync } from 'node:fs'
 import { join } from 'node:path'
 import { describe, expect, it } from 'vitest'
 import { decode, encode, type Push } from '../src/protocol.js'
-import type { Event, Message, Signal } from '../src/types.js'
+import type { Event, Message, Signal, Thread } from '../src/types.js'
 
 const FIXTURES = join(import.meta.dirname, '../../python/tests/fixtures/protocol')
 const files = readdirSync(FIXTURES).filter((name) => name.endsWith('.json'))
@@ -33,7 +33,7 @@ const SIGNAL_KINDS = Object.keys({
 
 describe('golden fixtures', () => {
   it('exist', () => {
-    expect(files.length).toBe(40)
+    expect(files.length).toBe(42)
   })
 
   it.each(files)('%s round-trips', (name) => {
@@ -60,6 +60,19 @@ describe('golden fixtures', () => {
       attempt: 2,
       tags: ['refund'],
       reviewed: false,
+    })
+  })
+
+  it('carry a listed thread with what a listing adds', () => {
+    const text = readFileSync(join(FIXTURES, 'response-thread-list.json'), 'utf8')
+    const [thread] = (decode(text).payload as { threads: Thread[] }).threads
+    expect(thread).toMatchObject({
+      id: 't1',
+      last_seq: 9,
+      last_message_at: '2026-01-01T12:00:00Z',
+      marked: 7,
+      unread: 2,
+      last_message: { kind: 'message', seq: 1, content: [{ type: 'text', text: 'hello!' }] },
     })
   })
 

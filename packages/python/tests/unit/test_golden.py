@@ -122,6 +122,34 @@ def golden() -> dict[str, Frame]:
                 code="input", message="server: the first frame must be a hello for protocol 1"
             ),
         ),
+        "request-thread-list": Request(
+            id="7",
+            method="thread.list",
+            payload={"before": "t0", "limit": 20, "order": "activity", "preview": True},
+        ),
+        "response-thread-list": Response(
+            id="7",
+            payload={
+                "threads": [
+                    thread.model_copy(
+                        update={
+                            "last_seq": 9,
+                            "last_message_at": AT,
+                            "marked": 7,
+                            "unread": 2,
+                            "last_message": Message(
+                                id="e1",
+                                seq=1,
+                                author=ANA,
+                                client_id="c1",
+                                content=[Text(text="hello!")],
+                                **base,
+                            ),
+                        }
+                    ).model_dump(mode="json")
+                ]
+            },
+        ),
         "request-thread-join": Request(
             id="1", method="thread.join", payload={"thread_id": "t1", "since": 0}
         ),

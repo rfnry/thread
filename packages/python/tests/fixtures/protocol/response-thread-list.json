@@ -1,0 +1,43 @@
+{
+  "id": "7",
+  "payload": {
+    "threads": [
+      {
+        "created_at": "2026-01-01T12:00:00Z",
+        "id": "t1",
+        "last_message": {
+          "author": {
+            "id": "ana",
+            "metadata": {},
+            "name": "Ana",
+            "role": "user"
+          },
+          "client_id": "c1",
+          "content": [
+            {
+              "text": "hello!",
+              "type": "text"
+            }
+          ],
+          "created_at": "2026-01-01T12:00:00Z",
+          "id": "e1",
+          "in_reply_to": null,
+          "kind": "message",
+          "metadata": {},
+          "seq": 1,
+          "thread_id": "t1",
+          "triggered_by": null
+        },
+        "last_message_at": "2026-01-01T12:00:00Z",
+        "last_seq": 9,
+        "marked": 7,
+        "metadata": {
+          "topic": "billing"
+        },
+        "scope": "acme",
+        "unread": 2
+      }
+    ]
+  },
+  "type": "response"
+}

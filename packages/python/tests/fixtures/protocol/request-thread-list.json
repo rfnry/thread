@@ -1,0 +1,11 @@
+{
+  "id": "7",
+  "method": "thread.list",
+  "payload": {
+    "before": "t0",
+    "limit": 20,
+    "order": "activity",
+    "preview": true
+  },
+  "type": "request"
+}
