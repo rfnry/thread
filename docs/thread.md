@@ -510,6 +510,8 @@ jobs and back office:
 await server.create_thread("acme", thread_id="onboarding-bruno", metadata={"owner": "bruno"})
 await server.add_member("acme", "onboarding-bruno", Identity(role="user", id="bruno"))
 await server.list_threads("acme", metadata={"owner": "bruno"})
+await server.get_thread("acme", "onboarding-bruno")
+await server.list_members("acme", "onboarding-bruno")
 await server.update_thread("acme", "onboarding-bruno", {"owner": "carla"})
 await server.remove_member("acme", "onboarding-bruno", Identity(role="user", id="bruno"))
 await server.delete_thread("acme", "onboarding-bruno")

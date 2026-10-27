@@ -183,6 +183,15 @@ Creates a thread as the system, with no member, and returns it; with a `thread_i
 holds, returns that thread. Never put to `authorize`. Raises `InputError` when the scope or
 `thread_id` is empty.
 
+### `Server.get_thread`
+
+```python
+async def get_thread(self, scope: str, thread_id: str) -> Thread: ...
+```
+
+Reads a thread of the scope as the system, member or not. Raises `InputError` when the scope is
+empty, `NotFoundError` when the scope holds no such thread.
+
 ### `Server.list_threads`
 
 ```python
@@ -235,6 +244,15 @@ async def remove_member(self, scope: str, thread_id: str, identity: IdentityLike
 Removes `identity` from the thread and writes `MemberRemoved` authored by the system. Raises
 `InputError` when the scope is empty or the identity does not fit, `NotFoundError` when the scope
 holds no such thread or the identity is not a member.
+
+### `Server.list_members`
+
+```python
+async def list_members(self, scope: str, thread_id: str) -> list[Member]: ...
+```
+
+Lists the thread's members as the system, oldest first. Raises `InputError` when the scope is
+empty, `NotFoundError` when the scope holds no such thread.
 
 ### `Server.delete_thread`
 

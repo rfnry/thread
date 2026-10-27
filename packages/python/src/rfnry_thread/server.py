@@ -372,6 +372,9 @@ class Server:
     ) -> Thread:
         return await self._verbs.create_thread(SYSTEM, _scope(scope), thread_id, metadata or {})
 
+    async def get_thread(self, scope: str, thread_id: str) -> Thread:
+        return await self._verbs.get_thread(SYSTEM, _scope(scope), thread_id)
+
     async def list_threads(
         self,
         scope: str,
@@ -394,6 +397,9 @@ class Server:
 
     async def remove_member(self, scope: str, thread_id: str, identity: IdentityLike) -> None:
         await self._verbs.remove_member(SYSTEM, _scope(scope), thread_id, as_identity(identity).id)
+
+    async def list_members(self, scope: str, thread_id: str) -> list[Member]:
+        return await self._verbs.list_members(SYSTEM, _scope(scope), thread_id)
 
     async def delete_thread(self, scope: str, thread_id: str) -> None:
         await self._verbs.delete_thread(SYSTEM, _scope(scope), thread_id)

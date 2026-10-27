@@ -379,6 +379,19 @@ async def test_the_server_verbs_act_as_the_system(server: Server) -> None:
         await bruno.call("thread.get", thread_id=thread.id)
 
 
+async def test_the_server_reads_a_thread_and_its_members_as_the_system(server: Server) -> None:
+    await room(server, BRUNO)
+    thread = await server.get_thread("acme", "t1")
+    members = await server.list_members("acme", "t1")
+    assert thread.id == "t1" and thread.metadata == {"topic": "billing"}
+    assert [m.identity.id for m in members] == ["ana", "bruno"]
+    for read in (server.get_thread, server.list_members):
+        with pytest.raises(NotFoundError, match="^server: thread 'ghost' was not found$"):
+            await read("acme", "ghost")
+        with pytest.raises(NotFoundError, match="^server: thread 't1' was not found$"):
+            await read("globex", "t1")
+
+
 async def test_the_server_updates_metadata_and_removes_members_as_the_system(
     storage: PostgresStorage,
 ) -> None:
