@@ -301,11 +301,7 @@ class Hub:
                 continue
             if session.following:
                 try:
-                    if (
-                        self.authorize is not None
-                        and session.identity.role != "system"
-                        and not await self.authorize(session.identity, "read", thread)
-                    ):
+                    if not await self._readable(session, thread):
                         continue
                     joined, entered = await self._enter(
                         session, thread, None if seq is None else seq - 1
@@ -320,6 +316,22 @@ class Hub:
                         mode="json"
                     )
                 )
+
+    async def _readable(self, session: Session, thread: Thread) -> bool:
+        if self.authorize is None or session.identity.role == "system":
+            return True
+        try:
+            return await self.authorize(session.identity, "read", thread)
+        except ThreadException:
+            raise
+        except Exception as error:
+            logger.warning(
+                "hub: authorize failed for %r in thread %r: %s",
+                session.identity.id,
+                thread.id,
+                error,
+            )
+            return False
 
     async def deleted(self, scope: str, thread_id: str, sender: Identity) -> None:
         signal = ThreadDeleted(thread_id=thread_id, sender=sender)

@@ -126,11 +126,12 @@ class Server:
 
 The server over a storage. `Authorize` is `Callable[[Identity, str, Thread], Awaitable[bool]]`:
 `authorize(identity, action, thread)` decides the actions `create`, `read`, `send`, `manage` and
-`delete`, and without it members may do everything; `Redact` is `Callable[[Identity, Thread,
-list[Part]], Awaitable[list[Part]]]`: `redact(author, thread, content)` returns what is stored in
-place of every message's and edit's content. `max_inline_bytes` caps inline media per event and
-`replay_limit` the events a join replays. Raises `ConfigurationError` when either limit is not
-positive, and from any verb, `StorageError` when the storage fails.
+`delete`, and without it members may do everything; what it raises fails the verb it was asked for,
+and while a thread is handed to a following connection it refuses that connection alone. `Redact` is
+`Callable[[Identity, Thread, list[Part]], Awaitable[list[Part]]]`: `redact(author, thread, content)`
+returns what is stored in place of every message's and edit's content. `max_inline_bytes` caps
+inline media per event and `replay_limit` the events a join replays. Raises `ConfigurationError`
+when either limit is not positive, and from any verb, `StorageError` when the storage fails.
 
 ### `Server.serve`
 

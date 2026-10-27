@@ -225,6 +225,30 @@ async def test_a_follower_is_not_handed_a_thread_authorize_refuses_when_added_la
     assert helper.joined == []
 
 
+async def test_an_authorize_that_fails_for_one_connection_still_hands_the_thread_to_the_next(
+    storage: PostgresStorage,
+) -> None:
+    failed: list[str] = []
+
+    async def authorize(actor: Identity, action: str, thread: Thread) -> bool:
+        if actor.id == "helper" and not failed:
+            failed.append(thread.id)
+            raise RuntimeError("directory down")
+        return True
+
+    server = Server(storage, authorize=authorize)
+    followers = [await Peer.open(server, HELPER) for _ in range(2)]
+    for follower in followers:
+        await follower.call("thread.follow")
+    ana = await Peer.open(server, ANA)
+    await ana.call("thread.create", thread_id="t1")
+    await ana.call("member.add", thread_id="t1", identity=who(HELPER))
+    for follower in followers:
+        await follower.quiet()
+    assert failed == ["t1"]
+    assert sorted(len(follower.joined) for follower in followers) == [0, 1]
+
+
 async def test_following_then_joining_the_same_thread_arrives_and_leaves_once(
     server: Server,
 ) -> None:
