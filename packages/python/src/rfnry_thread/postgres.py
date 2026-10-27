@@ -315,6 +315,18 @@ class PostgresStorage:
             )
         return [Member.model_validate(_json(row["body"])) for row in rows]
 
+    async def head(self, scope: str, thread_id: str, identity_id: str) -> int | None:
+        async with self._guard("head"), self._pool.acquire() as conn:
+            seq = await conn.fetchval(
+                "SELECT t.last_seq FROM thread_threads t JOIN thread_members m "
+                "ON m.scope = t.scope AND m.thread_id = t.id "
+                "WHERE t.scope = $1 AND t.id = $2 AND m.identity_id = $3",
+                scope,
+                thread_id,
+                identity_id,
+            )
+        return None if seq is None else int(seq)
+
     async def is_member(self, scope: str, thread_id: str, identity_id: str) -> bool:
         async with self._guard("is_member"), self._pool.acquire() as conn:
             return bool(

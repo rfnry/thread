@@ -112,9 +112,8 @@ class Hub:
                 return Joined(thread=thread, seq=session.joined.get(thread_id, 0)), False
             if thread_id in session.joined:
                 return await self._rewind(session, thread, since if rewind else None), False
-            latest = await self.storage.list_events(scope, thread_id, limit=1)
-            head = latest[-1].seq if latest else 0
-            if not await self.storage.is_member(scope, thread_id, session.identity.id):
+            head = await self.storage.head(scope, thread_id, session.identity.id)
+            if head is None:
                 raise ForbiddenError(
                     f"server: {session.identity.id!r} is not a member of thread {thread_id!r}"
                 )

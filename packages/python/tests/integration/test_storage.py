@@ -231,6 +231,19 @@ async def test_list_events_pages_both_ways_and_filters_kinds(storage: Storage) -
     assert await storage.get_event("acme", "t1", "ghost") is None
 
 
+async def test_a_head_is_the_last_seq_for_a_member_and_none_for_anyone_else(
+    storage: Storage,
+) -> None:
+    await room(storage, "t1")
+    await room(storage, "t1", "globex")
+    for client_id in ("c1", "c2"):
+        await storage.append_event("acme", say("t1", client_id))
+    assert await storage.head("acme", "t1", "ana") == 2
+    assert await storage.head("globex", "t1", "ana") == 0
+    assert await storage.head("acme", "t1", "bruno") is None
+    assert await storage.head("acme", "ghost", "ana") is None
+
+
 async def test_the_same_thread_id_in_two_scopes_is_two_threads(storage: Storage) -> None:
     await room(storage, "t1", "tenant-a")
     await room(storage, "t1", "tenant-b")

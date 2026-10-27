@@ -125,6 +125,29 @@ async def test_a_second_follow_on_the_same_connection_replays_nothing_already_de
     assert [j["truncated"] for j in again["joined"]] == [False]
 
 
+async def test_follow_reads_each_thread_once_to_enter_it(
+    storage: PostgresStorage, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    server = Server(storage)
+    await threads(server, "t1", "t2", "t3")
+    reads: list[str] = []
+    for name in ("head", "is_member", "list_events"):
+        real = getattr(storage, name)
+
+        def counted(real: Any = real, name: str = name) -> Any:
+            async def read(*args: Any, **kwargs: Any) -> Any:
+                reads.append(name)
+                return await real(*args, **kwargs)
+
+            return read
+
+        monkeypatch.setattr(storage, name, counted())
+    helper = await Peer.open(server, HELPER)
+    reply = await helper.call("thread.follow")
+    assert len(reply["joined"]) == 3
+    assert reads == ["head", "head", "head"]
+
+
 async def test_authorize_decides_which_threads_a_follower_receives(
     storage: PostgresStorage,
 ) -> None:
@@ -243,14 +266,15 @@ async def test_an_add_survives_a_follower_whose_membership_is_gone_and_is_still_
         plain = await Peer.open(far, HELPER)
         ana = await Peer.open(near, ANA)
         await ana.call("thread.create", thread_id="t1")
-        real = storage.is_member
+        real = storage.head
 
-        async def is_member(scope: str, thread_id: str, identity_id: str) -> bool:
-            return False if identity_id == "helper" else await real(scope, thread_id, identity_id)
+        async def head(scope: str, thread_id: str, identity_id: str) -> int | None:
+            return None if identity_id == "helper" else await real(scope, thread_id, identity_id)
 
-        monkeypatch.setattr(storage, "is_member", is_member)
+        monkeypatch.setattr(storage, "head", head)
         await ana.call("member.add", thread_id="t1", identity=who(HELPER))
         assert [p["kind"] for p in await plain.quiet(0.3)] == ["invited"]
+        assert [p["kind"] for p in await following.quiet()] == []
         assert following.joined == []
     finally:
         await near.stop()
@@ -286,14 +310,14 @@ async def test_a_session_dropped_inside_the_storage_reads_of_an_enter_is_not_lef
     await helper.call("thread.follow")
     session = next(s for s in server._hub.sessions if s.identity.id == "helper")
     await server.create_thread("acme", "t1")
-    real = storage.is_member
+    real = storage.head
 
-    async def is_member(scope: str, thread_id: str, identity_id: str) -> bool:
+    async def head(scope: str, thread_id: str, identity_id: str) -> int | None:
         if identity_id == "helper":
             await server._hub.drop(session)
         return await real(scope, thread_id, identity_id)
 
-    monkeypatch.setattr(storage, "is_member", is_member)
+    monkeypatch.setattr(storage, "head", head)
     await server.add_member("acme", "t1", HELPER)
     assert session not in server._hub._rooms.get(("acme", "t1"), set())
     assert "t1" not in session.joined

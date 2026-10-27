@@ -1338,6 +1338,8 @@ class Storage(Protocol):
 
     async def is_member(self, scope: str, thread_id: str, identity_id: str) -> bool: ...
 
+    async def head(self, scope: str, thread_id: str, identity_id: str) -> int | None: ...
+
     async def mark(
         self, scope: str, thread_id: str, identity_id: str, seq: int
     ) -> tuple[int, int, bool]: ...
@@ -1387,7 +1389,8 @@ hold, `list_threads` returns threads newest first and `list_events` events in `s
 messages by its creation; `preview=True` fills each thread's `last_message`. A page continues below
 `before`: a thread id, at that thread's place now, or a `Thread` a page listed, at the place its own
 `created_at`, `last_message_at` and `id` give it, so paging holds when that thread is deleted or
-moves meanwhile. `listen` takes an `OnEvent`, `on_event(scope,
+moves meanwhile. `head` returns a thread's last `seq` when `identity_id` is a member of it,
+`None` otherwise: the one read that enters a thread for a connection. `listen` takes an `OnEvent`, `on_event(scope,
 thread_id, seq)`, and an `OnSignal`, `on_signal(scope, thread_id, payload)`, called for what any
 server on the storage appends or publishes, and an `OnResume`, `on_resume()`, called once a dropped
 listener is back; it returns a `Stop`, `stop()`, that ends it, and all four are async functions
