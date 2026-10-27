@@ -149,12 +149,24 @@ export class Stream {
     )
   }
 
-  async finish(content?: Content): Promise<Message> {
+  async finish(
+    content?: Content,
+    options: { metadata?: Record<string, unknown> } = {}
+  ): Promise<Message> {
     if (this.ended) throw new InputError(`client: stream '${this.id}' has already ended`)
     this.ended = true
+    const metadata =
+      options.metadata === undefined
+        ? this.options.metadata
+        : { ...this.options.metadata, ...options.metadata }
     await this.started
     try {
-      return await this.wire.message(this.threadId, content ?? this.text, this.options, this.id)
+      return await this.wire.message(
+        this.threadId,
+        content ?? this.text,
+        { ...this.options, metadata },
+        this.id
+      )
     } finally {
       await this.end()
     }

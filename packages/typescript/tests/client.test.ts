@@ -188,6 +188,16 @@ describe('client', () => {
     expect(server.sent('event.send')).toHaveLength(1)
   })
 
+  it("sets the metadata it finishes with over the stream's", async () => {
+    const { client } = await joined()
+    const opening = { run_id: 'r1', through: 0 }
+    const reply = client.stream('t1', { metadata: opening })
+    reply.write('Refunded.')
+    await reply.finish(undefined, { metadata: { through: 7 } })
+    expect(server.sent('event.send').at(-1)?.payload.metadata).toEqual({ run_id: 'r1', through: 7 })
+    expect(opening).toEqual({ run_id: 'r1', through: 0 })
+  })
+
   it('ends the stream when the server refuses the message it finishes with', async () => {
     const { client } = await joined()
     server.handlers.set('event.send', () => {

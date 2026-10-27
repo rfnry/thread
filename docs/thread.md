@@ -310,7 +310,9 @@ async with helper.stream(thread.id, in_reply_to=message.id) as reply:
 ```
 
 Leaving the block stores the text written as one message, with the stream's `metadata=`;
-`await reply.finish(content)` stores something else instead — the text and an image, say. An
+`await reply.finish(content)` stores something else instead — the text and an image, say — and
+`finish(metadata=)` adds what is known only at the end, how far the run read, say, merged over the
+stream's. An
 exception inside the block, or a finishing message the server refuses, abandons the stream:
 `StreamEnd` arrives and nothing is stored. The finishing message always arrives before
 `StreamEnd`, so a `StreamEnd` with no message before it means the stream was abandoned. Only text

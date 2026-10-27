@@ -750,11 +750,12 @@ Appends `text` and sends it as the next `StreamDelta`, without waiting for an an
 ### `Stream.finish`
 
 ```python
-async def finish(self, content: Content | None = None) -> Message: ...
+async def finish(self, content: Content | None = None, *, metadata: dict[str, Any] | None = None) -> Message: ...
 ```
 
 Stores the text written, or `content` instead, as the finishing message, ends the stream and returns
-the message. Raises `InputError` when the stream has already ended, and what `Client.send` raises,
+the message. `metadata` is merged over the stream's, key by key, and checked against the same 8 KiB;
+the stream's own dict is left as it was. Raises `InputError` when the stream has already ended, and what `Client.send` raises,
 after which the stream has ended with nothing stored.
 
 ## Events and signals
@@ -1943,11 +1944,12 @@ Appends `text` and sends it as the next delta once the start is acknowledged. Ne
 ### `Stream.finish`
 
 ```ts
-async finish(content?: Content): Promise<Message>
+async finish(content?: Content, options: { metadata?: Record<string, unknown> } = {}): Promise<Message>
 ```
 
 Stores the text written, or `content` instead, as the finishing message, ends the stream and returns
-the message. Raises `InputError` when the stream has already ended, `ForbiddenError` when the start
+the message. `options.metadata` is merged over the stream's, key by key, and checked against the same
+8 KiB; the stream's own object is left as it was. Raises `InputError` when the stream has already ended, `ForbiddenError` when the start
 was refused because the connection has not joined the thread, and what `Client.send` raises.
 
 ### `Stream.abort`

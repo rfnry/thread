@@ -232,6 +232,32 @@ async def test_a_message_carries_its_metadata_through_send_stream_and_history(
     ]
 
 
+async def test_a_stream_sets_its_metadata_when_it_finishes(server: Server) -> None:
+    ana, helper = await pair(server)
+    opening = {"run_id": "r1", "through": 0}
+    async with helper.stream("t1", metadata=opening) as reply:
+        await reply.write("Refunded.")
+        finished = await reply.finish(metadata={"through": 7})
+    async with helper.stream("t1") as bare:
+        await bare.write("Done.")
+        only = await bare.finish(metadata={"through": 8})
+    stored = await ana.get_event("t1", finished.id)
+    assert isinstance(stored, Message)
+    assert finished.metadata == stored.metadata == {"run_id": "r1", "through": 7}
+    assert only.metadata == {"through": 8} and opening == {"run_id": "r1", "through": 0}
+
+
+async def test_metadata_over_the_cap_after_the_merge_abandons_the_stream(server: Server) -> None:
+    ana, helper = await pair(server)
+    async with helper.stream("t1", metadata={"a": "x" * 5000}) as reply:
+        await reply.write("Refunded.")
+        with pytest.raises(InputError, match="^server: message metadata is at most 8192 bytes$"):
+            await reply.finish(metadata={"b": "y" * 5000})
+    items = await drain(ana)
+    assert not [i for i in items if isinstance(i, Message)]
+    assert [i for i in items if isinstance(i, StreamEnd)]
+
+
 async def test_a_member_reads_an_event_by_its_id(server: Server) -> None:
     ana, helper = await pair(server)
     reply = await helper.send("t1", "Refunded.", metadata={"run_id": "r1"})
@@ -243,7 +269,7 @@ async def test_a_member_reads_an_event_by_its_id(server: Server) -> None:
     bruno = await server.connect(identity=BRUNO, scope="acme")
     with pytest.raises(ForbiddenError):
         await bruno.get_event("t1", reply.id)
-    assert read == reply and read.metadata == {"run_id": "r1"}
+    assert isinstance(read, Message) and read == reply and read.metadata == {"run_id": "r1"}
     assert await server.get_event("acme", "t1", reply.id) == reply
     with pytest.raises(NotFoundError):
         await server.get_event("globex", "t1", reply.id)

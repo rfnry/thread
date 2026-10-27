@@ -146,10 +146,13 @@ class Stream:
         )
         self._index += 1
 
-    async def finish(self, content: Content | None = None) -> Message:
+    async def finish(
+        self, content: Content | None = None, *, metadata: dict[str, Any] | None = None
+    ) -> Message:
         if self._ended:
             raise InputError(f"client: stream {self.id!r} has already ended")
         self._ended = True
+        merged = self._metadata if metadata is None else {**(self._metadata or {}), **metadata}
         try:
             return await self._client._message(
                 self._thread_id,
@@ -157,7 +160,7 @@ class Stream:
                 self._in_reply_to,
                 self._triggered_by,
                 self.id,
-                self._metadata,
+                merged,
             )
         finally:
             await self._end()
