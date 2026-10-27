@@ -651,6 +651,78 @@ describe('client', () => {
     await client.close()
   })
 
+  const followed = (...ids: string[]) => ({
+    joined: ids.map((id) => ({
+      thread: { id, scope: 'acme', metadata: {}, created_at: '2026-01-01T12:00:00Z' },
+      seq: 4,
+      truncated: false,
+    })),
+  })
+
+  it('keeps the position a thread was left at when it is left again', async () => {
+    server.handlers.set('thread.follow', () => followed('t1', 't2'))
+    const client = await connect({ url: 'ws://fake', protocols: ['thread', 'tok'] })
+    await client.follow()
+    await client.leave('t1')
+    await client.leave('t1')
+    server.handlers.set('thread.follow', () => followed('t2'))
+    server.drop()
+    await vi.waitFor(() => expect(server.sent('thread.follow')).toHaveLength(2))
+    expect(server.sent('thread.follow').at(-1)?.payload.left).toEqual({ t1: 4 })
+    await client.close()
+  })
+
+  it('leaves again a thread left while the re-follow was in flight', async () => {
+    server.handlers.set('thread.follow', () => followed('t1', 't2'))
+    const client = await connect({ url: 'ws://fake', protocols: ['thread', 'tok'] })
+    const items: Item[] = []
+    client.subscribe((item) => items.push(item))
+    await client.follow()
+    server.handlers.set('thread.follow', () => {
+      void client.leave('t1')
+      return followed('t1', 't2')
+    })
+    items.length = 0
+    server.drop()
+    await vi.waitFor(() => expect(items).toContainEqual({ kind: 'status', status: 'open' }))
+    await vi.waitFor(() => expect(server.sent('thread.leave')).toHaveLength(2))
+    expect(items.flatMap((item) => ('truncated' in item ? [item.thread.id] : []))).toEqual(['t2'])
+    server.handlers.set('thread.follow', () => followed('t2'))
+    server.drop()
+    await vi.waitFor(() => expect(server.sent('thread.follow')).toHaveLength(3))
+    expect(server.sent('thread.follow').at(-1)?.payload.left).toEqual({ t1: 4 })
+    await client.close()
+  })
+
+  it('follows again without the left threads when the server is from before them', async () => {
+    server.handlers.set('thread.follow', () => followed('t1', 't2'))
+    const client = await connect({ url: 'ws://fake', protocols: ['thread', 'tok'] })
+    const items: Item[] = []
+    client.subscribe((item) => items.push(item))
+    await client.follow()
+    await client.leave('t1')
+    server.handlers.set('thread.follow', (payload) => {
+      if (payload.left !== undefined)
+        throw {
+          code: 'input',
+          message: 'server: invalid thread.follow payload: extra inputs are not permitted',
+        }
+      return followed('t1', 't2')
+    })
+    items.length = 0
+    server.drop()
+    await vi.waitFor(() => expect(items).toContainEqual({ kind: 'status', status: 'open' }))
+    await vi.waitFor(() => expect(server.sent('thread.leave')).toHaveLength(2))
+    expect(server.sent('thread.follow').map((frame) => frame.payload)).toEqual([
+      { resume: false, since: null },
+      { resume: true, since: { t2: 4 }, left: { t1: 4 } },
+      { resume: true, since: { t2: 4, t1: 4 } },
+    ])
+    expect(items.flatMap((item) => ('truncated' in item ? [item.thread.id] : []))).toEqual(['t2'])
+    expect(server.sent('thread.join')).toEqual([])
+    await client.close()
+  })
+
   it('forgets a leave once a re-follow hands that thread back after a new add', async () => {
     const t1 = { id: 't1', scope: 'acme', metadata: {}, created_at: '2026-01-01T12:00:00Z' }
     server.handlers.set('thread.follow', () => ({

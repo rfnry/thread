@@ -322,8 +322,8 @@ class Hub:
             return True
         try:
             return await self.authorize(session.identity, "read", thread)
-        except ThreadException:
-            raise
+        except ForbiddenError, NotFoundError:
+            return False
         except Exception as error:
             logger.warning(
                 "hub: authorize failed for %r in thread %r: %s",

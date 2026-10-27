@@ -357,8 +357,14 @@ class Client:
     async def _rejoin(self) -> None:
         followed = False
         if self._following:
+            left = dict(self._left)
             try:
-                await self._follow(True, dict(self._cursors), dict(self._left))
+                try:
+                    await self._follow(True, dict(self._cursors), left)
+                except InputError:
+                    if not left:
+                        raise
+                    await self._follow(True, self._cursors | left, None)
                 followed = True
             except TransportError:
                 return
@@ -541,7 +547,7 @@ class Client:
     async def leave(self, thread_id: str) -> None:
         seq = self._cursors.pop(thread_id, None)
         self._present.discard(thread_id)
-        if self._following:
+        if self._following and (seq is not None or thread_id not in self._left):
             self._left[thread_id] = seq or 0
         await self._request("thread.leave", {"thread_id": thread_id})
 
@@ -557,16 +563,23 @@ class Client:
             payload["left"] = left
         reply = await self._request("thread.follow", payload)
         self._following = True
-        found = [Joined.model_validate(joined) for joined in reply["joined"]]
-        for joined in found:
+        found: list[Joined] = []
+        raced: list[str] = []
+        for joined in map(Joined.model_validate, reply["joined"]):
             thread_id = joined.thread.id
+            if thread_id in self._left and thread_id not in (left or {}):
+                raced.append(thread_id)
+                continue
             self._left.pop(thread_id, None)
+            found.append(joined)
             sent = (since or {}).get(thread_id)
             if sent is not None and joined.seq < sent:
                 self._cursors[thread_id] = joined.seq
             else:
                 self._cursors[thread_id] = max(self._cursors.get(thread_id, 0), joined.seq)
             self._inbox.put_nowait(joined)
+        for thread_id in raced:
+            await self._request("thread.leave", {"thread_id": thread_id})
         return found
 
     async def mark(self, thread_id: str, seq: int) -> int:

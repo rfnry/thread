@@ -310,7 +310,9 @@ class Verbs:
         threads = [
             t
             for t in await self._memberships(actor, scope)
-            if t.id not in gone or await self._added_since(scope, t.id, actor.id, gone[t.id])
+            if t.id not in gone
+            or (t.last_seq or 0) < gone[t.id]
+            or await self._added_since(scope, t.id, actor.id, gone[t.id])
         ]
         return await self._hub.follow(
             session,

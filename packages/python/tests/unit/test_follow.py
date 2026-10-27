@@ -4,7 +4,7 @@ from typing import Any
 import pytest
 
 from rfnry_thread import verbs
-from rfnry_thread.errors import ForbiddenError, InputError
+from rfnry_thread.errors import ForbiddenError, InputError, StorageError
 from rfnry_thread.models import SYSTEM, Identity, Member, Thread
 from rfnry_thread.postgres import PostgresStorage
 from rfnry_thread.server import Server
@@ -225,15 +225,16 @@ async def test_a_follower_is_not_handed_a_thread_authorize_refuses_when_added_la
     assert helper.joined == []
 
 
+@pytest.mark.parametrize("error", [RuntimeError, StorageError])
 async def test_an_authorize_that_fails_for_one_connection_still_hands_the_thread_to_the_next(
-    storage: PostgresStorage,
+    storage: PostgresStorage, error: type[Exception]
 ) -> None:
     failed: list[str] = []
 
     async def authorize(actor: Identity, action: str, thread: Thread) -> bool:
         if actor.id == "helper" and not failed:
             failed.append(thread.id)
-            raise RuntimeError("directory down")
+            raise error("directory: down")
         return True
 
     server = Server(storage, authorize=authorize)

@@ -10,7 +10,7 @@ from websockets.asyncio.server import ServerConnection, serve
 from websockets.http11 import Request, Response
 from websockets.typing import Subprotocol
 
-from rfnry_thread import client as client_module
+from rfnry_thread import client as client_module, server as server_module
 from rfnry_thread.client import Client, Item
 from rfnry_thread.errors import (
     ConfigurationError,
@@ -803,3 +803,92 @@ async def test_a_thread_opened_before_it_was_removed_or_deleted_is_not_reopened_
     await drop_and_reopen(live, ana)
     assert sent == ["thread.follow"]
     assert await bruno.present("t1") == []
+
+
+async def followed_and_left(live: Live) -> tuple[Client, Client, Identity]:
+    ana_identity = Identity(role="user", id="ana", name="Ana")
+    ana = await Client.connect(live.url, headers=ANA_HEADERS)
+    bruno = await live.server.connect(identity=BRUNO, scope="acme")
+    for thread_id in ("t1", "t2"):
+        await bruno.create_thread(thread_id=thread_id)
+        await bruno.add_member(thread_id, ana_identity)
+    await ana.follow()
+    await drain(ana)
+    return ana, bruno, ana_identity
+
+
+async def test_leaving_a_thread_twice_keeps_it_left_after_a_drop(live: Live) -> None:
+    ana, bruno, _ = await followed_and_left(live)
+    await ana.leave("t1")
+    await ana.leave("t1")
+    await drop_and_reopen(live, ana)
+    await bruno.send("t1", "left")
+    await bruno.send("t2", "followed")
+    items = await drain(ana)
+    assert [first_text(m) for m in items if isinstance(m, Message)] == ["followed"]
+    assert [j.thread.id for j in items if isinstance(j, Joined)] == ["t2"]
+
+
+async def test_a_leave_made_while_the_refollow_is_in_flight_holds(live: Live) -> None:
+    ana, bruno, _ = await followed_and_left(live)
+    request = ana._request
+
+    async def leave_meanwhile(method: str, payload: dict[str, Any]) -> dict[str, Any]:
+        if method == "thread.follow":
+            await ana.leave("t1")
+        return await request(method, payload)
+
+    ana._request = leave_meanwhile  # type: ignore[method-assign]
+    await drop_and_reopen(live, ana)
+    ana._request = request  # type: ignore[method-assign]
+    await bruno.send("t1", "left")
+    await bruno.send("t2", "followed")
+    items = await drain(ana)
+    assert [first_text(m) for m in items if isinstance(m, Message)] == ["followed"]
+    assert [j.thread.id for j in items if isinstance(j, Joined)] == ["t2"]
+    await drop_and_reopen(live, ana)
+    await bruno.send("t1", "still left")
+    assert [first_text(m) for m in await drain(ana) if isinstance(m, Message)] == []
+
+
+async def test_a_server_from_before_left_still_has_the_client_follow_after_a_drop(
+    live: Live, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    class Before(server_module._Args):
+        resume: bool = False
+        since: dict[str, int] | None = None
+        left: None = None
+
+    monkeypatch.setattr(server_module, "_Follow", Before)
+    ana, bruno, ana_identity = await followed_and_left(live)
+    await ana.leave("t1")
+    await drop_and_reopen(live, ana)
+    await bruno.create_thread(thread_id="t3")
+    await bruno.add_member("t3", ana_identity)
+    await bruno.send("t1", "left")
+    await bruno.send("t3", "added later")
+    items = await drain(ana)
+    assert [first_text(m) for m in items if isinstance(m, Message)] == ["added later"]
+    assert sorted(j.thread.id for j in items if isinstance(j, Joined)) == ["t2", "t3"]
+
+
+async def test_a_left_thread_made_again_while_away_and_the_follower_added_is_delivered(
+    live: Live,
+) -> None:
+    ana, bruno, ana_identity = await followed_and_left(live)
+    for n in range(3):
+        await bruno.send("t1", f"old {n}")
+    await drain(ana)
+    await ana.leave("t1")
+    live.paused = True
+    await live.drop()
+    await until(lambda: ana.status == "reconnecting")
+    await bruno.delete_thread("t1")
+    await bruno.create_thread(thread_id="t1")
+    await bruno.add_member("t1", ana_identity)
+    live.paused = False
+    await until(lambda: ana.status == "open", timeout=3.0)
+    await bruno.send("t1", "new")
+    items = await drain(ana)
+    assert sorted(j.thread.id for j in items if isinstance(j, Joined)) == ["t1", "t2"]
+    assert [first_text(m) for m in items if isinstance(m, Message)] == ["new"]

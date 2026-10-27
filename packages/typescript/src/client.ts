@@ -390,8 +390,14 @@ export class Client {
   private async rejoin(): Promise<void> {
     let followed = false
     if (this.following) {
+      const left = Object.fromEntries(this.left)
       try {
-        await this.followFrom(true, Object.fromEntries(this.cursors), Object.fromEntries(this.left))
+        try {
+          await this.followFrom(true, Object.fromEntries(this.cursors), left)
+        } catch (error) {
+          if (!(error instanceof InputError) || Object.keys(left).length === 0) throw error
+          await this.followFrom(true, { ...Object.fromEntries(this.cursors), ...left }, {})
+        }
         followed = true
       } catch (error) {
         if (error instanceof TransportError) return
@@ -546,10 +552,11 @@ export class Client {
   }
 
   async leave(threadId: string): Promise<void> {
-    const seq = this.cursors.get(threadId) ?? 0
+    const seq = this.cursors.get(threadId)
     this.cursors.delete(threadId)
     this.held.delete(threadId)
-    if (this.following) this.left.set(threadId, seq)
+    if (this.following && (seq !== undefined || !this.left.has(threadId)))
+      this.left.set(threadId, seq ?? 0)
     await this.request('thread.leave', { thread_id: threadId })
   }
 
@@ -567,10 +574,16 @@ export class Client {
     if (Object.keys(left).length > 0) payload.left = left
     const reply = await this.request('thread.follow', payload)
     this.following = true
-    const found = reply.joined as Joined[]
-    for (const joined of found) {
+    const found: Joined[] = []
+    const raced: string[] = []
+    for (const joined of reply.joined as Joined[]) {
       const id = joined.thread.id
+      if (this.left.has(id) && !Object.hasOwn(left, id)) {
+        raced.push(id)
+        continue
+      }
       this.left.delete(id)
+      found.push(joined)
       const sent = since?.[id]
       this.cursors.set(
         id,
@@ -580,6 +593,7 @@ export class Client {
       )
       this.emit(joined)
     }
+    for (const id of raced) await this.request('thread.leave', { thread_id: id })
     return found
   }
 
