@@ -1,2 +1,0 @@
-- rules/safety.md — lockout, hot surfaces, hydraulics and electrical cabinets: read before any hands-on step
-- rules/escalation.md — when to stop and call someone, and who

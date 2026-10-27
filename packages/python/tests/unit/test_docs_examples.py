@@ -12,7 +12,6 @@ import rfnry_thread
 from rfnry_thread import Identity, PostgresStorage, Server
 
 DOCS = Path(__file__).parents[4] / "docs" / "thread.md"
-EXAMPLES = Path(__file__).parents[4] / "examples"
 QUICKSTART = "postgresql://postgres:thread@localhost:5432/postgres"
 BLOCKS: list[tuple[str, str]] = re.findall(
     r"```(\w*)\n(.*?)```", DOCS.read_text(encoding="utf-8"), re.S
@@ -20,11 +19,11 @@ BLOCKS: list[tuple[str, str]] = re.findall(
 PYTHON = [body for lang, body in BLOCKS if lang == "python"]
 
 ILLUSTRATIVE = {
-    "app = FastAPI()": "needs a web framework and a signed-in user; every example serves /ws this way",
+    "app = FastAPI()": "needs a web framework and a signed-in user; test_socket.py serves a real socket",
     'remote = await Client.connect("wss://app.example.com/thread", headers={"Authorization": f"Bearer {token}"})': "needs a live socket; test_socket.py covers it",
     "async for item in helper.events():": "reads until the stream ends; test_client.py covers the pattern",
     "server = Server(PostgresStorage(pool))": "needs Postgres; the integration tier covers it",
-    'run = await engine.run("support", scope="acme", input=message.content,': "needs rfnry-engine; examples/factory_assistant runs it",
+    'run = await engine.run("support", scope="acme", input=message.content,': "needs rfnry-engine and a model; test_thread_tools.py covers the tools",
     "await helper.follow(resume=True)": "follows until the stream ends; test_follow.py covers the pattern",
     "async with pool.acquire() as conn:": "needs Postgres; the integration tier covers it",
     'offered = websocket.scope.get("subprotocols", [])': "needs a web framework's socket; test_socket.py covers a refusal with 1008",
@@ -78,14 +77,6 @@ def test_every_named_block_is_in_the_docs_and_first_lines_are_unique() -> None:
     lines = [first_line(block) for block in PYTHON]
     assert len(lines) == len(set(lines))
     assert set(ILLUSTRATIVE) <= set(lines)
-
-
-def test_every_example_a_reason_names_exists() -> None:
-    named = [
-        name for reason in ILLUSTRATIVE.values() for name in re.findall(r"examples/(\w+)", reason)
-    ]
-    assert named
-    assert all((EXAMPLES / name / "src" / "main.py").is_file() for name in named)
 
 
 @pytest.mark.parametrize("block", runnable())

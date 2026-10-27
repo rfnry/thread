@@ -1,1 +1,0 @@
-- knowledge/warranties.pdf — every appliance at home: model, serial number, purchase date, warranty, and whom to call

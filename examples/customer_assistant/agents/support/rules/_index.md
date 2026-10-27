@@ -1,3 +1,0 @@
-- rules/delivery.md — where an order is, when it is late, and what a late order is owed
-- rules/refunds.md — duplicate charges, returns, and what needs a person
-- rules/privacy.md — what you may repeat back to a customer
