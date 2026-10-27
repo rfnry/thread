@@ -336,12 +336,12 @@ async def connect(cls, url: str, *, headers: HeadersSource | None = None, protoc
 Connects over a WebSocket to `url` and returns the client. `headers` go with the upgrade; a
 `HeadersSource` is `dict[str, str] | Callable[[], Awaitable[dict[str, str]]]`, a dict or an async
 function returning one, called on every attempt so a token can refresh. `protocols` are the
-subprotocols offered, as a browser offers them; a `ProtocolsSource` is
-`str | list[str] | Callable[[], Awaitable[str | list[str]]]` — one subprotocol, a list, or an async
-function returning either, called on every attempt the same way. Raises `ForbiddenError` when
-the upgrade is refused with HTTP 401 or 403 or the socket is closed with 1008 before the hello is
-answered, and `TransportError` when the socket cannot be opened or the hello goes unanswered. The
-`headers` or `protocols` function refuses by raising `ForbiddenError`: a `ThreadException` it raises is raised as
+subprotocols offered, as a browser offers them; a `ProtocolsSource` is `str | list[str] |
+Callable[[], Awaitable[str | list[str]]]` — one subprotocol, a list, or an async function returning
+either, called on every attempt the same way. Raises `ForbiddenError` when the upgrade is refused
+with HTTP 401 or 403 or the socket is closed with 1008 before the hello is answered, and
+`TransportError` when the socket cannot be opened or the hello goes unanswered. The `headers` or
+`protocols` function refuses by raising `ForbiddenError`: a `ThreadException` it raises is raised as
 it is, and anything else as a `TransportError`, which on a reconnect is a failed attempt, retried
 with backoff.
 
@@ -491,9 +491,9 @@ async def history(
 
 Returns the latest `limit` events below `before` (a `seq`), in `seq` order; `kinds` keeps only those
 kinds. With `after` (a `seq`), the first `limit` events after it, in `seq` order; `before` and
-`after` together are a range. Raises `InputError` when `after` is negative or `limit` is not between 1 and 500, `NotFoundError` when the scope
-holds no such thread, `ForbiddenError` when the caller is not a member or `authorize` refuses
-`read`.
+`after` together are a range. Raises `InputError` when `after` is negative or `limit` is not between
+1 and 500, `NotFoundError` when the scope holds no such thread, `ForbiddenError` when the caller is
+not a member or `authorize` refuses `read`.
 
 ### `Client.get_event`
 
@@ -763,8 +763,8 @@ async def finish(self, content: Content | None = None, *, metadata: dict[str, An
 
 Stores the text written, or `content` instead, as the finishing message, ends the stream and returns
 the message. `metadata` is merged over the stream's, key by key, and checked against the same 8 KiB;
-the stream's own dict is left as it was. Raises `InputError` when the stream has already ended, and what `Client.send` raises,
-after which the stream has ended with nothing stored.
+the stream's own dict is left as it was. Raises `InputError` when the stream has already ended, and
+what `Client.send` raises, after which the stream has ended with nothing stored.
 
 ## Events and signals
 
@@ -1140,8 +1140,8 @@ class Thread(BaseModel):
 A conversation: `id` yours or the server's, `scope` its tenant, `metadata` yours. A listed thread
 also carries `last_seq` and `last_message_at` (when its latest message was written); listed for a
 member, `marked` (the member's private read position, `None` without one) and `unread` (messages by
-others after it, at most 100); with `preview`, `last_message` (the latest message not retracted,
-with its edits). Fields without a value are left out on the wire.
+others after it, at most 100); with `preview`, `last_message` (the latest message not retracted
+among its last five, with its edits). Fields without a value are left out on the wire.
 
 ### `Member`
 
@@ -1380,28 +1380,29 @@ class Storage(Protocol):
 
 The protocol `PostgresStorage` implements, and a storage of your own implements to take its place;
 `scope` is the first argument of every method that reads or writes a row, and the log is
-append-only: an event is removed only with its thread or its scope.
-`create_thread`, `add_member` and `append_event` return the row stored and whether it is new (an
-existing thread, membership, or event of the same author and `client_id` comes back with `False`,
-and a new event gets the thread's next `seq`); the getters return `None` for what the scope does not
-hold, `list_threads` returns threads newest first and `list_events` events in `seq` order, with
-`since` the first after it and without it the latest. `order` is an `Order`, which is
-`Literal["created", "activity"]`: `"activity"` lists by the latest message instead, a thread without
-messages by its creation; `preview=True` fills each thread's `last_message`. A page continues below
-`before`: a thread id, at that thread's place now, or a `Thread` a page listed, at the place its own
-`created_at`, `last_message_at` and `id` give it, so paging holds when that thread is deleted or
-moves meanwhile. `head` returns a thread's last `seq` when `identity_id` is a member of it,
-`None` otherwise: the one read that enters a thread for a connection. `listen` takes an `OnEvent`, `on_event(scope,
-thread_id, seq)`, and an `OnSignal`, `on_signal(scope, thread_id, payload)`, called for what any
-server on the storage appends or publishes, and an `OnResume`, `on_resume()`, called once a dropped
-listener is back; it returns a `Stop`, `stop()`, that ends it, and all four are async functions
-returning `None`. Raises `NotFoundError`, from `add_member`, `append_event` and `list_threads` with
-a `before` id, when the scope holds no such thread, and `StorageError`, from `create_thread`, when the thread's scope is not `scope`.
-`mark` stores the identity's private read position in the thread, never lowering it, and returns
-it with the count of `message` events by others after it, at most 100, and whether it moved (a
-first mark, or a higher one); `get_mark` returns it, `None` without one; `baseline_marks` stores
-each thread's last `seq` as the mark of every membership of `identity_id` that has none, and returns
-how many it stored. `mark` raises `NotFoundError` when the identity is not a member of the thread.
+append-only: an event is removed only with its thread or its scope. `create_thread`, `add_member`
+and `append_event` return the row stored and whether it is new (an existing thread, membership, or
+event of the same author and `client_id` comes back with `False`, and a new event gets the thread's
+next `seq`); the getters return `None` for what the scope does not hold, `list_threads` returns
+threads newest first and `list_events` events in `seq` order, with `since` the first after it and
+without it the latest. `order` is an `Order`, which is `Literal["created", "activity"]`:
+`"activity"` lists by the latest message instead, a thread without messages by its creation;
+`preview=True` fills each thread's `last_message`. A page continues below `before`: a thread id, at
+that thread's place now, or a `Thread` a page listed, at the place its own `created_at`,
+`last_message_at` and `id` give it, so paging holds when that thread is deleted or moves meanwhile.
+`head` returns a thread's last `seq` when `identity_id` is a member of it, `None` otherwise: the one
+read that enters a thread for a connection. `listen` takes an `OnEvent`, `on_event(scope, thread_id,
+seq)`, and an `OnSignal`, `on_signal(scope, thread_id, payload)`, called for what any server on the
+storage appends or publishes, and an `OnResume`, `on_resume()`, called once a dropped listener is
+back; it returns a `Stop`, `stop()`, that ends it, and all four are async functions returning
+`None`. Raises `NotFoundError`, from `add_member`, `append_event` and `list_threads` with a `before`
+id, when the scope holds no such thread, and `StorageError`, from `create_thread`, when the thread's
+scope is not `scope`. `mark` stores the identity's private read position in the thread, never
+lowering it, and returns it with the count of `message` events by others after it, at most 100, and
+whether it moved (a first mark, or a higher one); `get_mark` returns it, `None` without one;
+`baseline_marks` stores each thread's last `seq` as the mark of every membership of `identity_id`
+that has none, and returns how many it stored. `mark` raises `NotFoundError` when the identity is
+not a member of the thread.
 
 ### `PostgresStorage`
 
@@ -1758,8 +1759,8 @@ async history(
 Returns the latest `limit` events (50 when left out) below `before` (a `seq`), in `seq` order;
 `kinds` keeps only those kinds. With `after` (a `seq`), the first `limit` events after it, in `seq`
 order; `before` and `after` together are a range. Raises `InputError` when `after` is negative or
-`limit` is not between 1 and 500, `NotFoundError` when the scope holds no such thread, `ForbiddenError` when the caller is not a
-member or `authorize` refuses `read`.
+`limit` is not between 1 and 500, `NotFoundError` when the scope holds no such thread,
+`ForbiddenError` when the caller is not a member or `authorize` refuses `read`.
 
 ### `Client.getEvent`
 
@@ -1974,9 +1975,10 @@ async finish(content?: Content, options: { metadata?: Record<string, unknown> } 
 ```
 
 Stores the text written, or `content` instead, as the finishing message, ends the stream and returns
-the message. `options.metadata` is merged over the stream's, key by key, and checked against the same
-8 KiB; the stream's own object is left as it was. Raises `InputError` when the stream has already ended, `ForbiddenError` when the start
-was refused because the connection has not joined the thread, and what `Client.send` raises.
+the message. `options.metadata` is merged over the stream's, key by key, and checked against the
+same 8 KiB; the stream's own object is left as it was. Raises `InputError` when the stream has
+already ended, `ForbiddenError` when the start was refused because the connection has not joined the
+thread, and what `Client.send` raises.
 
 ### `Stream.abort`
 
@@ -2414,8 +2416,8 @@ type Thread = {
 A conversation: `id` yours or the server's, `scope` its tenant, `metadata` yours. A listed thread
 also carries `last_seq` and `last_message_at` (when its latest message was written); listed for a
 member, `marked` (the member's private read position, omitted without one) and `unread` (messages by
-others after it, at most 100); with `preview`, `last_message` (the latest message not retracted,
-with its edits). Fields without a value are left out on the wire.
+others after it, at most 100); with `preview`, `last_message` (the latest message not retracted
+among its last five, with its edits). Fields without a value are left out on the wire.
 
 ### `Member`
 

@@ -702,3 +702,24 @@ async def test_history_reads_forward_and_the_inbox_lists_by_activity(server: Ser
     assert [t.id for t in listed] == ["t1", "t2"]
     assert listed[0].last_message is not None
     assert listed[0].last_message.content == [Text(text="two")]
+
+
+async def test_a_follow_replay_for_a_thread_without_a_cursor_arrives_once_before_its_joined(
+    server: Server,
+) -> None:
+    ana = await server.connect(identity=ANA, scope="acme")
+    await ana.create_thread(thread_id="t1")
+    await ana.add_member("t1", HELPER)
+    for text in ("one", "two"):
+        await ana.send("t1", text)
+    helper = await server.connect(identity=HELPER, scope="acme")
+    await helper.follow(resume=True)
+    await ana.send("t1", "three")
+    items = await drain(helper)
+    assert [(type(i).__name__, getattr(i, "seq", None)) for i in items] == [
+        ("MemberAdded", 2),
+        ("Message", 3),
+        ("Message", 4),
+        ("Joined", 4),
+        ("Message", 5),
+    ]

@@ -250,7 +250,16 @@ async def test_the_same_thread_id_in_two_scopes_is_two_threads(storage: Storage)
     await storage.append_event("tenant-a", say("t1", "c1", "MARKER-A"))
     assert await storage.list_events("tenant-b", "t1") == []
     assert await storage.get_event("tenant-b", "t1", "id-c1-MARKER-A") is None
-    assert [t.id for t in await storage.list_threads("tenant-b", "ana")] == ["t1"]
+    await storage.update_thread("tenant-a", "t1", {"tenant": "a"})
+    await storage.update_thread("tenant-b", "t1", {"tenant": "b"})
+    [listed] = await storage.list_threads("tenant-b", "ana")
+    assert (listed.scope, listed.id, listed.metadata, listed.created_at, listed.last_seq) == (
+        "tenant-b",
+        "t1",
+        {"tenant": "b"},
+        AT,
+        0,
+    )
     assert await storage.delete_scope("tenant-a") == 3
     assert await storage.verify_absent("tenant-a")
     assert not await storage.verify_absent("tenant-b")
@@ -302,13 +311,17 @@ async def test_initialize_backfills_the_latest_message_time_on_an_existing_datab
     pool: Any, storage: Storage
 ) -> None:
     await room(storage, "t1")
-    await storage.append_event("acme", say("t1", "c1"))
+    await storage.append_event(
+        "acme", say("t1", "c1").model_copy(update={"created_at": AT + timedelta(minutes=5)})
+    )
+    await storage.append_event("acme", say("t1", "c2"))
+    [live] = await storage.list_threads("acme", None)
     async with pool.acquire() as conn:
         await conn.execute("DROP INDEX IF EXISTS ix_thread_threads_activity")
         await conn.execute("ALTER TABLE thread_threads DROP COLUMN last_message_at")
     await storage.initialize()
     [listed] = await storage.list_threads("acme", None)
-    assert listed.last_message_at == AT
+    assert listed.last_message_at == live.last_message_at == AT
 
 
 async def test_a_mark_moves_forward_only_counts_what_others_said_after_it_and_says_if_it_moved(
@@ -496,3 +509,79 @@ async def test_a_preview_shows_the_latest_message_with_its_edit_and_skips_a_retr
         first.id,
         [Text(text="first, edited")],
     )
+
+
+async def test_a_preview_reads_the_last_five_messages_with_the_edits_and_retractions_after_them(
+    storage: Storage,
+) -> None:
+    await room(storage, "t1", "acme", ANA)
+    old, _ = await storage.append_event("acme", say("t1", "c0", "old"))
+    recent = [
+        (await storage.append_event("acme", say("t1", f"c{n}", f"m{n}")))[0] for n in range(1, 6)
+    ]
+
+    def change(kind: Any, client_id: str, target: str, **fields: Any) -> Any:
+        return kind(
+            id=client_id,
+            thread_id="t1",
+            author=ANA,
+            created_at=AT,
+            client_id=client_id,
+            target=target,
+            **fields,
+        )
+
+    async def shown() -> Message | None:
+        [thread] = await storage.list_threads("acme", "ana", preview=True)
+        return thread.last_message
+
+    await storage.append_event(
+        "acme", change(Edit, "e0", old.id, content=[Text(text="old, edited")])
+    )
+    assert (await shown()) == recent[-1]
+    for n, message in enumerate(recent[1:]):
+        await storage.append_event("acme", change(Retract, f"r{n}", message.id))
+    edited = await shown()
+    assert edited is not None and (edited.id, edited.content) == (recent[0].id, [Text(text="m1")])
+    await storage.append_event("acme", change(Retract, "r-last", recent[0].id))
+    assert await shown() is None
+
+
+async def test_a_member_listing_by_activity_filters_metadata_and_pages_together(
+    storage: Storage,
+) -> None:
+    for minutes, (thread_id, metadata) in enumerate(
+        [
+            ("a", {"open": True}),
+            ("b", {"open": True}),
+            ("c", {"open": False}),
+            ("d", {"open": True}),
+        ]
+    ):
+        await storage.create_thread(
+            "acme",
+            Thread(
+                id=thread_id,
+                scope="acme",
+                metadata=metadata,
+                created_at=AT + timedelta(minutes=minutes),
+            ),
+        )
+        if thread_id != "b":
+            await storage.add_member(
+                "acme", Member(thread_id=thread_id, identity=ANA, added_at=AT, added_by=SYSTEM)
+            )
+    late = say("a", "late", author=BRUNO).model_copy(update={"created_at": AT + timedelta(hours=1)})
+    await storage.append_event("acme", late)
+    await storage.mark("acme", "a", "ana", 0)
+
+    async def listed(**query: Any) -> list[tuple[str, int | None]]:
+        threads = await storage.list_threads(
+            "acme", "ana", metadata={"open": True}, order="activity", **query
+        )
+        return [(t.id, t.unread) for t in threads]
+
+    assert await listed() == [("a", 1), ("d", None)]
+    assert await listed(limit=1) == [("a", 1)]
+    assert await listed(before="a") == [("d", None)]
+    assert await listed(before="d") == []

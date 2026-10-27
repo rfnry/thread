@@ -471,6 +471,7 @@ describe('client', () => {
     await expect(client.follow()).rejects.toBeInstanceOf(InputError)
     expect((client as unknown as { following: boolean }).following).toBe(false)
     server.drop()
+    await vi.waitFor(() => expect(server.hellos).toHaveLength(2))
     await vi.waitFor(() => expect(client.status).toBe('open'))
     expect(server.sent('thread.follow')).toHaveLength(1)
     await client.close()
@@ -701,6 +702,47 @@ describe('client', () => {
       await client.close()
     })
   }
+
+  it('opens again after a drop only the followed threads it joined', async () => {
+    const thread = (id: string) => ({
+      id,
+      scope: 'acme',
+      metadata: {},
+      created_at: '2026-01-01T12:00:00Z',
+    })
+    server.handlers.set('thread.follow', () => ({
+      joined: ['t1', 't2'].map((id) => ({ thread: thread(id), seq: 4, truncated: false })),
+    }))
+    const client = await connect({ url: 'ws://fake', protocols: ['thread', 'tok'] })
+    const items: Item[] = []
+    client.subscribe((item) => items.push(item))
+    await client.follow()
+    await client.join('t2')
+    server.drop()
+    await vi.waitFor(() => expect(items).toContainEqual({ kind: 'status', status: 'open' }))
+    expect(server.sent('thread.join').map((frame) => frame.payload.thread_id)).toEqual(['t2', 't2'])
+    await client.close()
+  })
+
+  it('hands a follow replay for a thread without a cursor once, before its Joined', async () => {
+    const t1 = { id: 't1', scope: 'acme', metadata: {}, created_at: '2026-01-01T12:00:00Z' }
+    server.handlers.set('thread.follow', () => {
+      server.push('event', message(3, 'one'))
+      server.push('event', message(4, 'two'))
+      return { joined: [{ thread: t1, seq: 4, truncated: false }] }
+    })
+    const client = await connect({ url: 'ws://fake', protocols: ['thread', 'tok'] })
+    const items: Item[] = []
+    client.subscribe((item) => items.push(item))
+    await client.follow({ resume: true })
+    server.push('event', message(4, 'two'))
+    server.push('event', message(5, 'three'))
+    await vi.waitFor(() => expect(items.at(-1)).toMatchObject({ seq: 5 }))
+    expect(
+      items.map((item) => ('truncated' in item ? 'joined' : 'seq' in item ? item.seq : item.kind))
+    ).toEqual([3, 4, 'joined', 5])
+    await client.close()
+  })
 
   it('re-joins each thread from the cursor it holds when that thread is re-joined', async () => {
     const log: Record<string, Array<Record<string, unknown>>> = {

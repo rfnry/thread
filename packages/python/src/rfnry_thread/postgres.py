@@ -60,9 +60,10 @@ _DDL = [
 ]
 
 _BACKFILL = (
-    "UPDATE thread_threads t SET last_message_at = m.at FROM (SELECT scope, thread_id, "
-    "max((body->>'created_at')::timestamptz) AS at FROM thread_events WHERE kind = 'message' "
-    "GROUP BY scope, thread_id) m WHERE t.scope = m.scope AND t.id = m.thread_id"
+    "UPDATE thread_threads t SET last_message_at = m.at FROM (SELECT DISTINCT ON (scope, thread_id) "
+    "scope, thread_id, (body->>'created_at')::timestamptz AS at FROM thread_events "
+    "WHERE kind = 'message' ORDER BY scope, thread_id, seq DESC) m "
+    "WHERE t.scope = m.scope AND t.id = m.thread_id"
 )
 
 _THREAD = "scope, id, metadata, created_at"

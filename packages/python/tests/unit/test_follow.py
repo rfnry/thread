@@ -249,6 +249,42 @@ async def test_an_authorize_that_fails_for_one_connection_still_hands_the_thread
     assert sorted(len(follower.joined) for follower in followers) == [0, 1]
 
 
+async def test_a_far_follower_is_not_handed_a_thread_authorize_refuses_when_added_later(
+    storage: PostgresStorage,
+) -> None:
+    async def authorize(actor: Identity, action: str, thread: Thread) -> bool:
+        return not (actor.id == "helper" and thread.metadata.get("secret"))
+
+    near, far = Server(storage, authorize=authorize), Server(storage, authorize=authorize)
+    await near.start()
+    await far.start()
+    try:
+        follower = await Peer.open(far, HELPER)
+        await follower.call("thread.follow")
+        await near.create_thread("acme", "closed", {"secret": True})
+        await near.create_thread("acme", "open")
+        await near.add_member("acme", "closed", HELPER)
+        await near.add_member("acme", "open", HELPER)
+        pushes = await follower.quiet(0.5)
+        assert [j["thread"]["id"] for j in follower.joined] == ["open"]
+        assert {p["thread_id"] for p in pushes} == {"open"}
+    finally:
+        await near.stop()
+        await far.stop()
+
+
+async def test_a_follow_with_a_since_map_leaves_a_membership_without_a_mark_unmarked(
+    storage: PostgresStorage, server: Server
+) -> None:
+    await server.create_thread("acme", "t1")
+    await storage.add_member(
+        "acme", Member(thread_id="t1", identity=HELPER, added_at=AT, added_by=SYSTEM)
+    )
+    helper = await Peer.open(server, HELPER)
+    await helper.call("thread.follow", resume=True, since={"t1": 0})
+    assert await storage.get_mark("acme", "t1", "helper") is None
+
+
 async def test_following_then_joining_the_same_thread_arrives_and_leaves_once(
     server: Server,
 ) -> None:

@@ -199,8 +199,8 @@ local = await server.connect(identity=Identity(role="assistant", id="helper"), s
 `Client.connect` speaks the protocol over a WebSocket; `headers` go with the upgrade, whatever your
 endpoint expects. They are a dict, or an async function returning one, called on every attempt so a
 token can refresh; `protocols` are the subprotocols offered, as a browser offers them, a list or an
-async function the same way. `server.connect` is in-process and trusted — your code names the identity. Both
-expose `client.identity` and `client.scope`, as the server knows them, and close with
+async function the same way. `server.connect` is in-process and trusted — your code names the
+identity. Both expose `client.identity` and `client.scope`, as the server knows them, and close with
 `await client.close()`.
 
 ### Threads and members
@@ -220,9 +220,10 @@ and may `read` it, so creating is safe to repeat, and raises `ForbiddenError` wh
 may not; without one the server picks it. The creator is the first member. `list_threads` returns
 the threads you are a member of, newest first, `before=` a thread id for the next page (one deleted
 since raises `NotFoundError`: list again from the top); with an `authorize`, the threads it refuses
-to `read` are skipped, a page still holds up to `limit` threads you may read, and an empty page means
-there are no more. Adding and removing members and updating metadata write `MemberAdded`, `MemberRemoved` and `ThreadUpdated` to the log. `delete_thread`
-removes the thread, its members and its log, and tells whoever has it open.
+to `read` are skipped, a page still holds up to `limit` threads you may read, and an empty page
+means there are no more. Adding and removing members and updating metadata write `MemberAdded`,
+`MemberRemoved` and `ThreadUpdated` to the log. `delete_thread` removes the thread, its members and
+its log, and tells whoever has it open.
 
 A member **joins** a thread to receive it live; membership is who may, joining is who does:
 
@@ -439,7 +440,7 @@ if first_unread:
 
 `order="activity"` puts the thread with the latest message first; `unread` counts messages by
 others after your mark, up to 100; `preview=True` adds each thread's latest message, edits applied,
-retractions skipped.
+retractions skipped, from its last five.
 
 ### Many replicas
 
@@ -490,8 +491,8 @@ server and storage use.
 A replica that dies releases its lock with its connection, and so does a connection that goes back
 to the pool: asyncpg's reset releases its session locks, and a connection it cannot reset is closed,
 so an unlock that fails or is cancelled never leaves the thread held. A pool given its own `reset=`
-replaces that query, so it must run `pg_advisory_unlock_all()` itself. Effects stay idempotent all the same: a resume can hand the
-next holder an event the last one handled just before it died.
+replaces that query, so it must run `pg_advisory_unlock_all()` itself. Effects stay idempotent all
+the same: a resume can hand the next holder an event the last one handled just before it died.
 
 A run that answers several messages at once replies `in_reply_to` the last one it read. The
 holder's check is then for its own latest reply after the mark: everything up to the event that
@@ -610,13 +611,13 @@ const message = await client.send(threadId, 'Can you check my invoice?')
 ```
 
 The verbs are the Python ones in camelCase — `createThread`, `getThread`, `listThreads`,
-`updateThread`, `deleteThread`, `join`, `leave`, `follow`, `mark`, `marked`, `history`, `getEvent`, `present`,
-`addMember`, `removeMember`, `listMembers`, `send`, `stream`, `step`, `edit`, `retract`, `read`,
-`custom`, `working`, `idle`, `cancel`, `close` — with the same outbox, reconnect and resume. Events
-and signals are the wire shapes, fields as they travel (`thread_id`, `in_reply_to`); options are
-camelCase, and `send` and `stream` take `metadata` beside `inReplyTo`. A browser cannot set headers
-on a WebSocket, so the upgrade carries your session cookie — check its `Origin` — or a token in
-`protocols`, the subprotocol list; an endpoint that reads a token there accepts with one of the
+`updateThread`, `deleteThread`, `join`, `leave`, `follow`, `mark`, `marked`, `history`, `getEvent`,
+`present`, `addMember`, `removeMember`, `listMembers`, `send`, `stream`, `step`, `edit`, `retract`,
+`read`, `custom`, `working`, `idle`, `cancel`, `close` — with the same outbox, reconnect and resume.
+Events and signals are the wire shapes, fields as they travel (`thread_id`, `in_reply_to`); options
+are camelCase, and `send` and `stream` take `metadata` beside `inReplyTo`. A browser cannot set
+headers on a WebSocket, so the upgrade carries your session cookie — check its `Origin` — or a token
+in `protocols`, the subprotocol list; an endpoint that reads a token there accepts with one of the
 offered subprotocols (`await websocket.accept(subprotocol="thread")`). Listeners get what arrives
 after they subscribe, so subscribe before joining. A UI usually wants its own messages too, echoed
 from other tabs, hence `includeOwn`. Streaming:
@@ -727,11 +728,11 @@ Everything the package exports, by role.
 - **Fail loudly:** `ThreadException`, `NotFoundError`, `InputError`, `ConfigurationError`, `ForbiddenError`, `StorageError`, `TransportError`.
 
 The TypeScript package is a client: it exports `connect`, the `Client` and `Stream` classes,
-`resolve`, `CLOSE_REFUSED`, the same error classes, and the types of the identity, parts, events, signals and records
-above, and nothing of the server, the storage or the tools; `Item` is what a listener receives — an
-event, a signal, a re-join's `Joined` or a `StatusChanged` — `Status` is what `client.status` holds,
-and `ConnectOptions`, `Protocols`, `Listener`, `StreamOptions`, `SendOptions`, `WriteOptions` and
-`StepOptions` type the options.
+`resolve`, `CLOSE_REFUSED`, the same error classes, and the types of the identity, parts, events,
+signals and records above, and nothing of the server, the storage or the tools; `Item` is what a
+listener receives — an event, a signal, a re-join's `Joined` or a `StatusChanged` — `Status` is what
+`client.status` holds, and `ConnectOptions`, `Protocols`, `Listener`, `StreamOptions`,
+`SendOptions`, `WriteOptions` and `StepOptions` type the options.
 
 ## Errors
 
