@@ -1,6 +1,6 @@
 import asyncio
 import contextlib
-from collections.abc import AsyncIterator
+from collections.abc import AsyncIterator, Sequence
 from http import HTTPStatus
 from typing import Any
 
@@ -8,6 +8,7 @@ import pytest
 from until import until
 from websockets.asyncio.server import ServerConnection, serve
 from websockets.http11 import Request, Response
+from websockets.typing import Subprotocol
 
 from rfnry_thread import client as client_module
 from rfnry_thread.client import Client, Item
@@ -180,6 +181,61 @@ async def test_a_headers_function_that_refuses_and_one_that_fails_raise_apart(li
         TransportError, match="^client: the headers function raised: network is unreachable$"
     ):
         await Client.connect(live.url, headers=failing)
+
+
+@contextlib.asynccontextmanager
+async def by_subprotocol(server: Server) -> AsyncIterator[tuple[Live, list[list[str]]]]:
+    live, offered = Live(server), []
+
+    def pick(socket: ServerConnection, protocols: Sequence[Subprotocol]) -> Subprotocol | None:
+        offered.append([str(p) for p in protocols])
+        return protocols[0] if protocols and protocols[0] == "bearer" else None
+
+    async def handler(socket: ServerConnection) -> None:
+        token = offered[-1][1]
+        served = Served(socket, live)
+        live.open.append(served)
+        await server.serve(served, identity=Identity(role="user", id=token), scope="acme")
+
+    async with serve(handler, "127.0.0.1", 0, select_subprotocol=pick) as listening:
+        live.url = f"ws://127.0.0.1:{next(iter(listening.sockets)).getsockname()[1]}"
+        yield live, offered
+
+
+async def test_subprotocols_go_with_every_attempt(server: Server) -> None:
+    calls: list[int] = []
+
+    async def protocols() -> list[str]:
+        calls.append(1)
+        return ["bearer", f"ana-{len(calls)}"]
+
+    async with by_subprotocol(server) as (live, offered):
+        fixed = await Client.connect(live.url, protocols=["bearer", "bruno"])
+        ana = await Client.connect(live.url, protocols=protocols)
+        first = ana.identity.id
+        await live.drop()
+        await until(lambda: len(calls) >= 2 and ana.status == "open", timeout=3.0)
+        again = ana.identity.id
+        await ana.close()
+        await fixed.close()
+    assert fixed.identity.id == "bruno" and offered[0] == ["bearer", "bruno"]
+    assert (first, again) == ("ana-1", "ana-2")
+
+
+async def test_a_protocols_function_that_refuses_ends_for_good(server: Server) -> None:
+    async def refusing() -> list[str]:
+        raise ForbiddenError("app: session expired")
+
+    async def failing() -> list[str]:
+        raise OSError("network is unreachable")
+
+    async with by_subprotocol(server) as (live, _):
+        with pytest.raises(ForbiddenError, match="^app: session expired$"):
+            await Client.connect(live.url, protocols=refusing)
+        with pytest.raises(
+            TransportError, match="^client: the protocols function raised: network is unreachable$"
+        ):
+            await Client.connect(live.url, protocols=failing)
 
 
 async def test_a_headers_function_that_fails_on_a_reconnect_is_called_again(live: Live) -> None:

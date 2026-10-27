@@ -9,6 +9,7 @@ import rfnry_thread
 from rfnry_thread import models
 
 EXPECTED = {
+    "CLOSE_REFUSED",
     "Server",
     "Connection",
     "Client",

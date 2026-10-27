@@ -11,6 +11,7 @@ import {
   ThreadException,
   TransportError,
 } from '../src/errors.js'
+import { CLOSE_REFUSED } from '../src/index.js'
 
 const SRC = join(import.meta.dirname, '../src')
 const PREFIXES: Record<string, string> = { outbox: 'client' }
@@ -23,6 +24,12 @@ const FAMILY = [
   StorageError,
   TransportError,
 ]
+
+describe('close codes', () => {
+  it('export the refusal an endpoint closes with', () => {
+    expect(CLOSE_REFUSED).toBe(1008)
+  })
+})
 
 describe('errors', () => {
   it('maps every wire code to its class with the same message', () => {

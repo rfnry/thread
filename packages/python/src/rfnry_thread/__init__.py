@@ -46,6 +46,7 @@ from rfnry_thread.models import (
     Working,
 )
 from rfnry_thread.postgres import PostgresStorage
+from rfnry_thread.protocol import CLOSE_REFUSED
 from rfnry_thread.resolve import resolve
 from rfnry_thread.server import Server
 from rfnry_thread.storage import Storage
@@ -54,6 +55,7 @@ from rfnry_thread.tools import ThreadTools, Tool, Tools
 __version__ = "0.1.1"
 
 __all__ = [
+    "CLOSE_REFUSED",
     "Server",
     "Connection",
     "Client",

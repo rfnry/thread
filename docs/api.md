@@ -328,15 +328,17 @@ and raises again, with its class and message, an error the server raised.
 
 ```python
 @classmethod
-async def connect(cls, url: str, *, headers: HeadersSource | None = None) -> Client: ...
+async def connect(cls, url: str, *, headers: HeadersSource | None = None, protocols: ProtocolsSource | None = None) -> Client: ...
 ```
 
 Connects over a WebSocket to `url` and returns the client. `headers` go with the upgrade; a
 `HeadersSource` is `dict[str, str] | Callable[[], Awaitable[dict[str, str]]]`, a dict or an async
-function returning one, called on every attempt so a token can refresh. Raises `ForbiddenError` when
+function returning one, called on every attempt so a token can refresh. `protocols` are the
+subprotocols offered, as a browser offers them; a `ProtocolsSource` is
+`list[str] | Callable[[], Awaitable[list[str]]]`, called on every attempt the same way. Raises `ForbiddenError` when
 the upgrade is refused with HTTP 401 or 403 or the socket is closed with 1008 before the hello is
 answered, and `TransportError` when the socket cannot be opened or the hello goes unanswered. The
-`headers` function refuses by raising `ForbiddenError`: a `ThreadException` it raises is raised as
+`headers` or `protocols` function refuses by raising `ForbiddenError`: a `ThreadException` it raises is raised as
 it is, and anything else as a `TransportError`, which on a reconnect is a failed attempt, retried
 with backoff.
 
@@ -1408,6 +1410,17 @@ it drops. Raises `StorageError` when the database fails, and from
 
 ## Errors
 
+### `CLOSE_REFUSED`
+
+```python
+CLOSE_REFUSED = 1008
+```
+
+The close code an endpoint refuses a connection with, after accepting it; a client raises
+`ForbiddenError` when its socket is closed with it before the hello is answered, and stops. The
+server closes with 4000 when a client breaks the protocol and 4001 when a connection cannot keep up;
+after either, and after any close once the hello was answered, a client reconnects.
+
 ### `ThreadException`
 
 ```python
@@ -2425,6 +2438,17 @@ type StatusChanged = { kind: 'status'; status: Status }
 What a listener receives when the client's `status` changes: `'reconnecting'` when its socket drops,
 `'open'` after the re-joins that follow, `'closed'` when it stops. It names no thread and never
 travels on the wire.
+
+### `CLOSE_REFUSED`
+
+```ts
+export const CLOSE_REFUSED = 1008
+```
+
+The close code an endpoint refuses a connection with, after accepting it; a client raises
+`ForbiddenError` when its socket is closed with it before the hello is answered, and stops. The
+server closes with 4000 when a client breaks the protocol and 4001 when a connection cannot keep up;
+after either, and after any close once the hello was answered, a client reconnects.
 
 ### `ThreadException`
 

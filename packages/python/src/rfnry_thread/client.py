@@ -59,6 +59,7 @@ from rfnry_thread.websocket import open_socket
 
 Dial = Callable[[], Awaitable[Connection]]
 HeadersSource = dict[str, str] | Callable[[], Awaitable[dict[str, str]]]
+ProtocolsSource = list[str] | Callable[[], Awaitable[list[str]]]
 Item = Event | Signal | Joined | StatusChanged
 
 HANDSHAKE = 10.0
@@ -83,15 +84,15 @@ def _expect[E](event: Event, kind: type[E]) -> E:
     return event
 
 
-async def _headers(source: HeadersSource | None) -> dict[str, str] | None:
-    if source is None or isinstance(source, dict):
+async def _supplied[T](source: T | Callable[[], Awaitable[T]] | None, name: str) -> T | None:
+    if source is None or not callable(source):
         return source
     try:
         return await source()
     except ThreadException:
         raise
     except Exception as exc:
-        raise TransportError(f"client: the headers function raised: {exc}") from exc
+        raise TransportError(f"client: the {name} function raised: {exc}") from exc
 
 
 def _own(item: Item, identity: Identity) -> bool:
@@ -216,9 +217,17 @@ class Client:
         return self._status
 
     @classmethod
-    async def connect(cls, url: str, *, headers: HeadersSource | None = None) -> Client:
+    async def connect(
+        cls,
+        url: str,
+        *,
+        headers: HeadersSource | None = None,
+        protocols: ProtocolsSource | None = None,
+    ) -> Client:
         async def dial() -> Connection:
-            return await open_socket(url, await _headers(headers))
+            return await open_socket(
+                url, await _supplied(headers, "headers"), await _supplied(protocols, "protocols")
+            )
 
         return await cls._open(dial)
 

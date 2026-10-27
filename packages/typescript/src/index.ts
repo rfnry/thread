@@ -17,5 +17,6 @@ export {
   ThreadException,
   TransportError,
 } from './errors.js'
+export { CLOSE_REFUSED } from './protocol.js'
 export { resolve } from './resolve.js'
 export type * from './types.js'

@@ -1,5 +1,6 @@
 from websockets.asyncio.client import ClientConnection, connect
 from websockets.exceptions import ConnectionClosed, InvalidStatus
+from websockets.typing import Subprotocol
 
 from rfnry_thread.connection import Connection
 from rfnry_thread.errors import ForbiddenError
@@ -42,9 +43,18 @@ class _Socket:
         ) from closed
 
 
-async def open_socket(url: str, headers: dict[str, str] | None = None) -> Connection:
+async def open_socket(
+    url: str, headers: dict[str, str] | None = None, protocols: list[str] | None = None
+) -> Connection:
+    offered = [Subprotocol(p) for p in protocols] if protocols else None
     try:
-        socket = await connect(url, additional_headers=headers, max_size=MAX_FRAME, open_timeout=10)
+        socket = await connect(
+            url,
+            additional_headers=headers,
+            subprotocols=offered,
+            max_size=MAX_FRAME,
+            open_timeout=10,
+        )
     except InvalidStatus as exc:
         status = exc.response.status_code
         if status in REFUSED:

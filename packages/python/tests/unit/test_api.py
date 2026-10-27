@@ -232,7 +232,9 @@ def test_every_typescript_export_and_method_has_one_entry_and_nothing_else_does(
     undeclared = []
     for name, block in entries("typescript"):
         owner, _, method = name.partition(".")
-        pattern = rf"^(?:async )?{method}\(" if method else rf"\b(?:type|class|function) {owner}\b"
+        pattern = (
+            rf"^(?:async )?{method}\(" if method else rf"\b(?:type|class|function|const) {owner}\b"
+        )
         if not re.search(pattern, block, re.M):
             undeclared.append(name)
     assert undeclared == []

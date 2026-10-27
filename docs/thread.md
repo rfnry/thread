@@ -174,7 +174,7 @@ async def thread_socket(websocket: WebSocket, user: User = Depends(current_user)
 
 Any other framework adapts in the same few lines. Refusing a connection happens before `serve`:
 answer the upgrade with HTTP 401 or 403, or accept it and close it at once with 1008, policy
-violation:
+violation — `CLOSE_REFUSED` in both packages:
 
 ```python
 offered = websocket.scope.get("subprotocols", [])
@@ -198,7 +198,8 @@ local = await server.connect(identity=Identity(role="assistant", id="helper"), s
 
 `Client.connect` speaks the protocol over a WebSocket; `headers` go with the upgrade, whatever your
 endpoint expects. They are a dict, or an async function returning one, called on every attempt so a
-token can refresh. `server.connect` is in-process and trusted — your code names the identity. Both
+token can refresh; `protocols` are the subprotocols offered, as a browser offers them, a list or an
+async function the same way. `server.connect` is in-process and trusted — your code names the identity. Both
 expose `client.identity` and `client.scope`, as the server knows them, and close with
 `await client.close()`.
 
@@ -570,8 +571,8 @@ Securing the upgrade is yours, like the rest of authentication. A short checklis
   origins. Browsers attach cookies to a WebSocket upgrade from any site and WebSockets have no CORS,
   so without the check any page the person visits could speak as them (cross-site WebSocket
   hijacking).
-- Prefer short-lived tokens. `headers` in Python and `protocols` in TypeScript may be async
-  functions, called on every reconnect, so a fresh token goes with each attempt. Raise
+- Prefer short-lived tokens. `headers` and `protocols` in Python, and `protocols` in TypeScript, may
+  be async functions, called on every reconnect, so a fresh token goes with each attempt. Raise
   `ForbiddenError` from one to refuse the connection for good, as the example below does for an
   expired session; an error that is not the library's, a failed token fetch while the network is
   down say, counts as a failed attempt and the client keeps reconnecting.
@@ -703,7 +704,7 @@ assert await server.verify_absent("acme")
 
 Everything the package exports, by role.
 
-- **Serve:** `Server`, with your `authorize` and `redact`; `Connection`.
+- **Serve:** `Server`, with your `authorize` and `redact`; `Connection`; `CLOSE_REFUSED`.
 - **Take part:** `Client`, `Stream`, `Joined`, `StatusChanged`.
 - **Who and what:** `Identity`, `IdentityLike`, `Thread`, `Member`; parts `Text`, `Image`, `Audio`, `Document`, `Part`, `Content`.
 - **The log:** `Message`, `Step`, `Edit`, `Retract`, `Read`, `MemberAdded`, `MemberRemoved`, `ThreadUpdated`, `Custom`, `Event`; `resolve`.
@@ -713,7 +714,7 @@ Everything the package exports, by role.
 - **Fail loudly:** `ThreadException`, `NotFoundError`, `InputError`, `ConfigurationError`, `ForbiddenError`, `StorageError`, `TransportError`.
 
 The TypeScript package is a client: it exports `connect`, the `Client` and `Stream` classes,
-`resolve`, the same error classes, and the types of the identity, parts, events, signals and records
+`resolve`, `CLOSE_REFUSED`, the same error classes, and the types of the identity, parts, events, signals and records
 above, and nothing of the server, the storage or the tools; `Item` is what a listener receives — an
 event, a signal, a re-join's `Joined` or a `StatusChanged` — `Status` is what `client.status` holds,
 and `ConnectOptions`, `Protocols`, `Listener`, `StreamOptions`, `SendOptions`, `WriteOptions` and
