@@ -2,7 +2,9 @@ import annotationlib
 import inspect
 import subprocess
 import sys
+import tomllib
 from collections.abc import Callable
+from pathlib import Path
 from typing import Any
 
 import rfnry_thread
@@ -155,3 +157,8 @@ def test_importing_the_package_imports_no_driver_and_no_framework() -> None:
         ).stdout.strip()
         == "[]"
     )
+
+
+def test_the_version_is_the_one_the_package_is_built_with() -> None:
+    project = tomllib.loads((Path(__file__).parents[2] / "pyproject.toml").read_text())
+    assert rfnry_thread.__version__ == project["project"]["version"]
