@@ -1,7 +1,7 @@
 import { readdirSync, readFileSync } from 'node:fs'
 import { join } from 'node:path'
 import { describe, expect, it } from 'vitest'
-import { decode, encode, type Push } from '../src/protocol.js'
+import { decode, encode, type Push, type Response } from '../src/protocol.js'
 import type { Event, Message, Signal, Thread } from '../src/types.js'
 
 const FIXTURES = join(import.meta.dirname, '../../python/tests/fixtures/protocol')
@@ -65,7 +65,7 @@ describe('golden fixtures', () => {
 
   it('carry a listed thread with what a listing adds', () => {
     const text = readFileSync(join(FIXTURES, 'response-thread-list.json'), 'utf8')
-    const [thread] = (decode(text).payload as { threads: Thread[] }).threads
+    const [thread] = ((decode(text) as Response).payload as { threads: Thread[] }).threads
     expect(thread).toMatchObject({
       id: 't1',
       last_seq: 9,
