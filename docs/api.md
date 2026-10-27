@@ -448,8 +448,9 @@ receives now. With `resume=True`, each thread's events after the caller's mark c
 where it was added when it has no mark yet; a membership older than marks starts now), at most the
 server's `replay_limit`, beyond which the latest and `truncated=True`. Following is not presence:
 no `Present` is announced, and the caller may still signal and receive signals in every thread.
-After a dropped socket the client follows again from what it has seen, and leaves again the threads
-it had left. Threads `authorize` refuses to `read` are left out. Raises `InputError` for a negative
+A thread the connection already receives is not handed again. After a dropped socket the client
+follows again from what it has seen, without the threads it had left unless it was added to them
+again since. Threads `authorize` refuses to `read` are left out. Raises `InputError` for a negative
 position.
 
 ### `Client.mark`
@@ -1714,8 +1715,9 @@ receives now. With `resume: true`, each thread's events after the caller's mark 
 where it was added when it has no mark yet; a membership older than marks starts now), at most the
 server's `replay_limit`, beyond which the latest and `truncated: true`. Following is not presence:
 no `Present` is announced, and the caller may still signal and receive signals in every thread.
-After a dropped socket the client follows again from what it has seen, and leaves again the threads
-it had left. Threads `authorize` refuses to `read` are left out. Raises `InputError` for a negative
+A thread the connection already receives is not handed again. After a dropped socket the client
+follows again from what it has seen, without the threads it had left unless it was added to them
+again since. Threads `authorize` refuses to `read` are left out. Raises `InputError` for a negative
 position.
 
 ### `Client.mark`

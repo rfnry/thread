@@ -109,6 +109,22 @@ async def test_a_refollow_skips_a_left_thread_unless_the_follower_was_added_to_i
         await helper.call("thread.follow", left={"t1": -1})
 
 
+async def test_a_second_follow_on_the_same_connection_replays_nothing_already_delivered(
+    storage: PostgresStorage,
+) -> None:
+    server = Server(storage, replay_limit=2)
+    ana = await threads(server, "t1")
+    await say(ana, "t1", "one")
+    helper = await Peer.open(server, HELPER)
+    first = await helper.call("thread.follow", resume=True)
+    await say(ana, "t1", "two")
+    assert texts(await helper.quiet()) == ["one", "two"]
+    again = await helper.call("thread.follow", resume=True)
+    assert await helper.quiet() == []
+    assert [j["seq"] for j in again["joined"]] == [first["joined"][0]["seq"] + 1]
+    assert [j["truncated"] for j in again["joined"]] == [False]
+
+
 async def test_authorize_decides_which_threads_a_follower_receives(
     storage: PostgresStorage,
 ) -> None:

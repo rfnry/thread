@@ -104,14 +104,14 @@ class Hub:
         return joined
 
     async def _enter(
-        self, session: Session, thread: Thread, since: int | None
+        self, session: Session, thread: Thread, since: int | None, rewind: bool = True
     ) -> tuple[Joined, bool]:
         scope, thread_id = session.scope, thread.id
         async with self._lock(scope, thread_id):
             if session.dropped:
                 return Joined(thread=thread, seq=session.joined.get(thread_id, 0)), False
             if thread_id in session.joined:
-                return await self._rewind(session, thread, since), False
+                return await self._rewind(session, thread, since if rewind else None), False
             latest = await self.storage.list_events(scope, thread_id, limit=1)
             head = latest[-1].seq if latest else 0
             if not await self.storage.is_member(scope, thread_id, session.identity.id):
@@ -164,7 +164,7 @@ class Hub:
         found: list[Joined] = []
         for thread, since in threads:
             try:
-                joined, _ = await self._enter(session, thread, since)
+                joined, _ = await self._enter(session, thread, since, rewind=False)
             except ForbiddenError, NotFoundError:
                 continue
             found.append(joined)
