@@ -673,17 +673,21 @@ tools.definitions()
 await tools.dispatch("working", {"label": "Checking the invoice"})
 await tools.dispatch("send", {"text": "The second charge is refunded."})
 recent = await tools.dispatch("read_recent", {"limit": 20})
+older = await tools.dispatch("read_recent", {"limit": 20, "before": 3})
 await tools.dispatch("idle", {})
 ```
 
 Four tools: `send(text)` posts a message with the bound `in_reply_to` and `triggered_by`, and no
-metadata — what a message is tied to is your code's to say, not the model's; `read_recent(limit)`
-returns the latest messages and steps, resolved, as parts — for each event a `Text` with its `seq`,
-kind, author and `in_reply_to` as JSON, and for a step its `name`, `input` and `is_error` too, then
-its content as it was sent (a step's output), images included; `working(label)` and `idle()` show
-what the assistant is doing. `read_recent` reads the latest 200 messages, steps, edits and
-retractions and resolves them, so a thread with many edits or retractions can return fewer than
-`limit`. The thread is fixed when the tools are built and a model cannot name another.
+metadata — what a message is tied to is your code's to say, not the model's;
+`read_recent(limit, before)` returns the latest messages and steps, resolved, as parts — for each
+event a `Text` with its `seq`, kind, author and `in_reply_to` as JSON, and for a step its `name`,
+`input` and `is_error` too, then its content as it was sent (a step's output), images included;
+`working(label)` and `idle()` show what the assistant is doing. `read_recent` reads the latest 200
+messages, steps, edits and retractions and resolves them, so a thread with many edits or
+retractions can return fewer than `limit`; with `before` — the lowest `seq` it has read — it reads
+the 200 before that `seq` instead, with every edit and retraction made since, so the model goes
+back as far as it chooses. The thread is fixed when the tools are built and a model cannot name
+another.
 
 `Tool` and `Tools` are the family's tool block, copied byte for byte from rfnry-engine: a tool is a
 name, a description, an input schema and a body; a `Tools` combines with `+` and narrows with
@@ -701,6 +705,61 @@ other:
 run = await engine.run("support", scope="acme", input=message.content,
                        tools=ThreadTools(helper, thread_id=thread.id, triggered_by=message.author))
 ```
+
+## Long conversations
+
+A thread keeps its whole conversation, ordered and gapless, for as long as it lives; a model is
+never handed all of it. Months of conversation fit no model's context, and every token sent is paid
+for again on every turn. The answer is selection, not fitting:
+
+- **The thread keeps everything**, and the model reads back into it when it chooses:
+  `read_recent` returns each message and step under its `seq`, and `before=` that `seq` reads the
+  page before it, as far back as the thread goes.
+- **Each run is given a short recent window** as its history. rfnry-engine's
+  [Long conversations](https://github.com/rfnry/engine/blob/main/docs/engine.md#long-conversations)
+  is how a run starts partway into a conversation.
+- **What should last goes to memory**, where it is searchable: facts the model judges worth keeping,
+  and the conversation itself as documents.
+
+An engine run's history is engine's own messages — tool calls and results, and the `usage` each
+call reported, which its window reads — and a thread does not carry those. Keep them beside the
+thread, keyed by its id, in a store of yours:
+
+```python
+kept: dict[str, tuple[list, int]] = {}
+
+async for item in helper.events():
+    if isinstance(item, Message) and item.author.id != helper.identity.id:
+        conversation, start = kept.get(item.thread_id, ([], 0))
+        start = window(conversation, start)
+        tools = ThreadTools(helper, thread_id=item.thread_id, triggered_by=item.author)
+        run = await engine.run("support", scope="acme", input=item.content,
+                               history=conversation, start=start, tools=tools)
+        kept[item.thread_id] = (conversation + run.added, start)
+```
+
+`window` is engine's, or yours. The thread stays the record people read; the kept messages are
+what the model was told, and a run that starts past the beginning is offered engine's `History` to
+read the rest of them.
+
+A conversation moves into rfnry-memory the same way any document does, as a source named for the
+thread and the stretch it covers, with the thread in its metadata, so a search finds it and cites
+where it came from:
+
+```python
+events = await helper.history(thread.id, after=ingested, limit=500)
+said = [e for e in resolve(events) if isinstance(e, Message)]
+text = "\n".join(f"{m.author.name or m.author.id}: {p.text}"
+                 for m in said for p in m.content if isinstance(p, Text))
+await memory.ingest("acme", text=text, name=f"{thread.id} {said[0].seq}-{said[-1].seq}",
+                    metadata={"thread_id": thread.id, "from_seq": said[0].seq, "to_seq": said[-1].seq})
+ingested = events[-1].seq
+```
+
+How the text reads is yours. Lasting facts are the model's call: give it memory's tools beside the
+thread's, and it remembers what it judges should outlive the conversation —
+`ThreadTools(...) + MemoryTools(memory, corpus_id="acme")`. rfnry-thread never imports memory or
+engine; both recipes are your code.
 
 ## Storage
 

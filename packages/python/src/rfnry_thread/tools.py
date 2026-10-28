@@ -7,7 +7,7 @@ from typing import TYPE_CHECKING, Any, Protocol, runtime_checkable
 from pydantic import BaseModel, Field, ValidationError
 
 from rfnry_thread.errors import ConfigurationError, InputError
-from rfnry_thread.models import IdentityLike, Message, Part, Step, Text, as_identity
+from rfnry_thread.models import Event, IdentityLike, Message, Part, Step, Text, as_identity
 from rfnry_thread.resolve import resolve
 
 if TYPE_CHECKING:
@@ -120,6 +120,11 @@ class _ReadRecent(BaseModel):
     limit: int = Field(
         default=20, ge=1, le=200, description="How many of the latest messages and steps to read"
     )
+    before: int | None = Field(
+        default=None,
+        ge=1,
+        description="Read what came before this seq, the lowest seq you have read, to go further back",
+    )
 
 
 class _Working(BaseModel):
@@ -128,6 +133,16 @@ class _Working(BaseModel):
 
 class _Idle(BaseModel):
     pass
+
+
+async def _changed_since(client: Client, thread_id: str, seq: int) -> list[Event]:
+    found: list[Event] = []
+    while True:
+        page = await client.history(thread_id, after=seq, limit=500, kinds=["edit", "retract"])
+        found += page
+        if len(page) < 500:
+            return found
+        seq = page[-1].seq
 
 
 class ThreadTools(Tools):
@@ -151,9 +166,12 @@ class ThreadTools(Tools):
 
         async def read_recent(args: dict[str, Any]) -> Result:
             limit = int(args.get("limit", 20))
+            before = args.get("before")
             events = await client.history(
-                thread_id, limit=200, kinds=["message", "step", "edit", "retract"]
+                thread_id, before=before, limit=200, kinds=["message", "step", "edit", "retract"]
             )
+            if before is not None and events:
+                events += await _changed_since(client, thread_id, int(before) - 1)
             view = [e for e in resolve(events) if isinstance(e, Message | Step)][-limit:]
             found: list[Part] = []
             for event in view:
@@ -182,7 +200,8 @@ class ThreadTools(Tools):
                 Tool("send", "Post a message to the conversation", body=send, args=_Send),
                 Tool(
                     "read_recent",
-                    "Read the latest messages and steps of the conversation, as they were sent",
+                    "Read the latest messages and steps of the conversation, as they were sent, "
+                    "each under its seq; with before, the ones before that seq",
                     body=read_recent,
                     args=_ReadRecent,
                 ),

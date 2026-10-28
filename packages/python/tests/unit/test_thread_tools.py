@@ -94,3 +94,31 @@ async def test_triggered_by_is_read_by_its_fields(server: Server) -> None:
     tools = ThreadTools(helper, thread_id="t1", triggered_by=lookalike(ANA))
     await tools.dispatch("send", {"text": "On it."})
     assert (await take(ana, Message)).triggered_by == ANA
+
+
+async def test_read_recent_pages_back_from_a_seq_with_what_was_edited_since(
+    server: Server,
+) -> None:
+    ana, helper = await pair(server)
+    sent = [await ana.send("t1", f"m{n}") for n in range(6)]
+    await ana.edit("t1", sent[1].id, "m1, edited")
+    await ana.retract("t1", sent[2].id)
+    tools = ThreadTools(helper, thread_id="t1")
+
+    async def page(**args: int) -> list[tuple[int, str]]:
+        found = await tools.dispatch("read_recent", dict(args))
+        assert isinstance(found, list)
+        texts = [p.text for p in found if isinstance(p, Text)]
+        return [(json.loads(h)["seq"], t) for h, t in zip(texts[::2], texts[1::2], strict=True)]
+
+    latest = await page(limit=2)
+    assert [text for _, text in latest] == ["m4", "m5"]
+    older = await page(limit=2, before=latest[0][0])
+    assert [text for _, text in older] == ["m1, edited", "m3"]
+    oldest = await page(limit=2, before=older[0][0])
+    assert [text for _, text in oldest] == ["m0"]
+    assert await page(before=oldest[0][0]) == []
+    with pytest.raises(InputError):
+        await tools.dispatch("read_recent", {"before": 0})
+    [definition] = [d for d in tools.definitions() if d["name"] == "read_recent"]
+    assert "before" in definition["input_schema"]["properties"]

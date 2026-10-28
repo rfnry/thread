@@ -28,6 +28,8 @@ ILLUSTRATIVE = {
     "async with pool.acquire() as conn:": "needs Postgres; the integration tier covers it",
     'offered = websocket.scope.get("subprotocols", [])': "needs a web framework's socket; test_socket.py covers a refusal with 1008",
     'pool = await asyncpg.create_pool(dsn, server_settings={"search_path": "thread"})': "needs Postgres; the integration tier covers it",
+    "kept: dict[str, tuple[list, int]] = {}": "needs rfnry-engine and a model; the consumer's code",
+    "events = await helper.history(thread.id, after=ingested, limit=500)": "needs rfnry-memory; the consumer's code",
 }
 
 
