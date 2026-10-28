@@ -1422,20 +1422,22 @@ the latest. `order` is an `Order`, which is `Literal["created", "activity"]`: `"
 the latest message instead, a thread without messages by its creation; `preview=True` fills each
 thread's `last_message`. A page continues below `before`: a thread id, at that thread's place now,
 or a `Thread` a page listed, at the place its own `created_at`, `last_message_at` and `id` give it,
-so paging holds when that thread is deleted or moves meanwhile. `head` returns a thread's last `seq`
-and the member's floor when `identity_id` is a member of it, `None` otherwise: the one read that
-enters a thread for a connection. The floor is 0 in a thread whose `history` is `"all"`, and in a
-`"since_added"` one the thread's last `seq` plus one when the member was added (`add_member` records
-it); `list_events` and `get_event` given a `floor` leave out events below it and edits and
-retractions of them. `listen` takes an `OnEvent`, `on_event(scope, thread_id, seq)`, and an
-`OnSignal`, `on_signal(scope, thread_id, payload)`, called for what any server on the storage
-appends or publishes, and an `OnResume`, `on_resume()`, called once a dropped listener is back; it
-returns a `Stop`, `stop()`, that ends it, and all four are async functions returning `None`. Raises
-`NotFoundError`, from `add_member`, `append_event` and `list_threads` with a `before` id, when the
-scope holds no such thread, and `StorageError`, from `create_thread`, when the thread's scope is not
-`scope`. `mark` stores the identity's private read position in the thread, never lowering it unless
-`back` is true, and returns it with the count of `message` events by others after it, at most 100,
-and whether it moved (a first mark, or a different one); `get_mark` returns it, `None` without one;
+so paging holds when that thread is deleted or moves meanwhile. A member listing gives each thread's
+`last_seq` as it was when read, and `follow` enters a thread whose `history` is `"all"` at it unless
+the server heard the thread change since. `head` returns a thread's last `seq` and the member's
+floor when `identity_id` is a member of it, `None` otherwise: the one read that enters a thread for
+a connection. The floor is 0 in a thread whose `history` is `"all"`, and in a `"since_added"` one
+the thread's last `seq` plus one when the member was added (`add_member` records it); `list_events`
+and `get_event` given a `floor` leave out events below it and edits and retractions of them.
+`listen` takes an `OnEvent`, `on_event(scope, thread_id, seq)`, and an `OnSignal`, `on_signal(scope,
+thread_id, payload)`, called for what any server on the storage appends or publishes, and an
+`OnResume`, `on_resume()`, called once a dropped listener is back; it returns a `Stop`, `stop()`,
+that ends it, and all four are async functions returning `None`. Raises `NotFoundError`, from
+`add_member`, `append_event` and `list_threads` with a `before` id, when the scope holds no such
+thread, and `StorageError`, from `create_thread`, when the thread's scope is not `scope`. `mark`
+stores the identity's private read position in the thread, never lowering it unless `back` is true,
+and returns it with the count of `message` events by others after it, at most 100, and whether it
+moved (a first mark, or a different one); `get_mark` returns it, `None` without one;
 `baseline_marks` stores each thread's last `seq` as the mark of every membership of `identity_id`
 that has none, and returns how many it stored. `mark` raises `NotFoundError` when the identity is
 not a member of the thread.

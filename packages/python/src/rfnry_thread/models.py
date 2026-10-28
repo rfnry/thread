@@ -186,6 +186,7 @@ Event = Annotated[
 EVENTS: TypeAdapter[Event] = TypeAdapter(Event)
 Thread.model_rebuild()
 CLIENT_EVENTS = frozenset({"message", "step", "edit", "retract", "read", "custom"})
+EVENT_KINDS = CLIENT_EVENTS | {"member_added", "member_removed", "thread_updated"}
 
 
 class _Signal(BaseModel):

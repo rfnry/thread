@@ -9,7 +9,7 @@ from typing import Any
 
 from rfnry_thread import migrations
 from rfnry_thread.errors import ConfigurationError, NotFoundError, StorageError, ThreadException
-from rfnry_thread.models import EVENTS, Event, Member, Order, Thread
+from rfnry_thread.models import EVENT_KINDS, EVENTS, Event, Member, Order, Thread
 from rfnry_thread.resolve import last_message
 from rfnry_thread.storage import PREVIEW_DEPTH, UNREAD_CAP, OnEvent, OnResume, OnSignal, Stop
 
@@ -380,8 +380,10 @@ class PostgresStorage:
             args.append(before)
             where.append(f"e.seq < ${len(args)}")
         if kinds is not None:
-            args.append(list(kinds))
-            where.append(f"e.kind = ANY(${len(args)}::text[])")
+            held = sorted(EVENT_KINDS.intersection(kinds))
+            if not held:
+                return []
+            where.append(f"e.kind IN ({', '.join(repr(kind) for kind in held)})")
         args.append(limit)
         order = "ASC" if since is not None else "DESC"
         async with self._guard("list_events"), self._pool.acquire() as conn:

@@ -67,7 +67,14 @@ _HISTORY = (
 )
 
 
-MIGRATIONS = [Migration(1, "create", _CREATE), Migration(2, "history", _HISTORY)]
+_KINDS = ("CREATE INDEX ix_thread_events_kind ON thread_events (scope, thread_id, kind, seq)",)
+
+
+MIGRATIONS = [
+    Migration(1, "create", _CREATE),
+    Migration(2, "history", _HISTORY),
+    Migration(3, "kinds", _KINDS),
+]
 
 
 LATEST = MIGRATIONS[-1].version

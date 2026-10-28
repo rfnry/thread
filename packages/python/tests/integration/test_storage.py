@@ -530,6 +530,14 @@ async def test_a_preview_reads_the_last_five_messages_with_the_edits_and_retract
     assert await shown() is None
 
 
+async def test_a_kind_filter_reads_only_kinds_a_log_can_hold(storage: Storage) -> None:
+    await room(storage, "t1", "acme", ANA)
+    await storage.append_event("acme", say("t1", "c1"))
+    assert seqs(await storage.list_events("acme", "t1", kinds=["it's", "message"])) == [1]
+    assert await storage.list_events("acme", "t1", kinds=["it's"]) == []
+    assert await storage.list_events("acme", "t1", since=0, kinds=[]) == []
+
+
 def changed(kind: Any, client_id: str, target: str, **fields: Any) -> Any:
     return kind(
         id=client_id,

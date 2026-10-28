@@ -1,4 +1,6 @@
+import asyncio
 from collections.abc import AsyncIterator
+from typing import Any
 
 import pytest
 from until import until
@@ -135,3 +137,31 @@ async def test_stop_stops_listening_and_start_is_idempotent(storage: PostgresSto
     await say(ana, "t1", "unheard")
     assert [p for p in await helper.quiet() if p["kind"] == "message"] == []
     await near.stop()
+
+
+async def test_a_thread_another_replica_wrote_between_a_listing_and_its_enter_is_followed_whole(
+    replicas: tuple[Server, Server],
+    storage: PostgresStorage,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    near, far = replicas
+    ana = await Peer.open(far, ANA)
+    await ana.call("thread.create", thread_id="t1")
+    await ana.call("member.add", thread_id="t1", identity=HELPER.model_dump(mode="json"))
+    await asyncio.sleep(0.3)
+    said: list[str] = []
+    listing = storage.list_threads
+
+    async def listed(*args: Any, **kwargs: Any) -> Any:
+        found = await listing(*args, **kwargs)
+        if args[1] == "helper" and not said:
+            said.append((await say(ana, "t1", "from far"))["id"])
+            await asyncio.sleep(0.3)
+        return found
+
+    monkeypatch.setattr(storage, "list_threads", listed)
+    helper = await Peer.open(near, HELPER)
+    reply = await helper.call("thread.follow", since={"t1": 0})
+    assert [j["seq"] for j in reply["joined"]] == [3]
+    pushed = [p["content"][0]["text"] for p in await helper.quiet() if p["kind"] == "message"]
+    assert pushed == ["from far"]

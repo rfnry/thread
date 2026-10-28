@@ -84,7 +84,7 @@ async def test_follow_reads_on_past_a_page_whose_last_thread_is_deleted_meanwhil
         page = await original(*args)
         if not deleted:
             deleted.append(page[-1].id)
-            await storage.delete_thread("acme", page[-1].id)
+            await server.delete_thread("acme", page[-1].id)
         return page
 
     monkeypatch.setattr(storage, "list_threads", listing)
@@ -156,11 +156,7 @@ async def test_a_second_follow_on_the_same_connection_replays_nothing_already_de
     assert [j["truncated"] for j in again["joined"]] == [False]
 
 
-async def test_follow_reads_each_thread_once_to_enter_it(
-    storage: PostgresStorage, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    server = Server(storage)
-    await threads(server, "t1", "t2", "t3")
+def counting(storage: PostgresStorage, monkeypatch: pytest.MonkeyPatch) -> list[str]:
     reads: list[str] = []
     for name in ("head", "is_member", "list_events"):
         real = getattr(storage, name)
@@ -173,10 +169,53 @@ async def test_follow_reads_each_thread_once_to_enter_it(
             return read
 
         monkeypatch.setattr(storage, name, counted())
+    return reads
+
+
+async def test_follow_enters_each_thread_with_the_head_its_listing_read(
+    storage: PostgresStorage, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    server = Server(storage)
+    ana = await threads(server, "t1", "t2")
+    await ana.call("thread.create", thread_id="t3", history="since_added")
+    await ana.call("member.add", thread_id="t3", identity=who(HELPER))
+    reads = counting(storage, monkeypatch)
     helper = await Peer.open(server, HELPER)
     reply = await helper.call("thread.follow")
-    assert len(reply["joined"]) == 3
-    assert reads == ["head", "head", "head"]
+    assert sorted((j["thread"]["id"], j["seq"]) for j in reply["joined"]) == [
+        ("t1", 2),
+        ("t2", 2),
+        ("t3", 2),
+    ]
+    assert reads == ["head"]
+
+
+async def test_a_thread_written_between_the_listing_and_the_enter_is_entered_at_its_new_head(
+    storage: PostgresStorage, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    server = Server(storage)
+    ana = await threads(server, "t1", "t2")
+    listing = storage.list_threads
+
+    async def listed(*args: Any, **kwargs: Any) -> list[Thread]:
+        found = await listing(*args, **kwargs)
+        if args[1] == "helper":
+            await say(ana, "t1", "meanwhile")
+            await ana.call("thread.delete", thread_id="t2")
+            await ana.call("thread.create", thread_id="t2")
+            await ana.call("member.add", thread_id="t2", identity=who(HELPER))
+            await say(ana, "t2", "made again")
+            await say(ana, "t2", "and again")
+        return found
+
+    monkeypatch.setattr(storage, "list_threads", listed)
+    helper = await Peer.open(server, HELPER)
+    reply = await helper.call("thread.follow", since={"t1": 0, "t2": 0})
+    assert sorted((j["thread"]["id"], j["seq"]) for j in reply["joined"]) == [
+        ("t1", 3),
+        ("t2", 4),
+    ]
+    assert sorted(texts(await helper.quiet())) == ["and again", "made again", "meanwhile"]
 
 
 async def test_authorize_decides_which_threads_a_follower_receives(

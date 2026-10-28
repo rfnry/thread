@@ -152,6 +152,16 @@ async def test_create_makes_every_table_and_records_every_version(schemas: Schem
     assert listed.last_message_at == AT
 
 
+async def test_create_indexes_the_log_by_kind_for_reads_of_rare_kinds(schemas: Schemas) -> None:
+    _, pool = await created(schemas)
+    async with pool.acquire() as conn:
+        definition = await conn.fetchval(
+            "SELECT indexdef FROM pg_indexes WHERE schemaname = current_schema() "
+            "AND indexname = 'ix_thread_events_kind'"
+        )
+    assert definition is not None and "(scope, thread_id, kind, seq)" in definition
+
+
 async def test_create_refuses_a_schema_that_already_holds_thread_tables(
     schemas: Schemas,
 ) -> None:

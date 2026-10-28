@@ -338,15 +338,17 @@ class Verbs:
         if resume and since is None:
             await self._storage.baseline_marks(scope, actor.id)
         start, gone = since or {}, left or {}
-        threads = [
-            t
-            for t in await self._memberships(actor, scope)
-            if t.id not in gone or await self._back(scope, actor.id, t, *gone[t.id])
-        ]
-        return await self._hub.follow(
-            session,
-            [(t, start.get(t.id, t.marked if resume else None)) for t in threads],
-        )
+        with self._hub.watching() as touched:
+            threads = [
+                t
+                for t in await self._memberships(actor, scope)
+                if t.id not in gone or await self._back(scope, actor.id, t, *gone[t.id])
+            ]
+            return await self._hub.follow(
+                session,
+                [(t, start.get(t.id, t.marked if resume else None)) for t in threads],
+                touched,
+            )
 
     async def _back(
         self, scope: str, identity_id: str, thread: Thread, seq: int, made: datetime | None

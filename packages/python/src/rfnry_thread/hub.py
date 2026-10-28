@@ -3,7 +3,8 @@ import json
 import logging
 import uuid
 import weakref
-from collections.abc import Awaitable, Callable
+from collections.abc import Awaitable, Callable, Iterator
+from contextlib import contextmanager
 from dataclasses import dataclass, field
 from typing import Any
 
@@ -88,6 +89,7 @@ class Hub:
             weakref.WeakValueDictionary()
         )
         self._local: dict[tuple[str, str, str], int] = {}
+        self._watching: list[set[tuple[str, str]]] = []
 
     def _lock(self, scope: str, thread_id: str) -> asyncio.Lock:
         lock = self._locks.get((scope, thread_id))
@@ -99,6 +101,19 @@ class Hub:
     def _room(self, scope: str, thread_id: str) -> list[Session]:
         return list(self._rooms.get((scope, thread_id), ()))
 
+    @contextmanager
+    def watching(self) -> Iterator[set[tuple[str, str]]]:
+        touched: set[tuple[str, str]] = set()
+        self._watching.append(touched)
+        try:
+            yield touched
+        finally:
+            self._watching.remove(touched)
+
+    def _touch(self, scope: str, thread_id: str) -> None:
+        for touched in self._watching:
+            touched.add((scope, thread_id))
+
     async def join(
         self, session: Session, thread: Thread, since: int | None, away: bool = False
     ) -> Joined:
@@ -109,7 +124,12 @@ class Hub:
         return joined
 
     async def _enter(
-        self, session: Session, thread: Thread, since: int | None, rewind: bool = True
+        self,
+        session: Session,
+        thread: Thread,
+        since: int | None,
+        rewind: bool = True,
+        touched: set[tuple[str, str]] | None = None,
     ) -> tuple[Joined, bool]:
         scope, thread_id = session.scope, thread.id
         async with self._lock(scope, thread_id):
@@ -117,7 +137,17 @@ class Hub:
                 return Joined(thread=thread, seq=session.joined.get(thread_id, 0)), False
             if thread_id in session.joined:
                 return await self._rewind(session, thread, since if rewind else None), False
-            found = await self.storage.head(scope, thread_id, session.identity.id)
+            listed = (
+                touched is not None
+                and (scope, thread_id) not in touched
+                and thread.history == "all"
+                and thread.last_seq is not None
+            )
+            found = (
+                (thread.last_seq or 0, 0)
+                if listed
+                else await self.storage.head(scope, thread_id, session.identity.id)
+            )
             if found is None:
                 raise ForbiddenError(
                     f"server: {session.identity.id!r} is not a member of thread {thread_id!r}"
@@ -170,12 +200,15 @@ class Hub:
         return Joined(thread=thread, seq=cursor, truncated=truncated)
 
     async def follow(
-        self, session: Session, threads: list[tuple[Thread, int | None]]
+        self,
+        session: Session,
+        threads: list[tuple[Thread, int | None]],
+        touched: set[tuple[str, str]],
     ) -> list[Joined]:
         found: list[Joined] = []
         for thread, since in threads:
             try:
-                joined, _ = await self._enter(session, thread, since, rewind=False)
+                joined, _ = await self._enter(session, thread, since, False, touched)
             except ForbiddenError, NotFoundError:
                 continue
             found.append(joined)
@@ -207,6 +240,7 @@ class Hub:
             await self._depart(session, thread_id)
 
     async def deliver(self, scope: str, event: Event) -> None:
+        self._touch(scope, event.thread_id)
         async with self._lock(scope, event.thread_id):
             cut = await self._deliver(scope, event)
         for session in cut:
@@ -250,6 +284,7 @@ class Hub:
         return event.seq if found is None else found.seq
 
     async def on_event(self, scope: str, thread_id: str, seq: int) -> None:
+        self._touch(scope, thread_id)
         if not any(s.joined.get(thread_id, seq) < seq for s in self._room(scope, thread_id)):
             return
         try:
@@ -373,6 +408,7 @@ class Hub:
 
     async def _deleted_here(self, scope: str, signal: ThreadDeleted) -> None:
         thread_id = signal.thread_id
+        self._touch(scope, thread_id)
         async with self._lock(scope, thread_id):
             self.state.apply(scope, signal, self.origin)
             payload = signal.model_dump(mode="json")
