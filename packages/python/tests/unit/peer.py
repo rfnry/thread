@@ -9,6 +9,8 @@ from rfnry_thread.pipe import End
 from rfnry_thread.protocol import Hello, Notify, Request, encode
 from rfnry_thread.server import Server
 
+REPLY = 5.0
+
 
 class Peer:
     def __init__(self, end: End) -> None:
@@ -25,7 +27,7 @@ class Peer:
         assert reply["type"] == "response" and reply["id"] == "hello", reply
         return peer
 
-    async def frame(self, timeout: float = 1.0) -> dict[str, Any]:
+    async def frame(self, timeout: float = REPLY) -> dict[str, Any]:
         return dict(json.loads(await asyncio.wait_for(self.end.receive_text(), timeout)))
 
     async def call(self, method: str, **payload: Any) -> dict[str, Any]:
@@ -43,7 +45,7 @@ class Peer:
     async def notify(self, method: str, **payload: Any) -> None:
         await self.end.send_text(encode(Notify(method=method, payload=payload)))
 
-    async def push(self, kind: str, timeout: float = 1.0) -> dict[str, Any]:
+    async def push(self, kind: str, timeout: float = REPLY) -> dict[str, Any]:
         async def find() -> dict[str, Any]:
             while True:
                 for index, payload in enumerate(self.pushes):

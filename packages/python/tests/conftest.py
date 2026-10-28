@@ -4,7 +4,7 @@ from typing import Any
 
 import asyncpg
 import pytest
-from database import SCHEMA, TABLES, URL, Schemas, admin, open_pool
+from database import SCHEMA, URL, Schemas, admin, open_pool
 
 from rfnry_thread import migrations
 from rfnry_thread.postgres import PostgresStorage
@@ -50,7 +50,7 @@ def pytest_sessionfinish(session: pytest.Session) -> None:
 async def pool() -> AsyncIterator[Any]:
     pool = await open_pool()
     async with pool.acquire() as conn:
-        await conn.execute(f"TRUNCATE {TABLES}")
+        await conn.execute("DELETE FROM thread_threads")
     yield pool
     await asyncio.wait_for(pool.close(), 5)
 
