@@ -379,8 +379,8 @@ async def test_check_names_the_command_for_each_way_a_schema_does_not_fit(
         f"postgres: no thread schema in {empty} — run rfnry-thread create --schema {empty}"
     )
     assert await problem(await schemas.pool("public")) == (
-        "postgres: no thread schema on search_path '\"public\"' — run rfnry-thread create "
-        "and put its schema first on the pool's search_path"
+        "postgres: no thread schema on search_path '\"public\"' — run rfnry-thread "
+        "create --schema thread and put it first on the pool's search_path"
     )
     old, held = await initialized(schemas)
     monkeypatch.setattr(migrations, "_shared", lambda schema: schema == old)
@@ -388,6 +388,7 @@ async def test_check_names_the_command_for_each_way_a_schema_does_not_fit(
         f"postgres: the thread tables in {old} were made by initialize() — "
         f"run rfnry-thread upgrade --from {old} and put the thread schema first on the pool's search_path"
     )
+    monkeypatch.undo()
     name, pool = await created(schemas)
     probing(monkeypatch, PROBE)
     assert await problem(pool) == (
@@ -433,10 +434,11 @@ def test_the_first_schema_of_a_search_path_is_read_as_postgres_reads_it() -> Non
     assert migrations._first("", "thread", None) is None
 
 
-async def test_check_and_upgrade_point_at_tables_initialize_made_in_another_schema(
-    schemas: Schemas,
+async def test_check_and_upgrade_point_at_tables_initialize_made_in_a_shared_schema(
+    schemas: Schemas, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     old, _ = await initialized(schemas)
+    monkeypatch.setattr(migrations, "_shared", lambda schema: schema == old)
 
     async def problem(pool: Any) -> str:
         with pytest.raises(ConfigurationError) as raised:
@@ -486,3 +488,97 @@ async def test_check_names_a_role_that_cannot_use_the_schema_and_an_empty_search
         ConfigurationError, match=r"^postgres: no schema on search_path '\"\"' exists"
     ):
         await PostgresStorage(empty).check()
+
+
+async def test_check_lists_tables_initialize_made_elsewhere_without_choosing_them(
+    schemas: Schemas,
+) -> None:
+    old, _ = await initialized(schemas)
+    empty = await schemas.create()
+    with pytest.raises(ConfigurationError) as raised:
+        await PostgresStorage(await schemas.pool(empty)).check()
+    assert str(raised.value) == (
+        f"postgres: no thread schema in {empty} — run rfnry-thread create --schema "
+        f"{empty}; if the tables initialize() made in {old} are this app's, run rfnry-thread "
+        f"upgrade --schema {empty} --from that schema instead"
+    )
+
+
+async def test_check_never_sends_thread_into_another_librarys_schema(
+    schemas: Schemas, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    other = await schemas.create()
+    pool = await schemas.pool(other)
+    async with pool.acquire() as conn:
+        await conn.execute("CREATE TABLE memory_sources (id TEXT)")
+    old, _ = await initialized(schemas)
+    monkeypatch.setattr(migrations, "_shared", lambda schema: schema == old)
+    home = schemas.name()
+    monkeypatch.setattr(migrations, "DEFAULT", home)
+
+    async def problem() -> str:
+        with pytest.raises(ConfigurationError) as raised:
+            await PostgresStorage(pool).check()
+        return str(raised.value)
+
+    assert await problem() == (
+        f"postgres: no thread schema in {other} — the thread tables initialize() made "
+        f"are in {old} — run rfnry-thread upgrade --schema {home} --from {old} and put it first "
+        "on the pool's search_path"
+    )
+    await admin(f"CREATE SCHEMA {quoted(home)}")
+    async with (await schemas.pool(home)).acquire() as conn:
+        await migrations.apply(conn, partial(migrations.plan_create, fresh=True))
+    assert await problem() == (
+        f"postgres: no thread schema in {other} — thread's tables are in {home} — "
+        "put it first on the pool's search_path"
+    )
+
+
+async def test_create_refuses_while_tables_initialize_made_sit_in_a_shared_schema(
+    schemas: Schemas, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    old, _ = await initialized(schemas)
+    monkeypatch.setattr(migrations, "_shared", lambda schema: schema == old)
+    name = await schemas.create()
+    async with (await schemas.pool(name)).acquire() as conn:
+        with pytest.raises(
+            ConfigurationError,
+            match=f"^postgres: the thread tables initialize\\(\\) made are in {old} — "
+            f"run rfnry-thread upgrade --schema {name} --from {old} to keep their threads, or "
+            "create with --fresh to start without them$",
+        ):
+            await migrations.apply(conn, migrations.plan_create)
+        await migrations.apply(conn, partial(migrations.plan_create, fresh=True))
+    await PostgresStorage(await schemas.pool(name)).check()
+
+
+async def test_check_names_the_grants_a_role_lacks(schemas: Schemas) -> None:
+    name, _ = await created(schemas)
+    role = f"thread_probe_{uuid4().hex[:8]}"
+    await admin(f"CREATE ROLE {role} LOGIN PASSWORD 'probe'")
+    try:
+        await admin(f"GRANT USAGE ON SCHEMA {quoted(name)} TO {role}")
+        await admin(f"GRANT SELECT ON ALL TABLES IN SCHEMA {quoted(name)} TO {role}")
+        parts = urlsplit(URL)
+        url = urlunsplit(parts._replace(netloc=f"{role}:probe@{parts.hostname}:{parts.port}"))
+        pool = await asyncpg.create_pool(
+            url, min_size=1, max_size=1, server_settings={"search_path": quoted(name)}
+        )
+        try:
+            with pytest.raises(ConfigurationError) as raised:
+                await PostgresStorage(pool).check()
+            assert str(raised.value) == (
+                f"postgres: {role} lacks INSERT, UPDATE, DELETE on thread_events, thread_marks, thread_members and "
+                "thread_threads — grant it SELECT, INSERT, UPDATE, DELETE on them and SELECT on "
+                "thread_migrations"
+            )
+            await admin(
+                f"GRANT INSERT, UPDATE, DELETE ON ALL TABLES IN SCHEMA {quoted(name)} TO {role}"
+            )
+            await PostgresStorage(pool).check()
+        finally:
+            await pool.close()
+    finally:
+        await admin(f"DROP OWNED BY {role}")
+        await admin(f"DROP ROLE {role}")

@@ -24,6 +24,11 @@ def _parser() -> argparse.ArgumentParser:
         return sub
 
     create = command("create", "create the schema with this version's tables")
+    create.add_argument(
+        "--fresh",
+        action="store_true",
+        help="create it empty even while tables initialize() made sit in a shared schema",
+    )
     create.add_argument("--sql", action="store_true", help="print the statements and run nothing")
     command("check", "say whether the schema fits this version")
     upgrade = command("upgrade", "carry the schema to this version")
@@ -94,7 +99,7 @@ async def _run(args: argparse.Namespace) -> int:
         if args.command == "create" or moving:
             before = [f"CREATE SCHEMA IF NOT EXISTS {_quoted(args.schema)}"]
         if args.command == "create":
-            planner = migrations.plan_create
+            planner = partial(migrations.plan_create, fresh=args.fresh)
         else:
             planner = partial(migrations.plan_upgrade, source=args.source)
         shown = await migrations.apply(conn, planner, run=False, before=before)

@@ -1455,12 +1455,12 @@ Implements `Storage` on Postgres through an asyncpg-compatible pool you built, i
 pool's `search_path`, which the `rfnry-thread` command creates and upgrades. `check` raises
 `ConfigurationError` naming the command to run when that schema holds no thread tables (naming
 tables `initialize()` made in another schema to move with `upgrade --from`), is behind or ahead of
-this version, holds tables `initialize()` made in 0.1.1 or earlier, or is one the pool's role cannot
-use. An event is stored and announced with `NOTIFY` in one transaction, on two channels named for
-the connection's current schema, so deployments in different schemas of one database do not hear
-each other and replicas sharing a schema do; `listen` holds one connection from the pool, taking
-another with jittered backoff when it drops. Raises `StorageError` when the database fails, and from
-`publish`, when a notification is over 7900 bytes.
+this version, holds tables `initialize()` made in 0.1.1 or earlier, or is one whose schema or tables
+the pool's role cannot use. An event is stored and announced with `NOTIFY` in one transaction, on
+two channels named for the connection's current schema, so deployments in different schemas of one
+database do not hear each other and replicas sharing a schema do; `listen` holds one connection from
+the pool, taking another with jittered backoff when it drops. Raises `StorageError` when the
+database fails, and from `publish`, when a notification is over 7900 bytes.
 
 ## Errors
 

@@ -228,11 +228,24 @@ def test_an_interrupt_at_the_prompt_runs_nothing(monkeypatch: pytest.MonkeyPatch
 
 
 async def test_upgrade_into_a_missing_schema_points_at_tables_initialize_made(
-    schemas: Schemas, capsys: pytest.CaptureFixture[str]
+    schemas: Schemas, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
 ) -> None:
     old, _ = await initialized(schemas)
+    monkeypatch.setattr(migrations, "_shared", lambda schema: schema == old)
     name = schemas.name()
     for command in ("check", "upgrade"):
         assert await run(command, "--schema", name) == 1
         err = capsys.readouterr().err
         assert f"run rfnry-thread upgrade --schema {name} --from {old}" in err
+
+
+async def test_create_with_fresh_starts_empty_beside_tables_initialize_made(
+    schemas: Schemas, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    old, _ = await initialized(schemas)
+    monkeypatch.setattr(migrations, "_shared", lambda schema: schema == old)
+    name = schemas.name()
+    assert await run("create", "--schema", name) == 1
+    assert f"--from {old} to keep their threads" in capsys.readouterr().err
+    assert await run("create", "--schema", name, "--fresh") == 0
+    assert await run("check", "--schema", name) == 0

@@ -766,8 +766,9 @@ engine; both recipes are your code.
 
 Postgres is the storage: `PostgresStorage(pool)` takes an asyncpg-compatible pool you built
 (`rfnry-thread[postgres]` installs asyncpg), on a database where thread has a schema of its own for
-its tables — `thread_threads`, `thread_members`, `thread_events`, `thread_marks` — so one database
-can also hold rfnry-engine's and rfnry-memory's.
+its tables — `thread_threads`, `thread_members`, `thread_events`, `thread_marks`, and
+`thread_migrations`, the record of the migrations run — so one database can also hold rfnry-engine's
+and rfnry-memory's, each in a schema of its own.
 
 ### Preparing the database
 
@@ -783,8 +784,10 @@ It takes the connection string with `--url`, or reads Postgres' standard `PG*` v
 prints it. `--sql` prints the statements as the command runs them — the `search_path` they run
 under, then one transaction holding the migration lock — so they land in the same schema when you
 run them yourself. Thread's tables never go in `public`. An app that connects as a role of its own,
-not the one that ran the command, needs `USAGE` on the schema and `SELECT`, `INSERT`, `UPDATE` and
-`DELETE` on its tables; `check()` says so when it lacks them.
+not the one that ran the command, needs `USAGE` on the schema, `SELECT`, `INSERT`, `UPDATE` and
+`DELETE` on its tables, and `SELECT` on `thread_migrations`; `check()` names what it lacks. While
+tables `initialize()` made sit in a shared schema such as `public`, `create` refuses and names the
+`upgrade --from` that keeps their threads; `create --fresh` starts empty anyway.
 
 Your pool points at the schema, and the app checks it at start:
 
@@ -797,7 +800,9 @@ server = Server(storage)
 
 `check()` only reads. It raises a `ConfigurationError` saying how the schema does not fit this
 version and the command that fixes it: no thread schema on the pool's `search_path`, a schema behind
-or ahead of this version, or tables an earlier version's `initialize()` made.
+or ahead of this version, tables an earlier version's `initialize()` made, or a schema or tables the
+pool's role cannot use. When the pool's first schema is another library's, it points at thread's own
+schema instead of offering that one.
 
 A version of thread that changes its tables ships a migration, and the schema follows it in place,
 its data kept:
