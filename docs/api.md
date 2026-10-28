@@ -1308,7 +1308,7 @@ Returns a `Tools` without the tools named; a name that is not one of them is ign
 ```python
 @runtime_checkable
 class Storage(Protocol):
-    async def initialize(self) -> None: ...
+    async def check(self) -> None: ...
 
     async def create_thread(self, scope: str, thread: Thread) -> tuple[Thread, bool]: ...
 
@@ -1380,7 +1380,8 @@ class Storage(Protocol):
 
 The protocol `PostgresStorage` implements, and a storage of your own implements to take its place;
 `scope` is the first argument of every method that reads or writes a row, and the log is
-append-only: an event is removed only with its thread or its scope. `create_thread`, `add_member`
+append-only: an event is removed only with its thread or its scope. `check` only reads, and raises
+`ConfigurationError` when the storage does not fit this version. `create_thread`, `add_member`
 and `append_event` return the row stored and whether it is new (an existing thread, membership, or
 event of the same author and `client_id` comes back with `False`, and a new event gets the thread's
 next `seq`); the getters return `None` for what the scope does not hold, `list_threads` returns
@@ -1412,13 +1413,15 @@ class PostgresStorage:
 ```
 
 Implements `Storage` on Postgres through an asyncpg-compatible pool you built, in four tables,
-`thread_threads`, `thread_members`, `thread_events` and `thread_marks`, which `initialize` creates
-where missing, under an advisory lock, so it is safe to run again. An event is stored and announced
-with `NOTIFY` in one transaction, on two channels named for the connection's current schema, so
-deployments in different schemas of one database do not hear each other and replicas sharing a
-schema do; `listen` holds one connection from the pool, taking another with jittered backoff when
-it drops. Raises `StorageError` when the database fails, and from
-`publish`, when a notification is over 7900 bytes.
+`thread_threads`, `thread_members`, `thread_events` and `thread_marks`, in the schema first on the
+pool's `search_path`, which the `rfnry-thread` command creates and upgrades. `check` raises
+`ConfigurationError` naming the command to run when that schema holds no thread tables, is behind or
+ahead of this version, or holds tables `initialize()` made in 0.1.1 or earlier. An event is stored
+and announced with `NOTIFY` in one transaction, on two channels named for the connection's current
+schema, so deployments in different schemas of one database do not hear each other and replicas
+sharing a schema do; `listen` holds one connection from the pool, taking another with jittered
+backoff when it drops. Raises `StorageError` when the database fails, and from `publish`, when a
+notification is over 7900 bytes.
 
 ## Errors
 
@@ -1475,7 +1478,8 @@ class ConfigurationError(ThreadException):
 
 A setup that cannot work: a limit that is not positive, a `system` identity given to `serve` or
 `Server.connect`, a `redact` that returns something other than parts, two tools with the same name
-in one `Tools`, a `Tool` with no body when it is called, a `ThreadTools` with an empty `thread_id`.
+in one `Tools`, a `Tool` with no body when it is called, a `ThreadTools` with an empty `thread_id`,
+a storage schema that does not fit this version.
 
 ### `ForbiddenError`
 

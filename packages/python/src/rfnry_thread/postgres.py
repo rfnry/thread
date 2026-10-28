@@ -7,7 +7,8 @@ from collections.abc import AsyncIterator, Sequence
 from contextlib import asynccontextmanager
 from typing import Any
 
-from rfnry_thread.errors import NotFoundError, StorageError, ThreadException
+from rfnry_thread import migrations
+from rfnry_thread.errors import ConfigurationError, NotFoundError, StorageError, ThreadException
 from rfnry_thread.models import EVENTS, Event, Member, Order, Thread
 from rfnry_thread.resolve import last_message
 from rfnry_thread.storage import PREVIEW_DEPTH, UNREAD_CAP, OnEvent, OnResume, OnSignal, Stop
@@ -17,55 +18,6 @@ SIGNALS_PREFIX = "thread_signals_"
 NOTIFY_LIMIT = 7900
 RELISTEN = 0.5
 RELISTEN_CAP = 30.0
-_LOCK = 0x7468726561640001
-
-_DDL = [
-    """
-    CREATE TABLE IF NOT EXISTS thread_threads (
-        scope TEXT NOT NULL, id TEXT NOT NULL, metadata JSONB NOT NULL,
-        created_at TIMESTAMPTZ NOT NULL, last_seq BIGINT NOT NULL DEFAULT 0,
-        last_message_at TIMESTAMPTZ,
-        PRIMARY KEY (scope, id))
-    """,
-    "ALTER TABLE thread_threads ADD COLUMN IF NOT EXISTS last_message_at TIMESTAMPTZ",
-    "CREATE INDEX IF NOT EXISTS ix_thread_threads_created ON thread_threads (scope, created_at DESC, id DESC)",
-    "CREATE INDEX IF NOT EXISTS ix_thread_threads_metadata ON thread_threads USING GIN (metadata)",
-    "CREATE INDEX IF NOT EXISTS ix_thread_threads_activity ON thread_threads "
-    "(scope, (COALESCE(last_message_at, created_at)) DESC, id DESC)",
-    """
-    CREATE TABLE IF NOT EXISTS thread_members (
-        scope TEXT NOT NULL, thread_id TEXT NOT NULL, identity_id TEXT NOT NULL,
-        added_at TIMESTAMPTZ NOT NULL, body JSONB NOT NULL,
-        PRIMARY KEY (scope, thread_id, identity_id),
-        FOREIGN KEY (scope, thread_id) REFERENCES thread_threads (scope, id) ON DELETE CASCADE)
-    """,
-    "CREATE INDEX IF NOT EXISTS ix_thread_members_identity ON thread_members (scope, identity_id)",
-    """
-    CREATE TABLE IF NOT EXISTS thread_events (
-        scope TEXT NOT NULL, thread_id TEXT NOT NULL, seq BIGINT NOT NULL, id TEXT NOT NULL,
-        kind TEXT NOT NULL, author_id TEXT NOT NULL, client_id TEXT NOT NULL, body JSONB NOT NULL,
-        PRIMARY KEY (scope, thread_id, seq),
-        UNIQUE (scope, thread_id, id),
-        UNIQUE (scope, thread_id, author_id, client_id),
-        FOREIGN KEY (scope, thread_id) REFERENCES thread_threads (scope, id) ON DELETE CASCADE)
-    """,
-    """
-    CREATE TABLE IF NOT EXISTS thread_marks (
-        scope TEXT NOT NULL, thread_id TEXT NOT NULL, identity_id TEXT NOT NULL,
-        seq BIGINT NOT NULL, at TIMESTAMPTZ NOT NULL,
-        PRIMARY KEY (scope, thread_id, identity_id),
-        FOREIGN KEY (scope, thread_id, identity_id)
-            REFERENCES thread_members (scope, thread_id, identity_id) ON DELETE CASCADE)
-    """,
-]
-
-_BACKFILL = (
-    "UPDATE thread_threads t SET last_message_at = m.at FROM (SELECT DISTINCT ON (scope, thread_id) "
-    "scope, thread_id, (body->>'created_at')::timestamptz AS at FROM thread_events "
-    "WHERE kind = 'message' ORDER BY scope, thread_id, seq DESC) m "
-    "WHERE t.scope = m.scope AND t.id = m.thread_id"
-)
-
 _THREAD = "scope, id, metadata, created_at"
 
 
@@ -125,19 +77,11 @@ class PostgresStorage:
         except Exception as exc:
             raise StorageError(f"postgres: storage rejected {operation}: {exc}") from exc
 
-    async def initialize(self) -> None:
-        async with self._guard("initialize"), self._pool.acquire() as conn, conn.transaction():
-            await conn.execute("SELECT pg_advisory_xact_lock($1)", _LOCK)
-            existed = await conn.fetchval("SELECT to_regclass('thread_threads') IS NOT NULL")
-            had = await conn.fetchval(
-                "SELECT EXISTS (SELECT 1 FROM information_schema.columns WHERE "
-                "table_schema = current_schema() AND table_name = 'thread_threads' "
-                "AND column_name = 'last_message_at')"
-            )
-            for ddl in _DDL:
-                await conn.execute(ddl)
-            if existed and not had:
-                await conn.execute(_BACKFILL)
+    async def check(self) -> None:
+        async with self._guard("check"), self._pool.acquire() as conn:
+            found = await migrations.problems(conn)
+        if found:
+            raise ConfigurationError(f"postgres: {'; '.join(found)}")
 
     async def create_thread(self, scope: str, thread: Thread) -> tuple[Thread, bool]:
         if thread.scope != scope:

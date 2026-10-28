@@ -9,7 +9,7 @@ LOG_CALLS = {"debug", "info", "warning", "error", "exception", "critical", "log"
 
 LOGGERS = {"logger", "logging"}
 
-PREFIXES = {"verbs.py": "server", "hub.py": "server"}
+PREFIXES = {"verbs.py": "server", "hub.py": "server", "migrations.py": "postgres"}
 
 ALLOWED: dict[tuple[str, str], str] = {
     ("client.py", "raised(reply.error.code, reply.error.message)"): "the server's error, as sent",

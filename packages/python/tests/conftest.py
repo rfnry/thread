@@ -4,8 +4,9 @@ from typing import Any
 
 import asyncpg
 import pytest
-from database import SCHEMA, TABLES, URL, open_pool
+from database import SCHEMA, TABLES, URL, Schemas, admin, open_pool
 
+from rfnry_thread import migrations
 from rfnry_thread.postgres import PostgresStorage
 
 START = (
@@ -14,19 +15,12 @@ START = (
 )
 
 
-async def admin(statement: str) -> None:
-    conn = await asyncpg.connect(URL, timeout=5)
-    try:
-        await conn.execute(statement)
-    finally:
-        await conn.close()
-
-
 async def create() -> None:
     await admin(f"CREATE SCHEMA {SCHEMA}")
     pool = await open_pool()
     try:
-        await PostgresStorage(pool).initialize()
+        async with pool.acquire() as conn:
+            await migrations.apply(conn, migrations.plan_create)
     finally:
         await pool.close()
 
@@ -64,3 +58,10 @@ async def pool() -> AsyncIterator[Any]:
 @pytest.fixture
 def storage(pool: Any) -> PostgresStorage:
     return PostgresStorage(pool)
+
+
+@pytest.fixture
+async def schemas() -> AsyncIterator[Schemas]:
+    held = Schemas()
+    yield held
+    await held.close()

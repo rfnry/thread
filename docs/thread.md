@@ -117,16 +117,19 @@ A **signal** is ephemeral. Every signal carries `thread_id` and `sender`, stampe
 
 ## Getting started
 
-Threads live in Postgres. Start one:
+Threads live in Postgres. Start one, with thread's schema prepared by the command the package
+installs:
 
 ```bash
 docker run -d --name thread-postgres -e POSTGRES_PASSWORD=thread -p 5432:5432 postgres:16
+rfnry-thread create --url postgresql://postgres:thread@localhost:5432/postgres
 ```
 
 ```python
-pool = await asyncpg.create_pool("postgresql://postgres:thread@localhost:5432/postgres")
+pool = await asyncpg.create_pool("postgresql://postgres:thread@localhost:5432/postgres",
+                                 server_settings={"search_path": "thread"})
 storage = PostgresStorage(pool)
-await storage.initialize()
+await storage.check()
 server = Server(storage)
 
 ana = await server.connect(identity=Identity(role="user", id="ana", name="Ana"), scope="acme")
@@ -682,19 +685,62 @@ run = await engine.run("support", scope="acme", input=message.content,
 ## Storage
 
 Postgres is the storage: `PostgresStorage(pool)` takes an asyncpg-compatible pool you built
-(`rfnry-thread[postgres]` installs asyncpg). `initialize()` creates four tables — `thread_threads`,
-`thread_members`, `thread_events`, `thread_marks` — and is safe to run again. The prefix lets one
-database and one pool serve rfnry-engine's and rfnry-memory's tables too.
+(`rfnry-thread[postgres]` installs asyncpg), on a database where thread has a schema of its own for
+its tables — `thread_threads`, `thread_members`, `thread_events`, `thread_marks` — so one database
+can also hold rfnry-engine's and rfnry-memory's.
 
-Deployments in different schemas of one database do not hear each other's notices, and replicas
-sharing a schema do. Build the storage like this:
+### Preparing the database
+
+Your app never creates or changes thread's tables. `rfnry-thread`, the command the package
+installs, prepares the schema before the app runs:
+
+```sh
+rfnry-thread create --schema thread          # the schema and its tables
+rfnry-thread create --schema thread --sql    # print every statement, run nothing
+```
+
+It takes the connection string with `--url`, or reads Postgres' standard `PG*` variables, and never
+prints it. `--sql` starts with the `search_path` the statements run under, so they land in the same
+schema when you run them yourself. Thread's tables never go in `public`.
+
+Your pool points at the schema, and the app checks it at start:
 
 ```python
-pool = await asyncpg.create_pool(dsn)
+pool = await asyncpg.create_pool(dsn, server_settings={"search_path": "thread"})
 storage = PostgresStorage(pool)
-await storage.initialize()
+await storage.check()
 server = Server(storage)
 ```
+
+`check()` only reads. It raises a `ConfigurationError` saying how the schema does not fit this
+version and the command that fixes it: no thread schema on the pool's `search_path`, a schema behind
+or ahead of this version, or tables an earlier version's `initialize()` made.
+
+A version of thread that changes its tables ships a migration, and the schema follows it in place,
+its data kept:
+
+```sh
+rfnry-thread upgrade --schema thread --sql    # what would run
+rfnry-thread upgrade --schema thread          # lists the steps, asks, runs them in one transaction
+rfnry-thread check --schema thread            # exits 0 when the schema fits this version
+```
+
+Take a snapshot and stop the app instances running the old version first: `upgrade` reminds you,
+asks before it runs unless `--yes`, and runs every pending step in one transaction under a lock.
+
+Tables made by `initialize()` in rfnry-thread 0.1.1 or earlier are adopted where they are:
+`rfnry-thread upgrade --schema <their schema>` records them as version 1, adds whatever an older
+`initialize()` left out, and runs the rest. Tables in a shared schema such as `public`, where a pool
+with the default `search_path` put them, move into thread's schema in the same transaction:
+
+```sh
+rfnry-thread upgrade --schema thread --from public
+```
+
+and the pool's `search_path` then names `thread`.
+
+Deployments in different schemas of one database do not hear each other's notices, and replicas
+sharing a schema do.
 
 `Storage` is the protocol `PostgresStorage` implements; a storage of your own implements it too, and
 `Server` takes it the same way. `scope` is the first argument of every method that reads or writes a

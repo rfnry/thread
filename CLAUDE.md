@@ -4,7 +4,7 @@
 
 Conversational text interfaces for humans and machines.
 
-It is a library, not a framework. The consumer brings authentication, the storage connection, uploads, and any HTTP endpoints of their own. The library imports no web framework, ships no model, never sees how credentials work, and never writes to disk. Tenancy is by construction: every connection and thread names its scope, every row carries it, nothing reads across scopes; authorship is stamped by the server, never trusted from a client.
+It is a library, not a framework. The consumer brings authentication, the storage connection, uploads, and any HTTP endpoints of their own. The library imports no web framework, ships no model, never sees how credentials work, and never writes to disk. The code your app calls never creates or alters thread's schema — that is the `rfnry-thread` command's job, run before the app starts with your connection string. Tenancy is by construction: every connection and thread names its scope, every row carries it, nothing reads across scopes; authorship is stamped by the server, never trusted from a client.
 
 ## Documentation
 

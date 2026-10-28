@@ -11,6 +11,9 @@ dependencies = [
     "websockets>=15.0",
 ]
 
+[project.scripts]
+rfnry-thread = "rfnry_thread.cli:main"
+
 [project.urls]
 Repository = "https://github.com/rfnry/thread"
 Documentation = "https://github.com/rfnry/thread/blob/main/docs/thread.md"

@@ -6,7 +6,7 @@ from typing import Any
 
 import asyncpg
 import pytest
-from database import DSN
+from database import DSN, SCHEMA
 
 import rfnry_thread
 from rfnry_thread import Identity, PostgresStorage, Server
@@ -27,7 +27,7 @@ ILLUSTRATIVE = {
     "await helper.follow(resume=True)": "follows until the stream ends; test_follow.py covers the pattern",
     "async with pool.acquire() as conn:": "needs Postgres; the integration tier covers it",
     'offered = websocket.scope.get("subprotocols", [])': "needs a web framework's socket; test_socket.py covers a refusal with 1008",
-    "pool = await asyncpg.create_pool(dsn)": "needs Postgres; the integration tier covers it",
+    'pool = await asyncpg.create_pool(dsn, server_settings={"search_path": "thread"})': "needs Postgres; the integration tier covers it",
 }
 
 
@@ -84,7 +84,9 @@ async def test_the_block_runs(block: str, storage: PostgresStorage) -> None:
     namespace = await context(storage)
     opened = [namespace["ana"], namespace["helper"]]
     code = compile(
-        block.replace(QUICKSTART, DSN),
+        block.replace(QUICKSTART, DSN).replace(
+            '"search_path": "thread"', f'"search_path": "{SCHEMA}"'
+        ),
         "<docs/thread.md>",
         "exec",
         flags=ast.PyCF_ALLOW_TOP_LEVEL_AWAIT,
