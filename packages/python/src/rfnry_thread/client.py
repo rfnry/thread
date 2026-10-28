@@ -4,6 +4,7 @@ import itertools
 import random
 import uuid
 from collections.abc import AsyncIterator, Awaitable, Callable
+from datetime import datetime
 from types import TracebackType
 from typing import Any
 
@@ -203,6 +204,7 @@ class Client:
         self._following = False
         self._present: set[str] = set()
         self._left: dict[str, int] = {}
+        self._made: dict[str, datetime] = {}
         self._outbox: dict[str, asyncio.Lock] = {}
         self._connected = asyncio.Event()
         self._reader: asyncio.Task[None] | None = None
@@ -287,6 +289,7 @@ class Client:
             joined = Joined.model_validate(push.payload)
             thread_id = joined.thread.id
             self._left.pop(thread_id, None)
+            self._made[thread_id] = joined.thread.created_at
             self._cursors[thread_id] = max(self._cursors.get(thread_id, 0), joined.seq)
             self._inbox.put_nowait(joined)
             return
@@ -494,6 +497,7 @@ class Client:
         finally:
             self._rewinds = [other for other in self._rewinds if other is not rewind]
         joined = Joined.model_validate(reply)
+        self._made[thread_id] = joined.thread.created_at
         if joined.seq < (since or 0):
             self._cursors[thread_id] = joined.seq
         else:
@@ -568,7 +572,12 @@ class Client:
     ) -> list[Joined]:
         payload: dict[str, Any] = {"resume": resume, "since": since}
         if left:
-            payload["left"] = left
+            payload["left"] = {
+                thread_id: {"seq": seq, "created_at": self._made[thread_id]}
+                if thread_id in self._made
+                else {"seq": seq}
+                for thread_id, seq in left.items()
+            }
         reply = await self._request("thread.follow", payload)
         self._following = True
         found: list[Joined] = []
@@ -579,6 +588,7 @@ class Client:
                 raced.append(thread_id)
                 continue
             self._left.pop(thread_id, None)
+            self._made[thread_id] = joined.thread.created_at
             found.append(joined)
             sent = (since or {}).get(thread_id)
             if sent is not None and joined.seq < sent:
@@ -590,8 +600,11 @@ class Client:
             await self._request("thread.leave", {"thread_id": thread_id})
         return found
 
-    async def mark(self, thread_id: str, seq: int) -> int:
-        reply = await self._request("thread.mark", {"thread_id": thread_id, "seq": seq})
+    async def mark(self, thread_id: str, seq: int, back: bool = False) -> int:
+        payload: dict[str, Any] = {"thread_id": thread_id, "seq": seq}
+        if back:
+            payload["back"] = True
+        reply = await self._request("thread.mark", payload)
         return int(reply["seq"])
 
     async def marked(self, thread_id: str) -> int | None:

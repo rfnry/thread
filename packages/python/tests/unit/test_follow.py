@@ -102,11 +102,42 @@ async def test_a_refollow_skips_a_left_thread_unless_the_follower_was_added_to_i
     two = (await say(ana, "t2", "two"))["seq"]
     await ana.call("member.remove", thread_id="t2", identity_id="helper")
     await ana.call("member.add", thread_id="t2", identity=who(HELPER))
+    made = {t: await created_at(ana, t) for t in ("t1", "t2")}
     helper = await Peer.open(server, HELPER)
-    reply = await helper.call("thread.follow", resume=True, left={"t1": one, "t2": two})
+    reply = await helper.call(
+        "thread.follow",
+        resume=True,
+        left={
+            "t1": {"seq": one, "created_at": made["t1"]},
+            "t2": {"seq": two, "created_at": made["t2"]},
+        },
+    )
     assert sorted(j["thread"]["id"] for j in reply["joined"]) == ["t2", "t3"]
     with pytest.raises(InputError, match="^server: left cannot be negative$"):
-        await helper.call("thread.follow", left={"t1": -1})
+        await helper.call("thread.follow", left={"t1": {"seq": -1}})
+
+
+async def created_at(ana: Peer, thread_id: str) -> str:
+    return str((await ana.call("thread.get", thread_id=thread_id))["thread"]["created_at"])
+
+
+async def test_a_refollow_follows_a_left_thread_made_again_however_long_its_new_log(
+    server: Server,
+) -> None:
+    ana = await threads(server, "t1")
+    for n in range(2):
+        await say(ana, "t1", f"old {n}")
+    made = await created_at(ana, "t1")
+    await ana.call("thread.delete", thread_id="t1")
+    await threads(server, "t1")
+    for n in range(3):
+        await say(ana, "t1", f"new {n}")
+    helper = await Peer.open(server, HELPER)
+    unknown = await helper.call("thread.follow", left={"t1": {"seq": 2}})
+    assert unknown["joined"] == []
+    again = await Peer.open(server, HELPER)
+    reply = await again.call("thread.follow", left={"t1": {"seq": 2, "created_at": made}})
+    assert [j["thread"]["id"] for j in reply["joined"]] == ["t1"]
 
 
 async def test_a_second_follow_on_the_same_connection_replays_nothing_already_delivered(
@@ -577,6 +608,33 @@ async def test_a_mark_never_moves_back_and_must_name_a_seq_in_the_thread(server:
     bruno = await Peer.open(server, BRUNO)
     with pytest.raises(ForbiddenError):
         await bruno.call("thread.mark", thread_id="t1", seq=0)
+
+
+async def test_a_mark_moved_back_is_unread_again_for_every_connection_and_a_resume(
+    server: Server,
+) -> None:
+    ana = await threads(server, "t1")
+    for n in range(3):
+        await say(ana, "t1", f"m{n}")
+    phone = await Peer.open(server, HELPER)
+    tablet = await Peer.open(server, HELPER)
+    assert await phone.call("thread.mark", thread_id="t1", seq=5) == {"seq": 5, "unread": 0}
+    await tablet.quiet()
+    assert await phone.call("thread.mark", thread_id="t1", seq=3, back=True) == {
+        "seq": 3,
+        "unread": 2,
+    }
+    assert marks(await tablet.quiet()) == [("t1", 3, 2)]
+    assert await phone.call("thread.mark", thread_id="t1", seq=3, back=True) == {
+        "seq": 3,
+        "unread": 2,
+    }
+    assert marks(await tablet.quiet()) == []
+    with pytest.raises(InputError, match="^server: seq must be between 0 and 5$"):
+        await phone.call("thread.mark", thread_id="t1", seq=6, back=True)
+    laptop = await Peer.open(server, HELPER)
+    await laptop.call("thread.follow", resume=True)
+    assert texts(await laptop.quiet()) == ["m1", "m2"]
 
 
 def marks(pushes: list[dict[str, Any]]) -> list[tuple[str, int, int]]:

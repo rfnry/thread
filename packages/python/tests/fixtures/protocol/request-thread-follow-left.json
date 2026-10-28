@@ -3,7 +3,10 @@
   "method": "thread.follow",
   "payload": {
     "left": {
-      "t2": 4
+      "t2": {
+        "created_at": "2026-01-01T12:00:00Z",
+        "seq": 4
+      }
     },
     "resume": true,
     "since": {

@@ -434,8 +434,8 @@ async def leave(self, thread_id: str) -> None: ...
 
 Stops receiving the thread live; the caller's open streams and `Working` there end, and `Left` goes
 out when it was the identity's last connection in it. Leaving a thread not joined does nothing. A
-followed thread left stays left, across dropped sockets, until the caller joins it, follows again
-or is added to it again.
+followed thread left stays left, across dropped sockets, until the caller joins it, follows again,
+is added to it again or the thread is deleted and made again.
 
 ### `Client.away`
 
@@ -468,14 +468,14 @@ position.
 ### `Client.mark`
 
 ```python
-async def mark(self, thread_id: str, seq: int) -> int: ...
+async def mark(self, thread_id: str, seq: int, back: bool = False) -> int: ...
 ```
 
-Stores the caller's private read position in the thread, never lowering it, and returns the stored
-`seq`; when the mark moved, the caller's other connections receive `Marked`. Raises `InputError`
-when `seq` is not
-between 0 and the thread's last `seq`, `NotFoundError` when the scope holds no such thread,
-`ForbiddenError` when the caller is not a member or `authorize` refuses `read`.
+Stores the caller's private read position in the thread, never lowering it unless `back=True` moves
+it back, and returns the stored `seq`; when the mark moved, the caller's other connections receive
+`Marked`, with the unread count after it. Raises `InputError` when `seq` is not between 0 and the
+thread's last `seq`, `NotFoundError` when the scope holds no such thread, `ForbiddenError` when the
+caller is not a member or `authorize` refuses `read`.
 
 ### `Client.marked`
 
@@ -1353,7 +1353,7 @@ class Storage(Protocol):
     async def head(self, scope: str, thread_id: str, identity_id: str) -> int | None: ...
 
     async def mark(
-        self, scope: str, thread_id: str, identity_id: str, seq: int
+        self, scope: str, thread_id: str, identity_id: str, seq: int, back: bool = False
     ) -> tuple[int, int, bool]: ...
 
     async def get_mark(self, scope: str, thread_id: str, identity_id: str) -> int | None: ...
@@ -1392,26 +1392,26 @@ class Storage(Protocol):
 The protocol `PostgresStorage` implements, and a storage of your own implements to take its place;
 `scope` is the first argument of every method that reads or writes a row, and the log is
 append-only: an event is removed only with its thread or its scope. `check` only reads, and raises
-`ConfigurationError` when the storage does not fit this version. `create_thread`, `add_member`
-and `append_event` return the row stored and whether it is new (an existing thread, membership, or
-event of the same author and `client_id` comes back with `False`, and a new event gets the thread's
-next `seq`); the getters return `None` for what the scope does not hold, `list_threads` returns
-threads newest first and `list_events` events in `seq` order, with `since` the first after it and
-without it the latest. `order` is an `Order`, which is `Literal["created", "activity"]`:
-`"activity"` lists by the latest message instead, a thread without messages by its creation;
-`preview=True` fills each thread's `last_message`. A page continues below `before`: a thread id, at
-that thread's place now, or a `Thread` a page listed, at the place its own `created_at`,
-`last_message_at` and `id` give it, so paging holds when that thread is deleted or moves meanwhile.
-`head` returns a thread's last `seq` when `identity_id` is a member of it, `None` otherwise: the one
-read that enters a thread for a connection. `listen` takes an `OnEvent`, `on_event(scope, thread_id,
-seq)`, and an `OnSignal`, `on_signal(scope, thread_id, payload)`, called for what any server on the
-storage appends or publishes, and an `OnResume`, `on_resume()`, called once a dropped listener is
-back; it returns a `Stop`, `stop()`, that ends it, and all four are async functions returning
-`None`. Raises `NotFoundError`, from `add_member`, `append_event` and `list_threads` with a `before`
-id, when the scope holds no such thread, and `StorageError`, from `create_thread`, when the thread's
-scope is not `scope`. `mark` stores the identity's private read position in the thread, never
-lowering it, and returns it with the count of `message` events by others after it, at most 100, and
-whether it moved (a first mark, or a higher one); `get_mark` returns it, `None` without one;
+`ConfigurationError` when the storage does not fit this version. `create_thread`, `add_member` and
+`append_event` return the row stored and whether it is new (an existing thread, membership, or event
+of the same author and `client_id` comes back with `False`, and a new event gets the thread's next
+`seq`); the getters return `None` for what the scope does not hold, `list_threads` returns threads
+newest first and `list_events` events in `seq` order, with `since` the first after it and without it
+the latest. `order` is an `Order`, which is `Literal["created", "activity"]`: `"activity"` lists by
+the latest message instead, a thread without messages by its creation; `preview=True` fills each
+thread's `last_message`. A page continues below `before`: a thread id, at that thread's place now,
+or a `Thread` a page listed, at the place its own `created_at`, `last_message_at` and `id` give it,
+so paging holds when that thread is deleted or moves meanwhile. `head` returns a thread's last `seq`
+when `identity_id` is a member of it, `None` otherwise: the one read that enters a thread for a
+connection. `listen` takes an `OnEvent`, `on_event(scope, thread_id, seq)`, and an `OnSignal`,
+`on_signal(scope, thread_id, payload)`, called for what any server on the storage appends or
+publishes, and an `OnResume`, `on_resume()`, called once a dropped listener is back; it returns a
+`Stop`, `stop()`, that ends it, and all four are async functions returning `None`. Raises
+`NotFoundError`, from `add_member`, `append_event` and `list_threads` with a `before` id, when the
+scope holds no such thread, and `StorageError`, from `create_thread`, when the thread's scope is not
+`scope`. `mark` stores the identity's private read position in the thread, never lowering it unless
+`back` is true, and returns it with the count of `message` events by others after it, at most 100,
+and whether it moved (a first mark, or a different one); `get_mark` returns it, `None` without one;
 `baseline_marks` stores each thread's last `seq` as the mark of every membership of `identity_id`
 that has none, and returns how many it stored. `mark` raises `NotFoundError` when the identity is
 not a member of the thread.
@@ -1721,7 +1721,7 @@ async leave(threadId: string): Promise<void>
 
 Stops receiving the thread live; the caller's open streams and `Working` there end. Leaving a thread
 not joined does nothing. A followed thread left stays left, across dropped sockets, until the caller
-joins it, follows again or is added to it again.
+joins it, follows again, is added to it again or the thread is deleted and made again.
 
 ### `Client.away`
 
@@ -1754,14 +1754,14 @@ position.
 ### `Client.mark`
 
 ```ts
-async mark(threadId: string, seq: number): Promise<number>
+async mark(threadId: string, seq: number, options: { back?: boolean } = {}): Promise<number>
 ```
 
-Stores the caller's private read position in the thread, never lowering it, and returns the stored
-`seq`; when the mark moved, the caller's other connections receive `Marked`. Raises `InputError`
-when `seq` is not
-between 0 and the thread's last `seq`, `NotFoundError` when the scope holds no such thread,
-`ForbiddenError` when the caller is not a member or `authorize` refuses `read`.
+Stores the caller's private read position in the thread, never lowering it unless `back: true` moves
+it back, and returns the stored `seq`; when the mark moved, the caller's other connections receive
+`Marked`, with the unread count after it. Raises `InputError` when `seq` is not between 0 and the
+thread's last `seq`, `NotFoundError` when the scope holds no such thread, `ForbiddenError` when the
+caller is not a member or `authorize` refuses `read`.
 
 ### `Client.marked`
 

@@ -209,6 +209,7 @@ export class Client {
   private following = false
   private readonly held = new Set<string>()
   private readonly left = new Map<string, number>()
+  private readonly made = new Map<string, string>()
   private stopped = false
   private current: Status = 'open'
   private failure: ThreadException | null = null
@@ -292,6 +293,7 @@ export class Client {
     if (frame.name === 'joined') {
       const joined = frame.payload as unknown as Joined
       this.left.delete(joined.thread.id)
+      this.made.set(joined.thread.id, joined.thread.created_at)
       this.cursors.set(
         joined.thread.id,
         Math.max(this.cursors.get(joined.thread.id) ?? 0, joined.seq)
@@ -496,6 +498,7 @@ export class Client {
     } finally {
       this.rewinds = this.rewinds.filter((other) => other !== rewind)
     }
+    this.made.set(threadId, joined.thread.created_at)
     this.cursors.set(
       threadId,
       joined.seq < (since ?? 0) ? joined.seq : Math.max(this.cursors.get(threadId) ?? 0, joined.seq)
@@ -582,7 +585,13 @@ export class Client {
     left: Record<string, number>
   ): Promise<Joined[]> {
     const payload: Record<string, unknown> = { resume, since }
-    if (Object.keys(left).length > 0) payload.left = left
+    if (Object.keys(left).length > 0)
+      payload.left = Object.fromEntries(
+        Object.entries(left).map(([id, seq]) => {
+          const created = this.made.get(id)
+          return [id, created === undefined ? { seq } : { seq, created_at: created }]
+        })
+      )
     const reply = await this.request('thread.follow', payload)
     this.following = true
     const found: Joined[] = []
@@ -594,6 +603,7 @@ export class Client {
         continue
       }
       this.left.delete(id)
+      this.made.set(id, joined.thread.created_at)
       found.push(joined)
       const sent = since?.[id]
       this.cursors.set(
@@ -608,8 +618,10 @@ export class Client {
     return found
   }
 
-  async mark(threadId: string, seq: number): Promise<number> {
-    const reply = await this.request('thread.mark', { thread_id: threadId, seq })
+  async mark(threadId: string, seq: number, options: { back?: boolean } = {}): Promise<number> {
+    const payload: Payload = { thread_id: threadId, seq }
+    if (options.back) payload.back = true
+    const reply = await this.request('thread.mark', payload)
     return reply.seq as number
   }
 

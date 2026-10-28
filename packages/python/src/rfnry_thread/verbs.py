@@ -254,14 +254,16 @@ class Verbs:
             raise NotFoundError(f"server: event {event_id!r} was not found")
         return event
 
-    async def mark(self, session: Session, thread_id: str, seq: int) -> tuple[int, int]:
+    async def mark(
+        self, session: Session, thread_id: str, seq: int, back: bool = False
+    ) -> tuple[int, int]:
         actor, scope = session.identity, session.scope
         await self.thread(actor, scope, thread_id, "read")
         latest = await self._storage.list_events(scope, thread_id, limit=1)
         head = latest[-1].seq if latest else 0
         if not 0 <= seq <= head:
             raise InputError(f"server: seq must be between 0 and {head}")
-        stored, unread, moved = await self._storage.mark(scope, thread_id, actor.id, seq)
+        stored, unread, moved = await self._storage.mark(scope, thread_id, actor.id, seq, back)
         if moved:
             await self._hub.marked(
                 session, Marked(thread_id=thread_id, sender=actor, seq=stored, unread=unread)
@@ -301,11 +303,11 @@ class Verbs:
         session: Session,
         resume: bool,
         since: dict[str, int] | None,
-        left: dict[str, int] | None,
+        left: dict[str, tuple[int, datetime | None]] | None,
     ) -> list[Joined]:
         if since is not None and any(seq < 0 for seq in since.values()):
             raise InputError("server: since cannot be negative")
-        if left is not None and any(seq < 0 for seq in left.values()):
+        if left is not None and any(seq < 0 for seq, _ in left.values()):
             raise InputError("server: left cannot be negative")
         actor, scope = session.identity, session.scope
         session.following = True
@@ -315,13 +317,20 @@ class Verbs:
         threads = [
             t
             for t in await self._memberships(actor, scope)
-            if t.id not in gone
-            or (t.last_seq or 0) < gone[t.id]
-            or await self._added_since(scope, t.id, actor.id, gone[t.id])
+            if t.id not in gone or await self._back(scope, actor.id, t, *gone[t.id])
         ]
         return await self._hub.follow(
             session,
             [(t, start.get(t.id, t.marked if resume else None)) for t in threads],
+        )
+
+    async def _back(
+        self, scope: str, identity_id: str, thread: Thread, seq: int, made: datetime | None
+    ) -> bool:
+        return (
+            (made is not None and made != thread.created_at)
+            or (thread.last_seq or 0) < seq
+            or await self._added_since(scope, thread.id, identity_id, seq)
         )
 
     async def _added_since(self, scope: str, thread_id: str, identity_id: str, seq: int) -> bool:

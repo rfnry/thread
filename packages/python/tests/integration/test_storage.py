@@ -307,6 +307,20 @@ async def test_a_mark_moves_forward_only_counts_what_others_said_after_it_and_sa
     assert await storage.mark("acme", "t1", "bruno", 0) == (0, 1, True)
 
 
+async def test_a_mark_moves_back_only_when_asked(storage: Storage) -> None:
+    await room(storage, "t1", "acme", ANA, BRUNO)
+    for n in range(3):
+        await storage.append_event("acme", say("t1", f"b{n}", author=BRUNO))
+    await storage.append_event("acme", say("t1", "a0", author=ANA))
+    assert await storage.mark("acme", "t1", "ana", 4) == (4, 0, True)
+    assert await storage.mark("acme", "t1", "ana", 1) == (4, 0, False)
+    assert await storage.mark("acme", "t1", "ana", 1, back=True) == (1, 2, True)
+    assert await storage.mark("acme", "t1", "ana", 1, back=True) == (1, 2, False)
+    assert await storage.mark("acme", "t1", "ana", 3, back=True) == (3, 0, True)
+    assert await storage.mark("acme", "t1", "bruno", 2, back=True) == (2, 1, True)
+    assert await storage.get_mark("acme", "t1", "ana") == 3
+
+
 async def test_a_mark_needs_a_membership_and_leaves_with_it(storage: Storage) -> None:
     await room(storage, "t1", "acme", ANA)
     with pytest.raises(NotFoundError, match="'bruno' is not a member of thread 't1'$"):

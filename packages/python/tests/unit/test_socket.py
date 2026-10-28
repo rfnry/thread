@@ -712,7 +712,8 @@ async def test_a_followed_thread_left_stays_left_after_a_drop_until_joined_or_fo
     ana._request = record  # type: ignore[method-assign]
     await drop_and_reopen(live, ana)
     assert [m for m, _ in sent] == ["thread.follow"]
-    assert sent[0][1]["left"] == {"t1": 2}
+    made = (await bruno.get_thread("t1")).created_at
+    assert sent[0][1]["left"] == {"t1": {"seq": 2, "created_at": made}}
     await bruno.send("t1", "after the drop")
     await bruno.send("t2", "elsewhere")
     items = await drain(ana)
@@ -895,6 +896,31 @@ async def test_a_left_thread_made_again_while_away_and_the_follower_added_is_del
     items = await drain(ana)
     assert sorted(j.thread.id for j in items if isinstance(j, Joined)) == ["t1", "t2"]
     assert [first_text(m) for m in items if isinstance(m, Message)] == ["new"]
+
+
+async def test_a_left_thread_made_again_with_a_longer_log_is_delivered_after_the_drop(
+    live: Live,
+) -> None:
+    ana, bruno, ana_identity = await followed_and_left(live)
+    for n in range(3):
+        await bruno.send("t1", f"old {n}")
+    await drain(ana)
+    await ana.leave("t1")
+    live.paused = True
+    await live.drop()
+    await until(lambda: ana.status == "reconnecting")
+    await bruno.delete_thread("t1")
+    await bruno.create_thread(thread_id="t1")
+    await bruno.add_member("t1", ana_identity)
+    for n in range(4):
+        await bruno.send("t1", f"new {n}")
+    live.paused = False
+    await until(lambda: ana.status == "open", timeout=3.0)
+    await bruno.send("t1", "after")
+    items = await drain(ana)
+    assert sorted(j.thread.id for j in items if isinstance(j, Joined)) == ["t1", "t2"]
+    said = [first_text(m) for m in items if isinstance(m, Message)]
+    assert said == [*(f"new {n}" for n in range(4)), "after"]
 
 
 async def anas(bruno: Client) -> list[str]:

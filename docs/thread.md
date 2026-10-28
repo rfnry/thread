@@ -423,16 +423,19 @@ later from the moment you were added, as a `Joined` on the stream: there is no `
 Following is not presence; a page that opens a thread still joins it, and `join(thread_id, since=)`
 hands it the thread's events after `since` once while the thread keeps arriving live; two such joins
 at the same time each get their own. `leave` stops one followed thread, across dropped sockets,
-until you join it, follow again or are added to it again. `follow(resume=True)` first hands you what
-each thread said after your **mark**, your private read position: `mark(thread_id, seq)` stores it,
-never lowers it, and when it moved tells your other connections with `Marked`; `marked(thread_id)`
-reads it, `None` without one, and writes nothing. A thread you were added to starts from the add; a
-gap longer than the replay limit arrives as its latest events with `truncated=True`, and
-`history(thread_id, after=mark, before=...)` reads the rest. A participant that joins its threads
-one at a time resumes each the same way, with `join(thread_id, resume=True)`, whose `Joined` carries
-the mark it resumed from as `thread.marked`; a join takes `since` or `resume`, not both. Resuming is
-at least once: an event handled just before a crash comes again, so handle idempotently, and when
-you handle events concurrently, mark only up to the lowest one not yet handled.
+until you join it, follow again, are added to it again or it is deleted and made again.
+`follow(resume=True)` first hands you what each thread said after your **mark**, your private read
+position: `mark(thread_id, seq)` stores it, never lowers it, and when it moved tells your other
+connections with `Marked`; `mark(thread_id, seq, back=True)` moves it back — "mark as unread" — so
+what follows it counts as unread again and a follower resuming from it is handed those messages
+again; `marked(thread_id)` reads it, `None` without one, and writes nothing. A thread you were added
+to starts from the add; a gap longer than the replay limit arrives as its latest events with
+`truncated=True`, and `history(thread_id, after=mark, before=...)` reads the rest. A participant
+that joins its threads one at a time resumes each the same way, with `join(thread_id, resume=True)`,
+whose `Joined` carries the mark it resumed from as `thread.marked`; a join takes `since` or
+`resume`, not both. Resuming is at least once: an event handled just before a crash comes again, so
+handle idempotently, and when you handle events concurrently, mark only up to the lowest one not yet
+handled.
 
 An inbox reads the same marks:
 

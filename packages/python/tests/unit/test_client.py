@@ -422,6 +422,24 @@ async def test_mark_returns_the_stored_position_and_tells_the_markers_other_clie
     assert [item for item in await drain(phone) if isinstance(item, Marked)] == []
 
 
+async def test_mark_back_lowers_the_mark_and_tells_the_markers_other_clients(
+    server: Server,
+) -> None:
+    ana = await server.connect(identity=ANA, scope="acme")
+    phone = await server.connect(identity=HELPER, scope="acme")
+    laptop = await server.connect(identity=HELPER, scope="acme")
+    await ana.create_thread(thread_id="t1")
+    await ana.add_member("t1", HELPER)
+    first = await ana.send("t1", "one")
+    second = await ana.send("t1", "two")
+    assert await phone.mark("t1", second.seq) == second.seq
+    await drain(laptop)
+    assert await phone.mark("t1", first.seq - 1, back=True) == first.seq - 1
+    told = [item for item in await drain(laptop, include_own=False) if isinstance(item, Marked)]
+    assert [(m.seq, m.unread) for m in told] == [(first.seq - 1, 2)]
+    assert await laptop.marked("t1") == first.seq - 1
+
+
 async def test_marked_reads_the_callers_own_mark_without_moving_it(
     server: Server, storage: PostgresStorage
 ) -> None:

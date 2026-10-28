@@ -1,0 +1,10 @@
+{
+  "id": "5",
+  "method": "thread.mark",
+  "payload": {
+    "back": true,
+    "seq": 3,
+    "thread_id": "t1"
+  },
+  "type": "request"
+}

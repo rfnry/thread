@@ -394,7 +394,7 @@ class PostgresStorage:
         return None if body is None else _event(body)
 
     async def mark(
-        self, scope: str, thread_id: str, identity_id: str, seq: int
+        self, scope: str, thread_id: str, identity_id: str, seq: int, back: bool = False
     ) -> tuple[int, int, bool]:
         async with self._guard("mark"), self._pool.acquire() as conn:
             row = await conn.fetchrow(
@@ -404,7 +404,8 @@ class PostgresStorage:
                 "SELECT $1, $2, $3, $4, now() WHERE EXISTS (SELECT 1 FROM thread_members "
                 "WHERE scope = $1 AND thread_id = $2 AND identity_id = $3) "
                 "ON CONFLICT (scope, thread_id, identity_id) DO UPDATE "
-                "SET seq = GREATEST(thread_marks.seq, EXCLUDED.seq), at = EXCLUDED.at RETURNING seq) "
+                "SET seq = CASE WHEN $6 THEN EXCLUDED.seq ELSE GREATEST(thread_marks.seq, EXCLUDED.seq) "
+                "END, at = EXCLUDED.at RETURNING seq) "
                 "SELECT s.seq, (SELECT count(*) FROM (SELECT 1 FROM thread_events e "
                 "WHERE e.scope = $1 AND e.thread_id = $2 AND e.seq > s.seq AND e.kind = 'message' "
                 "AND e.author_id <> $3 LIMIT $5) u) AS unread, "
@@ -414,6 +415,7 @@ class PostgresStorage:
                 identity_id,
                 seq,
                 UNREAD_CAP,
+                back,
             )
         if row is None:
             raise NotFoundError(

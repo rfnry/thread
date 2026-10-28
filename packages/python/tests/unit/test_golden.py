@@ -169,7 +169,11 @@ def golden() -> dict[str, Frame]:
         "request-thread-follow-left": Request(
             id="4",
             method="thread.follow",
-            payload={"resume": True, "since": {"t1": 9}, "left": {"t2": 4}},
+            payload={
+                "resume": True,
+                "since": {"t1": 9},
+                "left": {"t2": {"seq": 4, "created_at": "2026-01-01T12:00:00Z"}},
+            },
         ),
         "response-thread-follow": Response(
             id="4",
@@ -177,6 +181,9 @@ def golden() -> dict[str, Frame]:
         ),
         "request-thread-mark": Request(
             id="5", method="thread.mark", payload={"thread_id": "t1", "seq": 7}
+        ),
+        "request-thread-mark-back": Request(
+            id="5", method="thread.mark", payload={"thread_id": "t1", "seq": 3, "back": True}
         ),
         "response-thread-mark": Response(id="5", payload={"seq": 7, "unread": 2}),
         "request-thread-marked": Request(

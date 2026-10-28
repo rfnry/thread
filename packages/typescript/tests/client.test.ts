@@ -571,6 +571,11 @@ describe('client', () => {
     await vi.waitFor(() =>
       expect(items).toContainEqual(expect.objectContaining({ kind: 'marked' }))
     )
+    expect(await client.mark('t1', 1, { back: true })).toBe(1)
+    expect(server.sent('thread.mark').map((frame) => frame.payload)).toEqual([
+      { thread_id: 't1', seq: 3 },
+      { thread_id: 't1', seq: 1, back: true },
+    ])
   })
 
   it('reads its own mark, null without one, without a write', async () => {
@@ -665,7 +670,7 @@ describe('client', () => {
     expect(server.sent('thread.follow').at(-1)?.payload).toEqual({
       resume: true,
       since: { t2: 4 },
-      left: { t1: 4 },
+      left: { t1: { seq: 4, created_at: '2026-01-01T12:00:00Z' } },
     })
     expect(items.flatMap((item) => ('truncated' in item ? [item.thread.id] : []))).toEqual(['t2'])
     await client.join('t1')
@@ -692,7 +697,9 @@ describe('client', () => {
     server.handlers.set('thread.follow', () => followed('t2'))
     server.drop()
     await vi.waitFor(() => expect(server.sent('thread.follow')).toHaveLength(2))
-    expect(server.sent('thread.follow').at(-1)?.payload.left).toEqual({ t1: 4 })
+    expect(server.sent('thread.follow').at(-1)?.payload.left).toEqual({
+      t1: { seq: 4, created_at: '2026-01-01T12:00:00Z' },
+    })
     await client.close()
   })
 
@@ -714,7 +721,9 @@ describe('client', () => {
     server.handlers.set('thread.follow', () => followed('t2'))
     server.drop()
     await vi.waitFor(() => expect(server.sent('thread.follow')).toHaveLength(3))
-    expect(server.sent('thread.follow').at(-1)?.payload.left).toEqual({ t1: 4 })
+    expect(server.sent('thread.follow').at(-1)?.payload.left).toEqual({
+      t1: { seq: 4, created_at: '2026-01-01T12:00:00Z' },
+    })
     await client.close()
   })
 
@@ -739,7 +748,11 @@ describe('client', () => {
     await vi.waitFor(() => expect(server.sent('thread.leave')).toHaveLength(2))
     expect(server.sent('thread.follow').map((frame) => frame.payload)).toEqual([
       { resume: false, since: null },
-      { resume: true, since: { t2: 4 }, left: { t1: 4 } },
+      {
+        resume: true,
+        since: { t2: 4 },
+        left: { t1: { seq: 4, created_at: '2026-01-01T12:00:00Z' } },
+      },
       { resume: true, since: { t2: 4, t1: 4 } },
     ])
     expect(items.flatMap((item) => ('truncated' in item ? [item.thread.id] : []))).toEqual(['t2'])

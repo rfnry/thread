@@ -1,6 +1,7 @@
 import asyncio
 import contextlib
 import logging
+from datetime import datetime
 from typing import Any
 
 from pydantic import BaseModel, ConfigDict, ValidationError
@@ -73,10 +74,15 @@ class _Join(_Ref):
     away: bool = False
 
 
+class _Gone(_Args):
+    seq: int
+    created_at: datetime | None = None
+
+
 class _Follow(_Args):
     resume: bool = False
     since: dict[str, int] | None = None
-    left: dict[str, int] | None = None
+    left: dict[str, _Gone] | None = None
 
 
 class _History(_Ref):
@@ -88,6 +94,7 @@ class _History(_Ref):
 
 class _Mark(_Ref):
     seq: int
+    back: bool = False
 
 
 class _Add(_Ref):
@@ -296,7 +303,12 @@ class Server:
             )
         if method == "thread.follow":
             follow = _args(_Follow, method, payload)
-            joined = await verbs.follow(session, follow.resume, follow.since, follow.left)
+            left = (
+                None
+                if follow.left is None
+                else {t: (g.seq, g.created_at) for t, g in follow.left.items()}
+            )
+            joined = await verbs.follow(session, follow.resume, follow.since, left)
             return {"joined": [_dump(j) for j in joined]}
         if method == "thread.leave":
             await verbs.leave(session, _args(_Ref, method, payload).thread_id)
@@ -318,7 +330,7 @@ class Server:
             return {"events": [_dump(e) for e in events]}
         if method == "thread.mark":
             mark = _args(_Mark, method, payload)
-            seq, unread = await verbs.mark(session, mark.thread_id, mark.seq)
+            seq, unread = await verbs.mark(session, mark.thread_id, mark.seq, mark.back)
             return {"seq": seq, "unread": unread}
         if method == "thread.marked":
             ref = _args(_Ref, method, payload)
