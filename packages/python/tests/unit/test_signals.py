@@ -7,6 +7,7 @@ from rfnry_thread.models import Identity, Thread
 from rfnry_thread.postgres import PostgresStorage
 from rfnry_thread.server import Server
 
+from .conftest import say
 from .factories import ANA, BRUNO, HELPER
 from .peer import Peer
 
@@ -251,3 +252,53 @@ async def test_a_signal_that_outlives_its_join_is_refused(storage: PostgresStora
     bruno = await Peer.open(server, BRUNO)
     await bruno.call("thread.join", thread_id="t1")
     assert [p["kind"] for p in bruno.pushes] == ["present", "present"]
+
+
+async def test_away_ends_presence_while_the_thread_keeps_arriving(server: Server) -> None:
+    ana, helper = await joined(server, ANA, HELPER)
+    await helper.call("thread.away", thread_id="t1")
+    assert [p["kind"] for p in await ana.quiet()] == ["left"]
+    identities = (await ana.call("thread.present", thread_id="t1"))["identities"]
+    assert [i["id"] for i in identities] == ["ana"]
+    await say(ana, "t1", "still there?")
+    assert [p["kind"] for p in await helper.quiet()] == ["left", "message"]
+    await ana.quiet()
+    await helper.call("signal.send", thread_id="t1", kind="working")
+    await helper.call("thread.away", thread_id="t1")
+    await helper.call("thread.join", thread_id="t1")
+    assert [p["kind"] for p in await ana.quiet()] == ["working", "present"]
+
+
+async def test_away_in_one_tab_keeps_the_member_present_in_the_other(server: Server) -> None:
+    helper, tab_one = await joined(server, HELPER, ANA)
+    tab_two = await Peer.open(server, ANA)
+    await tab_two.call("thread.join", thread_id="t1")
+    await tab_one.call("thread.away", thread_id="t1")
+    assert [p["kind"] for p in await helper.quiet()] == []
+    await tab_two.call("thread.away", thread_id="t1")
+    assert [p["kind"] for p in await helper.quiet()] == ["left"]
+    await tab_one.close()
+    await tab_two.close()
+    assert [p["kind"] for p in await helper.quiet()] == []
+
+
+async def test_away_from_a_thread_not_joined_changes_nothing(server: Server) -> None:
+    ana, helper = await joined(server, ANA, HELPER)
+    bruno = await Peer.open(server, BRUNO)
+    await bruno.call("thread.away", thread_id="t1")
+    await bruno.call("thread.away", thread_id="ghost")
+    assert [p["kind"] for p in await ana.quiet()] == []
+
+
+async def test_a_join_while_away_receives_the_thread_without_presence(server: Server) -> None:
+    [ana] = await joined(server, ANA)
+    await ana.call("member.add", thread_id="t1", identity=HELPER.model_dump(mode="json"))
+    await ana.quiet()
+    helper = await Peer.open(server, HELPER)
+    await helper.call("thread.join", thread_id="t1", away=True)
+    assert [p["kind"] for p in await ana.quiet()] == []
+    await say(ana, "t1", "hello")
+    assert [p["kind"] for p in await helper.quiet()] == ["present", "message"]
+    await ana.quiet()
+    await helper.call("thread.join", thread_id="t1")
+    assert [p["kind"] for p in await ana.quiet()] == ["present"]

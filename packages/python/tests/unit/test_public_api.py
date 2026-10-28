@@ -74,6 +74,7 @@ CLIENT = {
     "delete_thread",
     "join",
     "leave",
+    "away",
     "follow",
     "mark",
     "marked",

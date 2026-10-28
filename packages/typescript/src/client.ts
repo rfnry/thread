@@ -407,7 +407,7 @@ export class Client {
       const cursor = this.cursors.get(threadId)
       if (cursor === undefined || (followed && !this.held.has(threadId))) continue
       try {
-        this.emit(await this.joinFrom(threadId, cursor))
+        this.emit(await this.joinFrom(threadId, cursor, false, !this.held.has(threadId)))
       } catch (error) {
         if (error instanceof TransportError) return
         this.cursors.delete(threadId)
@@ -473,7 +473,12 @@ export class Client {
     return (await this.event(threadId, fields, clientId)) as Message
   }
 
-  private async joinFrom(threadId: string, since: number | null, resume = false): Promise<Joined> {
+  private async joinFrom(
+    threadId: string,
+    since: number | null,
+    resume = false,
+    away = false
+  ): Promise<Joined> {
     const held = this.cursors.get(threadId)
     const start = resume ? 0 : since
     const rewind =
@@ -484,6 +489,7 @@ export class Client {
     if (rewind) this.rewinds.push(rewind)
     const payload: Payload = { thread_id: threadId, since }
     if (resume) payload.resume = true
+    if (away) payload.away = true
     let joined: Joined
     try {
       joined = (await this.request('thread.join', payload)) as unknown as Joined
@@ -558,6 +564,11 @@ export class Client {
     if (this.following && (seq !== undefined || !this.left.has(threadId)))
       this.left.set(threadId, seq ?? 0)
     await this.request('thread.leave', { thread_id: threadId })
+  }
+
+  async away(threadId: string): Promise<void> {
+    this.held.delete(threadId)
+    await this.request('thread.away', { thread_id: threadId })
   }
 
   async follow(options: { resume?: boolean } = {}): Promise<Joined[]> {

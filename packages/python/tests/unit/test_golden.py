@@ -156,6 +156,10 @@ def golden() -> dict[str, Frame]:
         "request-thread-join-resume": Request(
             id="6", method="thread.join", payload={"thread_id": "t1", "since": None, "resume": True}
         ),
+        "request-thread-join-away": Request(
+            id="7", method="thread.join", payload={"thread_id": "t1", "since": 12, "away": True}
+        ),
+        "request-thread-away": Request(id="9", method="thread.away", payload={"thread_id": "t1"}),
         "response-thread-join": Response(
             id="1", payload=Joined(thread=thread, seq=12, truncated=True).model_dump(mode="json")
         ),

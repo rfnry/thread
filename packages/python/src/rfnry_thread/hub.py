@@ -96,9 +96,11 @@ class Hub:
     def _room(self, scope: str, thread_id: str) -> list[Session]:
         return list(self._rooms.get((scope, thread_id), ()))
 
-    async def join(self, session: Session, thread: Thread, since: int | None) -> Joined:
+    async def join(
+        self, session: Session, thread: Thread, since: int | None, away: bool = False
+    ) -> Joined:
         joined, _ = await self._enter(session, thread, since)
-        if thread.id not in session.present and not session.dropped:
+        if not away and thread.id not in session.present and not session.dropped:
             session.present.add(thread.id)
             await self._arrive(session, thread.id)
         return joined
@@ -184,6 +186,11 @@ class Hub:
             )
         if thread_id in session.working:
             await self.signal(session, Idle(thread_id=thread_id, sender=session.identity))
+        if thread_id in session.present:
+            session.present.discard(thread_id)
+            await self._depart(session, thread_id)
+
+    async def away(self, session: Session, thread_id: str) -> None:
         if thread_id in session.present:
             session.present.discard(thread_id)
             await self._depart(session, thread_id)

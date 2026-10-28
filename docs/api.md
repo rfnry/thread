@@ -437,6 +437,17 @@ out when it was the identity's last connection in it. Leaving a thread not joine
 followed thread left stays left, across dropped sockets, until the caller joins it, follows again
 or is added to it again.
 
+### `Client.away`
+
+```python
+async def away(self, thread_id: str) -> None: ...
+```
+
+Ends the caller's presence in a thread it joined while the thread keeps arriving: `Left` goes out
+when it was the identity's last connection present there, and joining the thread again is presence
+again. Streams and `Working` are untouched. The thread stays away across dropped sockets. Away from
+a thread not joined, or already away, does nothing.
+
 ### `Client.follow`
 
 ```python
@@ -1711,6 +1722,17 @@ async leave(threadId: string): Promise<void>
 Stops receiving the thread live; the caller's open streams and `Working` there end. Leaving a thread
 not joined does nothing. A followed thread left stays left, across dropped sockets, until the caller
 joins it, follows again or is added to it again.
+
+### `Client.away`
+
+```ts
+async away(threadId: string): Promise<void>
+```
+
+Ends the caller's presence in a thread it joined while the thread keeps arriving: `Left` goes out
+when it was the identity's last connection present there, and joining the thread again is presence
+again. Streams and `Working` are untouched. The thread stays away across dropped sockets. Away from
+a thread not joined, or already away, does nothing.
 
 ### `Client.follow`
 

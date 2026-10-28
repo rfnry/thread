@@ -19,7 +19,7 @@ from rfnry_thread.errors import (
     ThreadException,
     TransportError,
 )
-from rfnry_thread.models import Identity, Joined, Message, StatusChanged, Text
+from rfnry_thread.models import Identity, Joined, Left, Message, Present, StatusChanged, Text
 from rfnry_thread.postgres import PostgresStorage
 from rfnry_thread.server import Server
 
@@ -626,13 +626,15 @@ async def test_a_failed_refollow_falls_back_to_joining_every_thread(live: Live) 
     bruno = await live.server.connect(identity=BRUNO, scope="acme")
     await bruno.create_thread(thread_id="t1")
     await bruno.add_member("t1", ana_identity)
+    await bruno.join("t1")
     await ana.follow()
     await drain(ana)
+    await drain(bruno)
     sent: list[str] = []
     request = ana._request
 
     async def record(method: str, payload: dict[str, Any]) -> dict[str, Any]:
-        sent.append(method)
+        sent.append(f"{method} away" if payload.get("away") else method)
         return await request(method, payload)
 
     async def refuse(
@@ -650,7 +652,8 @@ async def test_a_failed_refollow_falls_back_to_joining_every_thread(live: Live) 
     await until(lambda: ana.status == "open", timeout=3.0)
     said = [first_text(item) for item in await drain(ana) if isinstance(item, Message)]
     assert said == ["away one"]
-    assert "thread.join" in sent
+    assert sent == ["thread.join away"]
+    assert await anas(bruno) == []
 
 
 async def test_a_refollow_into_a_thread_made_again_follows_it_from_the_new_head(
@@ -892,3 +895,43 @@ async def test_a_left_thread_made_again_while_away_and_the_follower_added_is_del
     items = await drain(ana)
     assert sorted(j.thread.id for j in items if isinstance(j, Joined)) == ["t1", "t2"]
     assert [first_text(m) for m in items if isinstance(m, Message)] == ["new"]
+
+
+async def anas(bruno: Client) -> list[str]:
+    items = await drain(bruno)
+    return [s.kind for s in items if isinstance(s, Present | Left) and s.sender.id == "ana"]
+
+
+async def away_in_t1(live: Live, follow: bool) -> tuple[Client, Client, list[str]]:
+    ana = await Client.connect(live.url, headers=ANA_HEADERS)
+    bruno = await live.server.connect(identity=BRUNO, scope="acme")
+    await bruno.create_thread(thread_id="t1")
+    await bruno.add_member("t1", Identity(role="user", id="ana", name="Ana"))
+    await bruno.join("t1")
+    if follow:
+        await ana.follow()
+    await ana.join("t1")
+    await ana.away("t1")
+    await drain(ana)
+    assert await anas(bruno) == ["present", "left"]
+    sent: list[str] = []
+    request = ana._request
+
+    async def record(method: str, payload: dict[str, Any]) -> dict[str, Any]:
+        sent.append(f"{method} away" if payload.get("away") else method)
+        return await request(method, payload)
+
+    ana._request = record  # type: ignore[method-assign]
+    return ana, bruno, sent
+
+
+@pytest.mark.parametrize("follow", [False, True])
+async def test_a_thread_left_open_away_stays_away_after_a_drop(live: Live, follow: bool) -> None:
+    ana, bruno, sent = await away_in_t1(live, follow)
+    await drop_and_reopen(live, ana)
+    assert sent == (["thread.follow"] if follow else ["thread.join away"])
+    await bruno.send("t1", "after the drop")
+    assert [first_text(m) for m in await drain(ana) if isinstance(m, Message)] == ["after the drop"]
+    assert await anas(bruno) == []
+    await ana.join("t1")
+    assert await anas(bruno) == ["present"]

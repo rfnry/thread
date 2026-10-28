@@ -1,0 +1,10 @@
+{
+  "id": "7",
+  "method": "thread.join",
+  "payload": {
+    "away": true,
+    "since": 12,
+    "thread_id": "t1"
+  },
+  "type": "request"
+}

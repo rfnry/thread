@@ -66,6 +66,7 @@ describe('client', () => {
     await client.getEvent('t1', 'e1')
     await client.working('t1', 'Reading')
     await client.cancel('t1', helper)
+    await client.away('t1')
     const methods = server.sent().map((frame) => [frame.method, frame.payload])
     expect(methods).toContainEqual([
       'thread.create',
@@ -81,6 +82,25 @@ describe('client', () => {
       { thread_id: 't1', kind: 'working', label: 'Reading' },
     ])
     expect(methods).toContainEqual(['signal.send', { thread_id: 't1', kind: 'cancel', to: helper }])
+    expect(methods).toContainEqual(['thread.away', { thread_id: 't1' }])
+  })
+
+  it('joins a thread it is away from again after a drop without presence', async () => {
+    const { client } = await joined()
+    await client.away('t1')
+    server.drop()
+    await vi.waitFor(() => expect(server.sent('thread.join')).toHaveLength(2))
+    expect(server.sent('thread.join')[1]?.payload).toEqual({
+      thread_id: 't1',
+      since: 0,
+      away: true,
+    })
+    await client.join('t1')
+    expect(server.sent('thread.join')[2]?.payload).toEqual({ thread_id: 't1', since: null })
+    server.drop()
+    await vi.waitFor(() => expect(server.sent('thread.join')).toHaveLength(4))
+    expect(server.sent('thread.join')[3]?.payload).toEqual({ thread_id: 't1', since: 0 })
+    await client.close()
   })
 
   it('hands items to listeners, leaves out its own unless asked, and drops repeats', async () => {
@@ -500,7 +520,11 @@ describe('client', () => {
     await client.follow()
     server.drop()
     await vi.waitFor(() => expect(server.sent('thread.join')).toHaveLength(1))
-    expect(server.sent('thread.join')[0]?.payload).toEqual({ thread_id: 't1', since: 4 })
+    expect(server.sent('thread.join')[0]?.payload).toEqual({
+      thread_id: 't1',
+      since: 4,
+      away: true,
+    })
     await client.close()
   })
 

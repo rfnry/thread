@@ -70,6 +70,7 @@ class _Update(_Ref):
 class _Join(_Ref):
     since: int | None = None
     resume: bool = False
+    away: bool = False
 
 
 class _Follow(_Args):
@@ -290,13 +291,18 @@ class Server:
             return {}
         if method == "thread.join":
             join = _args(_Join, method, payload)
-            return _dump(await verbs.join(session, join.thread_id, join.since, join.resume))
+            return _dump(
+                await verbs.join(session, join.thread_id, join.since, join.resume, join.away)
+            )
         if method == "thread.follow":
             follow = _args(_Follow, method, payload)
             joined = await verbs.follow(session, follow.resume, follow.since, follow.left)
             return {"joined": [_dump(j) for j in joined]}
         if method == "thread.leave":
             await verbs.leave(session, _args(_Ref, method, payload).thread_id)
+            return {}
+        if method == "thread.away":
+            await verbs.away(session, _args(_Ref, method, payload).thread_id)
             return {}
         if method == "thread.history":
             history = _args(_History, method, payload)

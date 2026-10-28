@@ -273,7 +273,12 @@ class Verbs:
         return await self._storage.get_mark(scope, thread_id, actor.id)
 
     async def join(
-        self, session: Session, thread_id: str, since: int | None, resume: bool = False
+        self,
+        session: Session,
+        thread_id: str,
+        since: int | None,
+        resume: bool = False,
+        away: bool = False,
     ) -> Joined:
         if since is not None and resume:
             raise InputError("server: a join takes since or resume, not both")
@@ -289,7 +294,7 @@ class Verbs:
                 with contextlib.suppress(NotFoundError):
                     since, _, _ = await self._storage.mark(scope, thread_id, actor.id, head)
             thread = thread.model_copy(update={"marked": since})
-        return await self._hub.join(session, thread, since)
+        return await self._hub.join(session, thread, since, away)
 
     async def follow(
         self,
@@ -344,6 +349,9 @@ class Verbs:
 
     async def leave(self, session: Session, thread_id: str) -> None:
         await self._hub.leave(session, thread_id)
+
+    async def away(self, session: Session, thread_id: str) -> None:
+        await self._hub.away(session, thread_id)
 
     async def send(self, actor: Identity, scope: str, payload: dict[str, Any]) -> Event:
         kind = payload.get("kind")

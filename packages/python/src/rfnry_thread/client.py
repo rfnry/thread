@@ -375,7 +375,7 @@ class Client:
             if cursor is None or (followed and thread_id not in self._present):
                 continue
             try:
-                joined = await self._join(thread_id, cursor)
+                joined = await self._join(thread_id, cursor, away=thread_id not in self._present)
             except TransportError:
                 return
             except ThreadException:
@@ -473,7 +473,9 @@ class Client:
         )
         return _expect(event, Message)
 
-    async def _join(self, thread_id: str, since: int | None, resume: bool = False) -> Joined:
+    async def _join(
+        self, thread_id: str, since: int | None, resume: bool = False, away: bool = False
+    ) -> Joined:
         held = self._cursors.get(thread_id)
         start = 0 if resume else since
         rewind: tuple[str, range, set[int]] | None = None
@@ -485,6 +487,8 @@ class Client:
         payload: dict[str, Any] = {"thread_id": thread_id, "since": since}
         if resume:
             payload["resume"] = True
+        if away:
+            payload["away"] = True
         try:
             reply = await self._request("thread.join", payload)
         finally:
@@ -550,6 +554,10 @@ class Client:
         if self._following and (seq is not None or thread_id not in self._left):
             self._left[thread_id] = seq or 0
         await self._request("thread.leave", {"thread_id": thread_id})
+
+    async def away(self, thread_id: str) -> None:
+        self._present.discard(thread_id)
+        await self._request("thread.away", {"thread_id": thread_id})
 
     async def follow(self, resume: bool = False) -> list[Joined]:
         self._left.clear()

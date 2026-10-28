@@ -355,11 +355,14 @@ await helper.working(thread.id, label="Checking the invoice")
 await helper.idle(thread.id)
 await ana.cancel(thread.id, to=helper.identity)
 await helper.present(thread.id)
+await helper.away(thread.id)
 ```
 
 Signals go to the connections that joined the thread, and only a connection that joined may send
-one. `Present` and `Left` are sent for you when a member's first connection joins the thread and
-its last one leaves or drops; `present(thread_id)` lists who has it open now. A connection that
+one. `Present` and `Left` are sent for you when a member's first connection joins the thread and its
+last one leaves or drops; `present(thread_id)` lists who has it open now. `away(thread_id)` ends
+presence and keeps the thread arriving — a page in a background tab, a list beside the open thread —
+and joining it again is presence again; it stays away across dropped sockets. A connection that
 joins receives the current state first — who is present, who is working, every open stream with its
 text so far — so a late arrival sees the reply that is already half written.
 

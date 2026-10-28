@@ -1,0 +1,8 @@
+{
+  "id": "9",
+  "method": "thread.away",
+  "payload": {
+    "thread_id": "t1"
+  },
+  "type": "request"
+}
