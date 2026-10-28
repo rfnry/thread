@@ -18,6 +18,7 @@ from rfnry_thread.models import (
     Custom,
     Edit,
     Event,
+    History,
     Identity,
     Joined,
     Marked,
@@ -95,14 +96,23 @@ class Verbs:
         return stored
 
     async def create_thread(
-        self, actor: Identity, scope: str, thread_id: str | None, metadata: dict[str, Any]
+        self,
+        actor: Identity,
+        scope: str,
+        thread_id: str | None,
+        metadata: dict[str, Any],
+        history: History = "all",
     ) -> Thread:
         if thread_id is not None and not thread_id.strip():
             raise InputError("server: a thread id cannot be empty")
         if thread_id is not None and await self._storage.get_thread(scope, thread_id) is not None:
             return await self.thread(actor, scope, thread_id, "read")
         candidate = Thread(
-            id=thread_id or uuid.uuid4().hex, scope=scope, metadata=metadata, created_at=now()
+            id=thread_id or uuid.uuid4().hex,
+            scope=scope,
+            metadata=metadata,
+            created_at=now(),
+            history=history,
         )
         await self._allow(actor, "create", candidate)
         thread, created = await self._storage.create_thread(scope, candidate)
@@ -242,14 +252,27 @@ class Verbs:
     ) -> list[Event]:
         if after is not None and after < 0:
             raise InputError("server: after cannot be negative")
-        await self.thread(actor, scope, thread_id, "read")
+        thread = await self.thread(actor, scope, thread_id, "read")
         return await self._storage.list_events(
-            scope, thread_id, since=after, before=before, limit=_limit(limit), kinds=kinds
+            scope,
+            thread_id,
+            since=after,
+            before=before,
+            limit=_limit(limit),
+            kinds=kinds,
+            floor=await self._floor(actor, scope, thread),
         )
 
+    async def _floor(self, actor: Identity, scope: str, thread: Thread) -> int:
+        if actor.role == "system" or thread.history == "all":
+            return 0
+        found = await self._storage.head(scope, thread.id, actor.id)
+        return 0 if found is None else found[1]
+
     async def get_event(self, actor: Identity, scope: str, thread_id: str, event_id: str) -> Event:
-        await self.thread(actor, scope, thread_id, "read")
-        event = await self._storage.get_event(scope, thread_id, event_id)
+        thread = await self.thread(actor, scope, thread_id, "read")
+        floor = await self._floor(actor, scope, thread)
+        event = await self._storage.get_event(scope, thread_id, event_id, floor)
         if event is None:
             raise NotFoundError(f"server: event {event_id!r} was not found")
         return event
@@ -258,11 +281,12 @@ class Verbs:
         self, session: Session, thread_id: str, seq: int, back: bool = False
     ) -> tuple[int, int]:
         actor, scope = session.identity, session.scope
-        await self.thread(actor, scope, thread_id, "read")
+        thread = await self.thread(actor, scope, thread_id, "read")
         latest = await self._storage.list_events(scope, thread_id, limit=1)
         head = latest[-1].seq if latest else 0
-        if not 0 <= seq <= head:
-            raise InputError(f"server: seq must be between 0 and {head}")
+        low = max(await self._floor(actor, scope, thread) - 1, 0)
+        if not low <= seq <= head:
+            raise InputError(f"server: seq must be between {low} and {head}")
         stored, unread, moved = await self._storage.mark(scope, thread_id, actor.id, seq, back)
         if moved:
             await self._hub.marked(

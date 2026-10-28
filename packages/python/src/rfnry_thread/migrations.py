@@ -61,7 +61,13 @@ _CREATE = (
 )
 
 
-MIGRATIONS = [Migration(1, "create", _CREATE)]
+_HISTORY = (
+    "ALTER TABLE thread_threads ADD COLUMN history TEXT NOT NULL DEFAULT 'all'",
+    "ALTER TABLE thread_members ADD COLUMN added_seq BIGINT NOT NULL DEFAULT 0",
+)
+
+
+MIGRATIONS = [Migration(1, "create", _CREATE), Migration(2, "history", _HISTORY)]
 
 
 LATEST = MIGRATIONS[-1].version

@@ -67,6 +67,7 @@ describe('client', () => {
     await client.working('t1', 'Reading')
     await client.cancel('t1', helper)
     await client.away('t1')
+    await client.createThread({ threadId: 't2', history: 'since_added' })
     const methods = server.sent().map((frame) => [frame.method, frame.payload])
     expect(methods).toContainEqual([
       'thread.create',
@@ -83,6 +84,10 @@ describe('client', () => {
     ])
     expect(methods).toContainEqual(['signal.send', { thread_id: 't1', kind: 'cancel', to: helper }])
     expect(methods).toContainEqual(['thread.away', { thread_id: 't1' }])
+    expect(methods).toContainEqual([
+      'thread.create',
+      { thread_id: 't2', metadata: {}, history: 'since_added' },
+    ])
   })
 
   it('joins a thread it is away from again after a drop without presence', async () => {

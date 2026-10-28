@@ -238,8 +238,8 @@ async def test_a_head_is_the_last_seq_for_a_member_and_none_for_anyone_else(
     await room(storage, "t1", "globex")
     for client_id in ("c1", "c2"):
         await storage.append_event("acme", say("t1", client_id))
-    assert await storage.head("acme", "t1", "ana") == 2
-    assert await storage.head("globex", "t1", "ana") == 0
+    assert await storage.head("acme", "t1", "ana") == (2, 0)
+    assert await storage.head("globex", "t1", "ana") == (0, 0)
     assert await storage.head("acme", "t1", "bruno") is None
     assert await storage.head("acme", "ghost", "ana") is None
 
@@ -528,6 +528,68 @@ async def test_a_preview_reads_the_last_five_messages_with_the_edits_and_retract
     assert edited is not None and (edited.id, edited.content) == (recent[0].id, [Text(text="m1")])
     await storage.append_event("acme", change(Retract, "r-last", recent[0].id))
     assert await shown() is None
+
+
+def changed(kind: Any, client_id: str, target: str, **fields: Any) -> Any:
+    return kind(
+        id=client_id,
+        thread_id="t1",
+        author=ANA,
+        created_at=AT,
+        client_id=client_id,
+        target=target,
+        **fields,
+    )
+
+
+async def test_a_thread_since_added_keeps_what_came_before_a_member_from_them(
+    storage: Storage,
+) -> None:
+    made = thread("t1").model_copy(update={"history": "since_added"})
+    stored, _ = await storage.create_thread("acme", made)
+    assert stored.history == "since_added"
+    got = await storage.get_thread("acme", "t1")
+    assert got is not None and got.history == "since_added"
+    await storage.add_member(
+        "acme", Member(thread_id="t1", identity=ANA, added_at=AT, added_by=SYSTEM)
+    )
+    before, _ = await storage.append_event("acme", say("t1", "c1", "before"))
+    await storage.add_member(
+        "acme", Member(thread_id="t1", identity=BRUNO, added_at=AT, added_by=SYSTEM)
+    )
+    previews = {
+        who: (await storage.list_threads("acme", who, preview=True))[0] for who in ("ana", "bruno")
+    }
+    assert previews["ana"].last_message == before and previews["bruno"].last_message is None
+    assert previews["bruno"].history == "since_added"
+    after, _ = await storage.append_event("acme", say("t1", "c2", "after"))
+    await storage.append_event("acme", changed(Edit, "e1", before.id, content=[Text(text="x")]))
+    await storage.append_event("acme", changed(Edit, "e2", after.id, content=[Text(text="y")]))
+    await storage.append_event("acme", changed(Retract, "r1", before.id))
+    assert await storage.head("acme", "t1", "ana") == (5, 1)
+    assert await storage.head("acme", "t1", "bruno") == (5, 2)
+    assert seqs(await storage.list_events("acme", "t1")) == [1, 2, 3, 4, 5]
+    assert seqs(await storage.list_events("acme", "t1", floor=2)) == [2, 4]
+    assert seqs(await storage.list_events("acme", "t1", since=0, floor=2)) == [2, 4]
+    assert seqs(await storage.list_events("acme", "t1", before=4, floor=2)) == [2]
+    for hidden in (before.id, "e1", "r1"):
+        assert await storage.get_event("acme", "t1", hidden, floor=2) is None
+        assert await storage.get_event("acme", "t1", hidden) is not None
+    assert await storage.get_event("acme", "t1", "e2", floor=2) is not None
+    [seen] = await storage.list_threads("acme", "bruno", preview=True)
+    assert seen.last_message is not None and seen.last_message.content == [Text(text="y")]
+
+
+async def test_a_thread_with_its_whole_history_floors_no_member(storage: Storage) -> None:
+    await room(storage, "t1", "acme", ANA)
+    await storage.append_event("acme", say("t1", "c1"))
+    await storage.add_member(
+        "acme", Member(thread_id="t1", identity=BRUNO, added_at=AT, added_by=SYSTEM)
+    )
+    got = await storage.get_thread("acme", "t1")
+    assert got is not None and got.history == "all"
+    assert await storage.head("acme", "t1", "bruno") == (1, 0)
+    assert await storage.head("acme", "t1", "zed") is None
 
 
 async def test_a_member_listing_by_activity_filters_metadata_and_pages_together(

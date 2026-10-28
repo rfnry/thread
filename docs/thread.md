@@ -228,6 +228,20 @@ means there are no more. Adding and removing members and updating metadata write
 `MemberRemoved` and `ThreadUpdated` to the log. `delete_thread` removes the thread, its members and
 its log, and tells whoever has it open.
 
+A thread can keep what was said before someone arrived from them:
+
+```python
+private = await ana.create_thread(thread_id="hr-ana", history="since_added")
+private.history
+```
+
+In a `since_added` thread each member reads from where it was added: `history`, `get_event`, a
+join's or follow's replay, the inbox preview and its unread count, and edits or retractions of
+anything earlier, which never reach it. A member removed and added again reads from the new add; the
+creator, added first, reads all of it, and the server's own verbs read everything. The setting is
+the thread's, fixed when it is made; `"all"`, the default, keeps the whole log open to every member.
+`authorize` cannot draw this line — it answers per thread, not per event.
+
 A member **joins** a thread to receive it live; membership is who may, joining is who does:
 
 ```python

@@ -10,7 +10,7 @@ from rfnry_thread import cli, migrations
 from rfnry_thread.migrations import Migration
 from rfnry_thread.postgres import PostgresStorage
 
-from .test_migrations import TABLES, initialized, written
+from .test_migrations import TABLES, initialized, written_before
 
 NOW = migrations.LATEST
 NEXT = NOW + 1
@@ -125,7 +125,7 @@ async def test_upgrade_from_moves_the_tables_initialize_made_into_the_schema(
     schemas: Schemas, capsys: pytest.CaptureFixture[str]
 ) -> None:
     source, held = await initialized(schemas)
-    await written(PostgresStorage(held))
+    await written_before(held)
     target = schemas.name()
     assert await run("upgrade", "--schema", target, "--from", source, "--yes") == 0
     out = capsys.readouterr().out

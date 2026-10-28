@@ -507,12 +507,19 @@ export class Client {
   }
 
   async createThread(
-    options: { threadId?: string; metadata?: Record<string, unknown> } = {}
+    options: {
+      threadId?: string
+      metadata?: Record<string, unknown>
+      history?: 'all' | 'since_added'
+    } = {}
   ): Promise<Thread> {
-    const reply = await this.request('thread.create', {
+    const payload: Payload = {
       thread_id: options.threadId ?? null,
       metadata: options.metadata ?? {},
-    })
+    }
+    if (options.history !== undefined && options.history !== 'all')
+      payload.history = options.history
+    const reply = await this.request('thread.create', payload)
     return reply.thread as Thread
   }
 

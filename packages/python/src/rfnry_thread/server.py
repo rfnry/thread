@@ -13,6 +13,7 @@ from rfnry_thread.hub import Hub, Session
 from rfnry_thread.models import (
     SYSTEM,
     Event,
+    History,
     Identity,
     IdentityLike,
     Member,
@@ -51,6 +52,7 @@ class _Args(BaseModel):
 class _Create(_Args):
     thread_id: str | None = None
     metadata: dict[str, Any] = {}
+    history: History = "all"
 
 
 class _List(_Args):
@@ -261,7 +263,9 @@ class Server:
             create = _args(_Create, method, payload)
             return {
                 "thread": _dump(
-                    await verbs.create_thread(actor, scope, create.thread_id, create.metadata)
+                    await verbs.create_thread(
+                        actor, scope, create.thread_id, create.metadata, create.history
+                    )
                 )
             }
         if method == "thread.get":
@@ -397,9 +401,15 @@ class Server:
             await self._hub.announce()
 
     async def create_thread(
-        self, scope: str, thread_id: str | None = None, metadata: dict[str, Any] | None = None
+        self,
+        scope: str,
+        thread_id: str | None = None,
+        metadata: dict[str, Any] | None = None,
+        history: History = "all",
     ) -> Thread:
-        return await self._verbs.create_thread(SYSTEM, _scope(scope), thread_id, metadata or {})
+        return await self._verbs.create_thread(
+            SYSTEM, _scope(scope), thread_id, metadata or {}, history
+        )
 
     async def get_thread(self, scope: str, thread_id: str) -> Thread:
         return await self._verbs.get_thread(SYSTEM, _scope(scope), thread_id)

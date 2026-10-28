@@ -45,7 +45,9 @@ class Storage(Protocol):
 
     async def is_member(self, scope: str, thread_id: str, identity_id: str) -> bool: ...
 
-    async def head(self, scope: str, thread_id: str, identity_id: str) -> int | None: ...
+    async def head(
+        self, scope: str, thread_id: str, identity_id: str
+    ) -> tuple[int, int] | None: ...
 
     async def mark(
         self, scope: str, thread_id: str, identity_id: str, seq: int, back: bool = False
@@ -65,9 +67,12 @@ class Storage(Protocol):
         before: int | None = None,
         limit: int = 50,
         kinds: Sequence[str] | None = None,
+        floor: int = 0,
     ) -> list[Event]: ...
 
-    async def get_event(self, scope: str, thread_id: str, event_id: str) -> Event | None: ...
+    async def get_event(
+        self, scope: str, thread_id: str, event_id: str, floor: int = 0
+    ) -> Event | None: ...
 
     async def find_event(
         self, scope: str, thread_id: str, author_id: str, client_id: str

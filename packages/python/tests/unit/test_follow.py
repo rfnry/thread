@@ -360,7 +360,7 @@ async def test_an_add_survives_a_follower_whose_membership_is_gone_and_is_still_
         await ana.call("thread.create", thread_id="t1")
         real = storage.head
 
-        async def head(scope: str, thread_id: str, identity_id: str) -> int | None:
+        async def head(scope: str, thread_id: str, identity_id: str) -> tuple[int, int] | None:
             return None if identity_id == "helper" else await real(scope, thread_id, identity_id)
 
         monkeypatch.setattr(storage, "head", head)
@@ -404,7 +404,7 @@ async def test_a_session_dropped_inside_the_storage_reads_of_an_enter_is_not_lef
     await server.create_thread("acme", "t1")
     real = storage.head
 
-    async def head(scope: str, thread_id: str, identity_id: str) -> int | None:
+    async def head(scope: str, thread_id: str, identity_id: str) -> tuple[int, int] | None:
         if identity_id == "helper":
             await server._hub.drop(session)
         return await real(scope, thread_id, identity_id)

@@ -18,7 +18,7 @@ SIGNALS_PREFIX = "thread_signals_"
 NOTIFY_LIMIT = 7900
 RELISTEN = 0.5
 RELISTEN_CAP = 30.0
-_THREAD = "scope, id, metadata, created_at"
+_THREAD = "scope, id, metadata, created_at, history"
 
 
 def _json(value: Any) -> Any:
@@ -31,6 +31,7 @@ def _thread(row: Any) -> Thread:
         scope=row["scope"],
         metadata=_json(row["metadata"]),
         created_at=row["created_at"],
+        history=row["history"],
     )
 
 
@@ -47,6 +48,14 @@ def _listed(row: Any) -> Thread:
 
 def _event(body: Any) -> Event:
     return EVENTS.validate_python(_json(body))
+
+
+def _visible(floor: int) -> str:
+    return (
+        f"e.seq >= ${floor} AND NOT (e.kind IN ('edit', 'retract') AND EXISTS (SELECT 1 "
+        "FROM thread_events x WHERE x.scope = e.scope AND x.thread_id = e.thread_id "
+        f"AND x.id = e.body->>'target' AND x.seq < ${floor}))"
+    )
 
 
 def _count(status: str) -> int:
@@ -88,12 +97,13 @@ class PostgresStorage:
             raise StorageError("postgres: row scope does not match the call scope")
         async with self._guard("create_thread"), self._pool.acquire() as conn:
             row = await conn.fetchrow(
-                f"INSERT INTO thread_threads ({_THREAD}) VALUES ($1, $2, $3::jsonb, $4) "
+                f"INSERT INTO thread_threads ({_THREAD}) VALUES ($1, $2, $3::jsonb, $4, $5) "
                 f"ON CONFLICT (scope, id) DO NOTHING RETURNING {_THREAD}",
                 scope,
                 thread.id,
                 json.dumps(thread.metadata),
                 thread.created_at,
+                thread.history,
             )
             if row is not None:
                 return _thread(row), True
@@ -125,7 +135,7 @@ class PostgresStorage:
     ) -> list[Thread]:
         args: list[Any] = [scope]
         join = ""
-        marks = "NULL::bigint AS marked, NULL::bigint AS unread"
+        marks = "NULL::bigint AS marked, NULL::bigint AS unread, 0::bigint AS floor"
         if member_id is not None:
             args.append(member_id)
             who = f"${len(args)}"
@@ -139,7 +149,8 @@ class PostgresStorage:
                 "k.seq AS marked, CASE WHEN k.seq IS NULL THEN NULL ELSE (SELECT count(*) FROM "
                 "(SELECT 1 FROM thread_events e WHERE e.scope = t.scope AND e.thread_id = t.id "
                 f"AND e.seq > k.seq AND e.kind = 'message' AND e.author_id <> {who} "
-                f"LIMIT ${len(args)}) u) END AS unread"
+                f"LIMIT ${len(args)}) u) END AS unread, "
+                "CASE WHEN t.history = 'since_added' THEN m.added_seq ELSE 0 END AS floor"
             )
         where = ["t.scope = $1"]
         if metadata:
@@ -168,26 +179,32 @@ class PostgresStorage:
                 where.append(f"({key}, t.id) < (${len(args) - 1}::timestamptz, ${len(args)}::text)")
             args.append(max(limit, 0))
             rows = await conn.fetch(
-                f"SELECT t.scope, t.id, t.metadata, t.created_at, t.last_seq, t.last_message_at, "
+                f"SELECT t.scope, t.id, t.metadata, t.created_at, t.history, t.last_seq, "
+                f"t.last_message_at, "
                 f"{marks} FROM thread_threads t {join}WHERE {' AND '.join(where)} "
                 f"ORDER BY {key} DESC, t.id DESC LIMIT ${len(args)}",
                 *args,
             )
             threads = [_listed(row) for row in rows]
             if preview and threads:
-                threads = await self._previewed(conn, scope, threads)
+                floors = [int(row["floor"]) for row in rows]
+                threads = await self._previewed(conn, scope, threads, floors)
         return threads
 
-    async def _previewed(self, conn: Any, scope: str, threads: list[Thread]) -> list[Thread]:
+    async def _previewed(
+        self, conn: Any, scope: str, threads: list[Thread], floors: list[int]
+    ) -> list[Thread]:
         rows = await conn.fetch(
-            "SELECT p.id AS thread_id, e.body FROM unnest($2::text[]) AS p(id) CROSS JOIN LATERAL "
-            "(SELECT x.body FROM thread_events x WHERE x.scope = $1 AND x.thread_id = p.id "
-            "AND x.kind IN ('message', 'edit', 'retract') AND x.seq >= COALESCE((SELECT min(y.seq) "
+            "SELECT p.id AS thread_id, e.body FROM unnest($2::text[], $4::bigint[]) AS p(id, floor) "
+            "CROSS JOIN LATERAL (SELECT x.body FROM thread_events x WHERE x.scope = $1 "
+            "AND x.thread_id = p.id AND x.kind IN ('message', 'edit', 'retract') "
+            "AND x.seq >= GREATEST(p.floor, COALESCE((SELECT min(y.seq) "
             "FROM (SELECT seq FROM thread_events WHERE scope = $1 AND thread_id = p.id "
-            "AND kind = 'message' ORDER BY seq DESC LIMIT $3) y), 0)) e",
+            "AND kind = 'message' AND seq >= p.floor ORDER BY seq DESC LIMIT $3) y), 0))) e",
             scope,
             [thread.id for thread in threads],
             PREVIEW_DEPTH,
+            floors,
         )
         found: dict[str, list[Event]] = {}
         for row in rows:
@@ -219,9 +236,9 @@ class PostgresStorage:
     async def add_member(self, scope: str, member: Member) -> tuple[Member, bool]:
         async with self._guard("add_member"), self._pool.acquire() as conn:
             body = await conn.fetchval(
-                "INSERT INTO thread_members (scope, thread_id, identity_id, added_at, body) "
-                "SELECT $1, $2, $3, $4, $5::jsonb WHERE EXISTS "
-                "(SELECT 1 FROM thread_threads WHERE scope = $1 AND id = $2) "
+                "INSERT INTO thread_members (scope, thread_id, identity_id, added_at, body, added_seq) "
+                "SELECT $1, $2, $3, $4, $5::jsonb, t.last_seq + 1 FROM thread_threads t "
+                "WHERE t.scope = $1 AND t.id = $2 "
                 "ON CONFLICT (scope, thread_id, identity_id) DO NOTHING RETURNING body",
                 scope,
                 member.thread_id,
@@ -260,17 +277,18 @@ class PostgresStorage:
             )
         return [Member.model_validate(_json(row["body"])) for row in rows]
 
-    async def head(self, scope: str, thread_id: str, identity_id: str) -> int | None:
+    async def head(self, scope: str, thread_id: str, identity_id: str) -> tuple[int, int] | None:
         async with self._guard("head"), self._pool.acquire() as conn:
-            seq = await conn.fetchval(
-                "SELECT t.last_seq FROM thread_threads t JOIN thread_members m "
+            row = await conn.fetchrow(
+                "SELECT t.last_seq, CASE WHEN t.history = 'since_added' THEN m.added_seq "
+                "ELSE 0 END AS floor FROM thread_threads t JOIN thread_members m "
                 "ON m.scope = t.scope AND m.thread_id = t.id "
                 "WHERE t.scope = $1 AND t.id = $2 AND m.identity_id = $3",
                 scope,
                 thread_id,
                 identity_id,
             )
-        return None if seq is None else int(seq)
+        return None if row is None else (int(row["last_seq"]), int(row["floor"]))
 
     async def is_member(self, scope: str, thread_id: str, identity_id: str) -> bool:
         async with self._guard("is_member"), self._pool.acquire() as conn:
@@ -346,37 +364,46 @@ class PostgresStorage:
         before: int | None = None,
         limit: int = 50,
         kinds: Sequence[str] | None = None,
+        floor: int = 0,
     ) -> list[Event]:
         if limit < 1:
             return []
-        where = ["scope = $1", "thread_id = $2"]
+        where = ["e.scope = $1", "e.thread_id = $2"]
         args: list[Any] = [scope, thread_id]
+        if floor > 0:
+            args.append(floor)
+            where.append(_visible(len(args)))
         if since is not None:
             args.append(since)
-            where.append(f"seq > ${len(args)}")
+            where.append(f"e.seq > ${len(args)}")
         if before is not None:
             args.append(before)
-            where.append(f"seq < ${len(args)}")
+            where.append(f"e.seq < ${len(args)}")
         if kinds is not None:
             args.append(list(kinds))
-            where.append(f"kind = ANY(${len(args)}::text[])")
+            where.append(f"e.kind = ANY(${len(args)}::text[])")
         args.append(limit)
         order = "ASC" if since is not None else "DESC"
         async with self._guard("list_events"), self._pool.acquire() as conn:
             rows = await conn.fetch(
-                f"SELECT body FROM thread_events WHERE {' AND '.join(where)} ORDER BY seq {order} LIMIT ${len(args)}",
+                f"SELECT e.body FROM thread_events e WHERE {' AND '.join(where)} "
+                f"ORDER BY e.seq {order} LIMIT ${len(args)}",
                 *args,
             )
         events = [_event(row["body"]) for row in rows]
         return events if since is not None else events[::-1]
 
-    async def get_event(self, scope: str, thread_id: str, event_id: str) -> Event | None:
+    async def get_event(
+        self, scope: str, thread_id: str, event_id: str, floor: int = 0
+    ) -> Event | None:
         async with self._guard("get_event"), self._pool.acquire() as conn:
             body = await conn.fetchval(
-                "SELECT body FROM thread_events WHERE scope = $1 AND thread_id = $2 AND id = $3",
+                "SELECT e.body FROM thread_events e WHERE e.scope = $1 AND e.thread_id = $2 "
+                f"AND e.id = $3 AND {_visible(4)}",
                 scope,
                 thread_id,
                 event_id,
+                floor,
             )
         return None if body is None else _event(body)
 

@@ -18,6 +18,7 @@ export type Thread = {
   scope: string
   metadata: Record<string, unknown>
   created_at: string
+  history: 'all' | 'since_added'
   last_seq?: number
   last_message_at?: string
   marked?: number

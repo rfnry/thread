@@ -93,6 +93,39 @@ async def written(storage: PostgresStorage) -> None:
         )
 
 
+async def written_before(pool: Any) -> None:
+    async with pool.acquire() as conn:
+        await conn.execute(
+            "INSERT INTO thread_threads (scope, id, metadata, created_at, last_seq, "
+            "last_message_at) VALUES ('acme', 't1', '{}', $1, 2, $1)",
+            AT,
+        )
+        await conn.execute(
+            "INSERT INTO thread_members (scope, thread_id, identity_id, added_at, body) "
+            "VALUES ('acme', 't1', 'ana', $1, $2::jsonb)",
+            AT,
+            Member(thread_id="t1", identity=ANA, added_at=AT, added_by=SYSTEM).model_dump_json(),
+        )
+        for n, minutes in enumerate((5, 0)):
+            message = Message(
+                id=f"m{n}",
+                thread_id="t1",
+                seq=n + 1,
+                author=ANA,
+                client_id=f"c{n}",
+                created_at=AT + timedelta(minutes=minutes),
+                content=[Text(text=f"hello {n}")],
+            )
+            await conn.execute(
+                "INSERT INTO thread_events (scope, thread_id, seq, id, kind, author_id, "
+                "client_id, body) VALUES ('acme', 't1', $1, $2, 'message', 'ana', $3, $4::jsonb)",
+                message.seq,
+                message.id,
+                message.client_id,
+                message.model_dump_json(),
+            )
+
+
 async def tables(pool: Any, schema: str) -> list[str]:
     async with pool.acquire() as conn:
         rows = await conn.fetch(
@@ -218,7 +251,7 @@ async def test_upgrade_adopts_the_tables_initialize_made_and_keeps_every_row(
 ) -> None:
     name, pool = await initialized(schemas)
     storage = PostgresStorage(pool)
-    await written(storage)
+    await written_before(pool)
     with pytest.raises(
         ConfigurationError,
         match=f"^postgres: the thread tables in {name} were made by initialize\\(\\) — "
@@ -240,7 +273,7 @@ async def test_upgrade_adopts_the_tables_initialize_made_and_keeps_every_row(
 async def test_adopting_fills_in_what_an_older_initialize_did_not_make(schemas: Schemas) -> None:
     _, pool = await initialized(schemas)
     storage = PostgresStorage(pool)
-    await written(storage)
+    await written_before(pool)
     async with pool.acquire() as conn:
         await conn.execute("DROP INDEX ix_thread_threads_metadata")
         await conn.execute("DROP INDEX ix_thread_threads_activity")
@@ -259,7 +292,7 @@ async def test_upgrade_from_another_schema_moves_the_tables_and_adopts_them(
     schemas: Schemas,
 ) -> None:
     source, held = await initialized(schemas)
-    await written(PostgresStorage(held))
+    await written_before(held)
     target = schemas.name()
     pool = await schemas.pool(target)
     async with pool.acquire() as conn:
@@ -344,6 +377,35 @@ async def test_check_names_the_command_for_each_way_a_schema_does_not_fit(
         f"postgres: {name} is at version {NOW}, this rfnry-thread needs {NEXT} — "
         f"run rfnry-thread upgrade --schema {name}"
     )
+
+
+async def test_upgrading_to_history_keeps_every_thread_whole_for_its_members(
+    schemas: Schemas, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    every = migrations.MIGRATIONS
+    monkeypatch.setattr(migrations, "MIGRATIONS", every[:1])
+    monkeypatch.setattr(migrations, "LATEST", 1)
+    _, pool = await created(schemas)
+    async with pool.acquire() as conn:
+        await conn.execute(
+            "INSERT INTO thread_threads (scope, id, metadata, created_at, last_seq) "
+            "VALUES ('acme', 't1', '{}', now(), 7)"
+        )
+        await conn.execute(
+            "INSERT INTO thread_members (scope, thread_id, identity_id, added_at, body) "
+            "VALUES ('acme', 't1', 'ana', now(), $1::jsonb)",
+            Member(thread_id="t1", identity=ANA, added_at=AT, added_by=SYSTEM).model_dump_json(),
+        )
+    monkeypatch.setattr(migrations, "MIGRATIONS", every)
+    monkeypatch.setattr(migrations, "LATEST", every[-1].version)
+    async with pool.acquire() as conn:
+        ran = await migrations.apply(conn, migrations.plan_upgrade)
+    assert ran.steps == [f"{m.version:04d} {m.name}" for m in every[1:]]
+    storage = PostgresStorage(pool)
+    await storage.check()
+    thread = await storage.get_thread("acme", "t1")
+    assert thread is not None and thread.history == "all"
+    assert await storage.head("acme", "t1", "ana") == (7, 0)
 
 
 def test_the_first_schema_of_a_search_path_is_read_as_postgres_reads_it() -> None:

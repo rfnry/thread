@@ -4,6 +4,7 @@
     "threads": [
       {
         "created_at": "2026-01-01T12:00:00Z",
+        "history": "all",
         "id": "t1",
         "last_message": {
           "author": {

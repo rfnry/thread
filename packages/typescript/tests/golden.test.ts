@@ -33,7 +33,7 @@ const SIGNAL_KINDS = Object.keys({
 
 describe('golden fixtures', () => {
   it('exist', () => {
-    expect(files.length).toBe(45)
+    expect(files.length).toBe(46)
   })
 
   it.each(files)('%s round-trips', (name) => {
@@ -68,6 +68,7 @@ describe('golden fixtures', () => {
     const [thread] = ((decode(text) as Response).payload as { threads: Thread[] }).threads
     expect(thread).toMatchObject({
       id: 't1',
+      history: 'all',
       last_seq: 9,
       last_message_at: '2026-01-01T12:00:00Z',
       marked: 7,

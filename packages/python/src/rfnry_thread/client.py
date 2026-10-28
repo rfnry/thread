@@ -24,6 +24,7 @@ from rfnry_thread.models import (
     Custom,
     Edit,
     Event,
+    History,
     Identity,
     IdentityLike,
     Joined,
@@ -505,11 +506,15 @@ class Client:
         return joined
 
     async def create_thread(
-        self, thread_id: str | None = None, metadata: dict[str, Any] | None = None
+        self,
+        thread_id: str | None = None,
+        metadata: dict[str, Any] | None = None,
+        history: History = "all",
     ) -> Thread:
-        reply = await self._request(
-            "thread.create", {"thread_id": thread_id, "metadata": metadata or {}}
-        )
+        payload: dict[str, Any] = {"thread_id": thread_id, "metadata": metadata or {}}
+        if history != "all":
+            payload["history"] = history
+        reply = await self._request("thread.create", payload)
         return Thread.model_validate(reply["thread"])
 
     async def get_thread(self, thread_id: str) -> Thread:

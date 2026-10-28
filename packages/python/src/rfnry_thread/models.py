@@ -88,6 +88,7 @@ SYSTEM = Identity(role="system", id="system", name="system")
 
 LISTED = frozenset({"last_seq", "last_message_at", "marked", "unread", "last_message"})
 Order = Literal["created", "activity"]
+History = Literal["all", "since_added"]
 
 
 class Thread(BaseModel):
@@ -95,6 +96,7 @@ class Thread(BaseModel):
     scope: str
     metadata: dict[str, Any] = {}
     created_at: datetime
+    history: History = "all"
     last_seq: int | None = None
     last_message_at: datetime | None = None
     marked: int | None = None

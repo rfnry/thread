@@ -10,6 +10,7 @@ from typing import Any
 from rfnry_thread.errors import ForbiddenError, NotFoundError, ThreadException
 from rfnry_thread.models import (
     SIGNALS,
+    Edit,
     Event,
     Identity,
     Idle,
@@ -19,6 +20,7 @@ from rfnry_thread.models import (
     Marked,
     MemberRemoved,
     Present,
+    Retract,
     Signal,
     StreamDelta,
     StreamEnd,
@@ -45,6 +47,7 @@ class Session:
     outbound: Outbound
     id: str = field(default_factory=lambda: uuid.uuid4().hex)
     joined: dict[str, int] = field(default_factory=dict)
+    floors: dict[str, int] = field(default_factory=dict)
     streams: set[tuple[str, str]] = field(default_factory=set)
     working: set[str] = field(default_factory=set)
     present: set[str] = field(default_factory=set)
@@ -114,26 +117,29 @@ class Hub:
                 return Joined(thread=thread, seq=session.joined.get(thread_id, 0)), False
             if thread_id in session.joined:
                 return await self._rewind(session, thread, since if rewind else None), False
-            head = await self.storage.head(scope, thread_id, session.identity.id)
-            if head is None:
+            found = await self.storage.head(scope, thread_id, session.identity.id)
+            if found is None:
                 raise ForbiddenError(
                     f"server: {session.identity.id!r} is not a member of thread {thread_id!r}"
                 )
+            head, floor = found
+            start = None if since is None else max(since, floor - 1)
             replay: list[Event] = []
             truncated = since is not None and since > head
-            if since is not None and since < head:
-                if head - since > self.replay_limit:
+            if start is not None and start < head:
+                if head - start > self.replay_limit:
                     replay = await self.storage.list_events(
-                        scope, thread_id, before=head + 1, limit=self.replay_limit
+                        scope, thread_id, before=head + 1, limit=self.replay_limit, floor=floor
                     )
                     truncated = True
                 else:
                     replay = await self.storage.list_events(
-                        scope, thread_id, since=since, limit=self.replay_limit
+                        scope, thread_id, since=start, limit=self.replay_limit, floor=floor
                     )
             if session.dropped:
                 return Joined(thread=thread, seq=head), False
             session.joined[thread_id] = replay[0].seq - 1 if replay else head
+            session.floors[thread_id] = floor
             self._rooms.setdefault((scope, thread_id), set()).add(session)
             for event in replay:
                 session.push_event(event, event.model_dump(mode="json"))
@@ -143,6 +149,9 @@ class Hub:
 
     async def _rewind(self, session: Session, thread: Thread, since: int | None) -> Joined:
         cursor = session.joined[thread.id]
+        floor = session.floors.get(thread.id, 0)
+        if since is not None:
+            since = max(since, floor - 1)
         if since is None or since >= cursor:
             return Joined(thread=thread, seq=cursor)
         truncated = cursor - since > self.replay_limit
@@ -152,6 +161,7 @@ class Hub:
             since=None if truncated else since,
             before=cursor + 1,
             limit=self.replay_limit,
+            floor=floor,
         )
         if session.dropped or session.joined.get(thread.id) != cursor:
             return Joined(thread=thread, seq=cursor)
@@ -172,6 +182,7 @@ class Hub:
         return found
 
     async def leave(self, session: Session, thread_id: str) -> None:
+        session.floors.pop(thread_id, None)
         if session.joined.pop(thread_id, None) is None:
             return
         room = self._rooms.get((session.scope, thread_id))
@@ -204,10 +215,13 @@ class Hub:
     async def _deliver(self, scope: str, event: Event) -> list[Session]:
         payload = event.model_dump(mode="json")
         cut: list[Session] = []
-        for session in self._room(scope, event.thread_id):
+        room = self._room(scope, event.thread_id)
+        target = await self._target(scope, event, room)
+        for session in room:
             cursor = session.joined.get(event.thread_id)
             if cursor is None or event.seq <= cursor:
                 continue
+            floor = session.floors.get(event.thread_id, 0)
             if event.seq > cursor + 1:
                 missing = await self.storage.list_events(
                     scope,
@@ -215,13 +229,25 @@ class Hub:
                     since=cursor,
                     before=event.seq,
                     limit=event.seq - cursor - 1,
+                    floor=floor,
                 )
                 for earlier in missing:
                     session.push_event(earlier, earlier.model_dump(mode="json"))
+            if target < floor:
+                session.joined[event.thread_id] = event.seq
+                continue
             session.push_event(event, payload)
             if isinstance(event, MemberRemoved) and event.identity.id == session.identity.id:
                 cut.append(session)
         return cut
+
+    async def _target(self, scope: str, event: Event, room: list[Session]) -> int:
+        if not isinstance(event, Edit | Retract):
+            return event.seq
+        if not any(s.floors.get(event.thread_id, 0) > 0 for s in room):
+            return event.seq
+        found = await self.storage.get_event(scope, event.thread_id, event.target)
+        return event.seq if found is None else found.seq
 
     async def on_event(self, scope: str, thread_id: str, seq: int) -> None:
         if not any(s.joined.get(thread_id, seq) < seq for s in self._room(scope, thread_id)):
@@ -353,6 +379,7 @@ class Hub:
             for session in self._room(scope, thread_id):
                 session.push_signal(payload)
                 session.joined.pop(thread_id, None)
+                session.floors.pop(thread_id, None)
                 session.present.discard(thread_id)
                 session.working.discard(thread_id)
                 session.streams = {s for s in session.streams if s[0] != thread_id}

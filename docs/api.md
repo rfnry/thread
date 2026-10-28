@@ -176,12 +176,17 @@ Stops listening to the other replicas and gives the listening connection back.
 
 ```python
 async def create_thread(
-    self, scope: str, thread_id: str | None = None, metadata: dict[str, Any] | None = None
+    self,
+    scope: str,
+    thread_id: str | None = None,
+    metadata: dict[str, Any] | None = None,
+    history: History = "all",
 ) -> Thread: ...
 ```
 
 Creates a thread as the system, with no member, and returns it; with a `thread_id` the scope already
-holds, returns that thread. Never put to `authorize`. Raises `InputError` when the scope or
+holds, returns that thread. `history` is a `History`, `Literal["all", "since_added"]`, as
+`Client.create_thread` takes it. Never put to `authorize`. Raises `InputError` when the scope or
 `thread_id` is empty.
 
 ### `Server.get_thread`
@@ -349,12 +354,19 @@ with backoff.
 
 ```python
 async def create_thread(
-    self, thread_id: str | None = None, metadata: dict[str, Any] | None = None
+    self,
+    thread_id: str | None = None,
+    metadata: dict[str, Any] | None = None,
+    history: History = "all",
 ) -> Thread: ...
 ```
 
 Creates a thread with `thread_id`, or one the server picks, makes the caller its first member and
-returns it; with a `thread_id` the scope already holds, returns that thread. Raises `InputError`
+returns it; with a `thread_id` the scope already holds, returns that thread. `history` is a
+`History`, `Literal["all", "since_added"]`, fixed for the thread's life: with `"all"` every member
+reads the whole log; with `"since_added"` each member reads from where it was added — `history`,
+`get_event`, a join's or follow's replay, the listing's preview, and edits and retractions of what
+came before — and a member added again reads from the new add. Raises `InputError`
 when `thread_id` is empty, `ForbiddenError` when `authorize` refuses `create`, or the thread exists
 and the caller is not a member or may not `read` it.
 
@@ -473,9 +485,10 @@ async def mark(self, thread_id: str, seq: int, back: bool = False) -> int: ...
 
 Stores the caller's private read position in the thread, never lowering it unless `back=True` moves
 it back, and returns the stored `seq`; when the mark moved, the caller's other connections receive
-`Marked`, with the unread count after it. Raises `InputError` when `seq` is not between 0 and the
-thread's last `seq`, `NotFoundError` when the scope holds no such thread, `ForbiddenError` when the
-caller is not a member or `authorize` refuses `read`.
+`Marked`, with the unread count after it. Raises `InputError` when `seq` is not between 0 (in a
+`since_added` thread, the `seq` just before the caller's add) and the thread's last `seq`,
+`NotFoundError` when the scope holds no such thread, `ForbiddenError` when the caller is not a
+member or `authorize` refuses `read`.
 
 ### `Client.marked`
 
@@ -502,7 +515,7 @@ async def history(
 
 Returns the latest `limit` events below `before` (a `seq`), in `seq` order; `kinds` keeps only those
 kinds. With `after` (a `seq`), the first `limit` events after it, in `seq` order; `before` and
-`after` together are a range. Raises `InputError` when `after` is negative or `limit` is not between
+`after` together are a range. In a `since_added` thread it reads from the caller's add. Raises `InputError` when `after` is negative or `limit` is not between
 1 and 500, `NotFoundError` when the scope holds no such thread, `ForbiddenError` when the caller is
 not a member or `authorize` refuses `read`.
 
@@ -513,7 +526,7 @@ async def get_event(self, thread_id: str, event_id: str) -> Event: ...
 ```
 
 Reads one event of the thread by its id, as it is stored, like `history`. Raises `NotFoundError`
-when the scope holds no such thread or the thread no such event, `ForbiddenError` when the caller is
+when the scope holds no such thread or the thread no such event the caller may read, `ForbiddenError` when the caller is
 not a member or `authorize` refuses `read`.
 
 ### `Client.present`
@@ -1141,6 +1154,7 @@ class Thread(BaseModel):
     scope: str
     metadata: dict[str, Any] = {}
     created_at: datetime
+    history: History = "all"
     last_seq: int | None = None
     last_message_at: datetime | None = None
     marked: int | None = None
@@ -1148,7 +1162,8 @@ class Thread(BaseModel):
     last_message: Message | None = None
 ```
 
-A conversation: `id` yours or the server's, `scope` its tenant, `metadata` yours. A listed thread
+A conversation: `id` yours or the server's, `scope` its tenant, `metadata` yours, `history` who
+reads what came before an add (`"all"`, or `"since_added"`: each member from its add). A listed thread
 also carries `last_seq` and `last_message_at` (when its latest message was written); listed for a
 member, `marked` (the member's private read position, `None` without one) and `unread` (messages by
 others after it, at most 100); with `preview`, `last_message` (the latest message not retracted
@@ -1350,7 +1365,9 @@ class Storage(Protocol):
 
     async def is_member(self, scope: str, thread_id: str, identity_id: str) -> bool: ...
 
-    async def head(self, scope: str, thread_id: str, identity_id: str) -> int | None: ...
+    async def head(
+        self, scope: str, thread_id: str, identity_id: str
+    ) -> tuple[int, int] | None: ...
 
     async def mark(
         self, scope: str, thread_id: str, identity_id: str, seq: int, back: bool = False
@@ -1370,9 +1387,12 @@ class Storage(Protocol):
         before: int | None = None,
         limit: int = 50,
         kinds: Sequence[str] | None = None,
+        floor: int = 0,
     ) -> list[Event]: ...
 
-    async def get_event(self, scope: str, thread_id: str, event_id: str) -> Event | None: ...
+    async def get_event(
+        self, scope: str, thread_id: str, event_id: str, floor: int = 0
+    ) -> Event | None: ...
 
     async def find_event(
         self, scope: str, thread_id: str, author_id: str, client_id: str
@@ -1402,11 +1422,14 @@ the latest message instead, a thread without messages by its creation; `preview=
 thread's `last_message`. A page continues below `before`: a thread id, at that thread's place now,
 or a `Thread` a page listed, at the place its own `created_at`, `last_message_at` and `id` give it,
 so paging holds when that thread is deleted or moves meanwhile. `head` returns a thread's last `seq`
-when `identity_id` is a member of it, `None` otherwise: the one read that enters a thread for a
-connection. `listen` takes an `OnEvent`, `on_event(scope, thread_id, seq)`, and an `OnSignal`,
-`on_signal(scope, thread_id, payload)`, called for what any server on the storage appends or
-publishes, and an `OnResume`, `on_resume()`, called once a dropped listener is back; it returns a
-`Stop`, `stop()`, that ends it, and all four are async functions returning `None`. Raises
+and the member's floor when `identity_id` is a member of it, `None` otherwise: the one read that
+enters a thread for a connection. The floor is 0 in a thread whose `history` is `"all"`, and in a
+`"since_added"` one the thread's last `seq` plus one when the member was added (`add_member` records
+it); `list_events` and `get_event` given a `floor` leave out events below it and edits and
+retractions of them. `listen` takes an `OnEvent`, `on_event(scope, thread_id, seq)`, and an
+`OnSignal`, `on_signal(scope, thread_id, payload)`, called for what any server on the storage
+appends or publishes, and an `OnResume`, `on_resume()`, called once a dropped listener is back; it
+returns a `Stop`, `stop()`, that ends it, and all four are async functions returning `None`. Raises
 `NotFoundError`, from `add_member`, `append_event` and `list_threads` with a `before` id, when the
 scope holds no such thread, and `StorageError`, from `create_thread`, when the thread's scope is not
 `scope`. `mark` stores the identity's private read position in the thread, never lowering it unless
@@ -1638,12 +1661,18 @@ message, an error the server raised.
 
 ```ts
 async createThread(
-  options: { threadId?: string; metadata?: Record<string, unknown> } = {}
+  options: {
+    threadId?: string
+    metadata?: Record<string, unknown>
+    history?: 'all' | 'since_added'
+  } = {}
 ): Promise<Thread>
 ```
 
 Creates a thread with `threadId`, or one the server picks, makes the caller its first member and
-returns it; with a `threadId` the scope already holds, returns that thread. Raises `InputError` when
+returns it; with a `threadId` the scope already holds, returns that thread. `history` is fixed for
+the thread's life: with `'all'` every member reads the whole log; with `'since_added'` each member
+reads from where it was added. Raises `InputError` when
 `threadId` is empty, `ForbiddenError` when `authorize` refuses `create`, or the thread exists and
 the caller is not a member or may not `read` it.
 
@@ -1759,9 +1788,10 @@ async mark(threadId: string, seq: number, options: { back?: boolean } = {}): Pro
 
 Stores the caller's private read position in the thread, never lowering it unless `back: true` moves
 it back, and returns the stored `seq`; when the mark moved, the caller's other connections receive
-`Marked`, with the unread count after it. Raises `InputError` when `seq` is not between 0 and the
-thread's last `seq`, `NotFoundError` when the scope holds no such thread, `ForbiddenError` when the
-caller is not a member or `authorize` refuses `read`.
+`Marked`, with the unread count after it. Raises `InputError` when `seq` is not between 0 (in a
+`since_added` thread, the `seq` just before the caller's add) and the thread's last `seq`,
+`NotFoundError` when the scope holds no such thread, `ForbiddenError` when the caller is not a
+member or `authorize` refuses `read`.
 
 ### `Client.marked`
 
@@ -1784,7 +1814,8 @@ async history(
 
 Returns the latest `limit` events (50 when left out) below `before` (a `seq`), in `seq` order;
 `kinds` keeps only those kinds. With `after` (a `seq`), the first `limit` events after it, in `seq`
-order; `before` and `after` together are a range. Raises `InputError` when `after` is negative or
+order; `before` and `after` together are a range. In a `since_added` thread it reads from the
+caller's add. Raises `InputError` when `after` is negative or
 `limit` is not between 1 and 500, `NotFoundError` when the scope holds no such thread,
 `ForbiddenError` when the caller is not a member or `authorize` refuses `read`.
 
@@ -1795,7 +1826,7 @@ async getEvent(threadId: string, eventId: string): Promise<Event>
 ```
 
 Reads one event of the thread by its id, as it is stored, like `history`. Raises `NotFoundError`
-when the scope holds no such thread or the thread no such event, `ForbiddenError` when the caller is
+when the scope holds no such thread or the thread no such event the caller may read, `ForbiddenError` when the caller is
 not a member or `authorize` refuses `read`.
 
 ### `Client.present`
@@ -2431,6 +2462,7 @@ type Thread = {
   scope: string
   metadata: Record<string, unknown>
   created_at: string
+  history: 'all' | 'since_added'
   last_seq?: number
   last_message_at?: string
   marked?: number
@@ -2439,7 +2471,8 @@ type Thread = {
 }
 ```
 
-A conversation: `id` yours or the server's, `scope` its tenant, `metadata` yours. A listed thread
+A conversation: `id` yours or the server's, `scope` its tenant, `metadata` yours, `history` who
+reads what came before an add (`'all'`, or `'since_added'`: each member from its add). A listed thread
 also carries `last_seq` and `last_message_at` (when its latest message was written); listed for a
 member, `marked` (the member's private read position, omitted without one) and `unread` (messages by
 others after it, at most 100); with `preview`, `last_message` (the latest message not retracted

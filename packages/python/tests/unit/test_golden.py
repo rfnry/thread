@@ -122,6 +122,11 @@ def golden() -> dict[str, Frame]:
                 code="input", message="server: the first frame must be a hello for protocol 1"
             ),
         ),
+        "request-thread-create-since-added": Request(
+            id="2",
+            method="thread.create",
+            payload={"thread_id": "t1", "metadata": {}, "history": "since_added"},
+        ),
         "request-thread-list": Request(
             id="7",
             method="thread.list",
