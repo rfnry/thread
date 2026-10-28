@@ -409,12 +409,22 @@ export class Client {
       const cursor = this.cursors.get(threadId)
       if (cursor === undefined || (followed && !this.held.has(threadId))) continue
       try {
-        this.emit(await this.joinFrom(threadId, cursor, false, !this.held.has(threadId)))
+        this.emit(await this.rejoined(threadId, cursor))
       } catch (error) {
         if (error instanceof TransportError) return
         this.cursors.delete(threadId)
         this.held.delete(threadId)
       }
+    }
+  }
+
+  private async rejoined(threadId: string, cursor: number): Promise<Joined> {
+    if (this.held.has(threadId)) return this.joinFrom(threadId, cursor)
+    try {
+      return await this.joinFrom(threadId, cursor, false, true)
+    } catch (error) {
+      if (!(error instanceof InputError)) throw error
+      return this.joinFrom(threadId, cursor)
     }
   }
 
@@ -577,8 +587,8 @@ export class Client {
   }
 
   async away(threadId: string): Promise<void> {
-    this.held.delete(threadId)
     await this.request('thread.away', { thread_id: threadId })
+    this.held.delete(threadId)
   }
 
   async follow(options: { resume?: boolean } = {}): Promise<Joined[]> {

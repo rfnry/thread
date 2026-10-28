@@ -379,7 +379,7 @@ class Client:
             if cursor is None or (followed and thread_id not in self._present):
                 continue
             try:
-                joined = await self._join(thread_id, cursor, away=thread_id not in self._present)
+                joined = await self._rejoined(thread_id, cursor)
             except TransportError:
                 return
             except ThreadException:
@@ -387,6 +387,14 @@ class Client:
                 self._present.discard(thread_id)
                 continue
             self._inbox.put_nowait(joined)
+
+    async def _rejoined(self, thread_id: str, cursor: int) -> Joined:
+        if thread_id in self._present:
+            return await self._join(thread_id, cursor)
+        try:
+            return await self._join(thread_id, cursor, away=True)
+        except InputError:
+            return await self._join(thread_id, cursor)
 
     def _fail(self, error: ThreadException) -> None:
         self._failure = error
@@ -565,8 +573,8 @@ class Client:
         await self._request("thread.leave", {"thread_id": thread_id})
 
     async def away(self, thread_id: str) -> None:
-        self._present.discard(thread_id)
         await self._request("thread.away", {"thread_id": thread_id})
+        self._present.discard(thread_id)
 
     async def follow(self, resume: bool = False) -> list[Joined]:
         self._left.clear()

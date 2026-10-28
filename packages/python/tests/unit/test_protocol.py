@@ -1,5 +1,9 @@
+import re
+from pathlib import Path
+
 import pytest
 
+from rfnry_thread import server
 from rfnry_thread.errors import ForbiddenError, InputError
 from rfnry_thread.protocol import (
     METHODS,
@@ -44,24 +48,6 @@ def test_an_error_frame_carries_the_code_and_message() -> None:
     )
 
 
-def test_the_methods_are_the_designed_eighteen() -> None:
-    assert {
-        "thread.create",
-        "thread.get",
-        "thread.list",
-        "thread.update",
-        "thread.delete",
-        "thread.join",
-        "thread.follow",
-        "thread.leave",
-        "thread.history",
-        "thread.mark",
-        "thread.marked",
-        "thread.present",
-        "member.add",
-        "member.remove",
-        "member.list",
-        "event.send",
-        "event.get",
-        "signal.send",
-    } == METHODS
+def test_the_methods_are_the_ones_the_server_answers() -> None:
+    source = Path(server.__file__).read_text(encoding="utf-8")
+    assert set(re.findall(r'method == "([a-z.]+)"', source)) == METHODS

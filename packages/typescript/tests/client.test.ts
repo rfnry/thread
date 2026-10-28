@@ -90,6 +90,40 @@ describe('client', () => {
     ])
   })
 
+  it('keeps a thread present when the server refuses away, and joins plainly when it refuses an away join', async () => {
+    const { client } = await joined()
+    server.handlers.set('thread.away', () => {
+      throw { code: 'input', message: "server: unknown method 'thread.away'" }
+    })
+    await expect(client.away('t1')).rejects.toBeInstanceOf(InputError)
+    server.drop()
+    await vi.waitFor(() => expect(server.sent('thread.join')).toHaveLength(2))
+    expect(server.sent('thread.join')[1]?.payload).toEqual({ thread_id: 't1', since: 0 })
+    server.handlers.delete('thread.away')
+    await client.away('t1')
+    const join = server.handlers.get('thread.join')
+    server.handlers.set('thread.join', (payload) => {
+      if (payload.away)
+        throw {
+          code: 'input',
+          message: 'server: invalid thread.join payload: extra inputs are not permitted',
+        }
+      return join?.(payload) ?? {}
+    })
+    server.drop()
+    await vi.waitFor(() => expect(server.sent('thread.join')).toHaveLength(4))
+    expect(
+      server
+        .sent('thread.join')
+        .slice(2)
+        .map((frame) => frame.payload)
+    ).toEqual([
+      { thread_id: 't1', since: 0, away: true },
+      { thread_id: 't1', since: 0 },
+    ])
+    await client.close()
+  })
+
   it('joins a thread it is away from again after a drop without presence', async () => {
     const { client } = await joined()
     await client.away('t1')

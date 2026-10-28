@@ -775,3 +775,55 @@ async def test_the_inbox_lists_by_activity_with_previews(server: Server) -> None
     system = await server.list_threads("acme", order="activity", preview=True)
     assert [t.id for t in system] == ["t1", "t2"]
     assert system[0].marked is None and system[0].last_message is not None
+
+
+async def test_two_follows_at_once_each_keep_their_own_watch(
+    storage: PostgresStorage, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    server = Server(storage)
+    ana = await threads(server, "t1")
+    await ana.call("member.add", thread_id="t1", identity=who(BRUNO))
+    listing = storage.list_threads
+
+    async def slow(*args: Any, **kwargs: Any) -> list[Thread]:
+        found = await listing(*args, **kwargs)
+        if args[1] == "helper":
+            await asyncio.sleep(0.3)
+        return found
+
+    monkeypatch.setattr(storage, "list_threads", slow)
+    helper = await Peer.open(server, HELPER)
+    bruno = await Peer.open(server, BRUNO)
+    first = asyncio.ensure_future(helper.call("thread.follow"))
+    await asyncio.sleep(0.1)
+    await bruno.call("thread.follow")
+    await say(ana, "t1", "during the first follow")
+    reply = await first
+    assert [(j["thread"]["id"], j["seq"]) for j in reply["joined"]] == [("t1", 4)]
+    assert server._hub._watching == []
+
+
+async def test_a_removal_delivered_inside_a_gap_cuts_the_removed_connection(
+    storage: PostgresStorage, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    server = Server(storage)
+    ana = await threads(server, "t1")
+    await ana.call("member.add", thread_id="t1", identity=who(BRUNO))
+    bruno = await Peer.open(server, BRUNO)
+    await bruno.call("thread.join", thread_id="t1")
+    helper = await Peer.open(server, HELPER)
+    await bruno.quiet()
+    real = storage.append_event
+
+    async def append(scope: str, event: Any) -> Any:
+        stored = await real(scope, event)
+        if event.kind == "member_removed":
+            monkeypatch.setattr(storage, "append_event", real)
+            await say(helper, "t1", "concurrent")
+        return stored
+
+    monkeypatch.setattr(storage, "append_event", append)
+    await ana.call("member.remove", thread_id="t1", identity_id="bruno")
+    assert [p["kind"] for p in await bruno.quiet() if "seq" in p] == ["member_removed"]
+    await say(ana, "t1", "after the removal")
+    assert await bruno.quiet() == []

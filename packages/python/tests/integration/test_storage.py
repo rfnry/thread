@@ -638,3 +638,34 @@ async def test_a_member_listing_by_activity_filters_metadata_and_pages_together(
     assert await listed(limit=1) == [("a", 1)]
     assert await listed(before="a") == [("d", None)]
     assert await listed(before="d") == []
+
+
+async def test_a_member_added_while_an_append_is_in_flight_is_floored_after_it(
+    pool: Any, storage: Storage
+) -> None:
+    made = thread("t1").model_copy(update={"history": "since_added"})
+    await storage.create_thread("acme", made)
+    await room(storage, "t1", "acme", ANA)
+    async with pool.acquire() as writer, writer.transaction():
+        await writer.execute(
+            "SELECT last_seq FROM thread_threads WHERE scope = 'acme' AND id = 't1' FOR UPDATE"
+        )
+        secret = say("t1", "c1", "before the add").model_copy(update={"seq": 1})
+        await writer.execute(
+            "INSERT INTO thread_events (scope, thread_id, seq, id, kind, author_id, client_id, "
+            "body) VALUES ('acme', 't1', 1, $1, 'message', 'ana', 'c1', $2::jsonb)",
+            secret.id,
+            secret.model_dump_json(),
+        )
+        await writer.execute(
+            "UPDATE thread_threads SET last_seq = 1 WHERE scope = 'acme' AND id = 't1'"
+        )
+        adding = asyncio.ensure_future(
+            storage.add_member(
+                "acme", Member(thread_id="t1", identity=BRUNO, added_at=AT, added_by=SYSTEM)
+            )
+        )
+        await asyncio.sleep(0.2)
+        assert not adding.done()
+    await adding
+    assert await storage.head("acme", "t1", "bruno") == (1, 2)

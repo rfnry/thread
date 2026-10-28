@@ -80,6 +80,9 @@ MIGRATIONS = [
 LATEST = MIGRATIONS[-1].version
 
 
+LOCK = "SELECT pg_advisory_xact_lock(hashtextextended('thread.migrate:' || current_schema(), 0))"
+
+
 _INITIALIZED = ("thread_events", "thread_marks", "thread_members", "thread_threads")
 
 
@@ -94,9 +97,19 @@ _STATE = (
 _NAMES = re.compile(r'"((?:[^"]|"")*)"|([^,\s]+)')
 
 
+_ELSEWHERE = (
+    "SELECT n.nspname AS name FROM pg_class c JOIN pg_namespace n ON n.oid = c.relnamespace "
+    "WHERE c.relname = 'thread_threads' AND c.relkind IN ('r', 'p') AND n.nspname <> $1 "
+    "AND NOT EXISTS (SELECT 1 FROM pg_class m WHERE m.relnamespace = n.oid "
+    "AND m.relname = 'thread_migrations') ORDER BY 1"
+)
+
+
 def _first(path: str, role: str, schema: str | None) -> str | None:
     for quoted, bare in _NAMES.findall(path):
         name: str = quoted.replace('""', '"') if quoted else bare.lower()
+        if not name:
+            continue
         if name != "$user":
             return name
         if role == schema:
@@ -126,17 +139,32 @@ def _shared(schema: str) -> bool:
     return schema in ("public", "information_schema") or schema.startswith("pg_")
 
 
+async def remedy(conn: Any, schema: str) -> str:
+    found = [row["name"] for row in await conn.fetch(_ELSEWHERE, schema)]
+    if not found:
+        return f"run rfnry-thread create --schema {schema}"
+    return (
+        f"the thread tables initialize() made are in {', '.join(found)} — "
+        f"run rfnry-thread upgrade --schema {schema} --from {found[0]}"
+    )
+
+
 async def problems(conn: Any) -> list[str]:
     state = await conn.fetchrow(_STATE)
-    schema, path = state["schema"], state["path"]
-    first = _first(path, state["role"], schema)
+    schema, path, role = state["schema"], state["path"], state["role"]
+    first = _first(path, role, schema)
     if first is not None and first != schema:
-        return [
-            f"there is no schema {first} on search_path {path!r} — "
-            f"run rfnry-thread create --schema {first}"
-        ]
+        held = await conn.fetchval(
+            "SELECT EXISTS (SELECT 1 FROM pg_namespace WHERE nspname = $1)", first
+        )
+        if held:
+            return [
+                f"{role} cannot use schema {first} — grant it USAGE on the schema and SELECT, "
+                "INSERT, UPDATE, DELETE on its tables"
+            ]
+        return [f"there is no schema {first} on search_path {path!r} — {await remedy(conn, first)}"]
     if schema is None:
-        return [f"no schema on search_path {path!r} exists — run rfnry-thread create"]
+        return [f"no schema on search_path {path!r} exists — {await remedy(conn, 'thread')}"]
     if not state["migrated"]:
         if state["tables"] and _shared(schema):
             return [
@@ -153,7 +181,7 @@ async def problems(conn: Any) -> list[str]:
                 f"no thread schema on search_path {path!r} — run rfnry-thread create "
                 "and put its schema first on the pool's search_path"
             ]
-        return [f"no thread schema in {schema} — run rfnry-thread create --schema {schema}"]
+        return [f"no thread schema in {schema} — {await remedy(conn, schema)}"]
     version = int(await conn.fetchval("SELECT max(version) FROM thread_migrations") or 0)
     if version < LATEST:
         return [
@@ -192,7 +220,7 @@ async def plan_upgrade(conn: Any, *, source: str | None = None) -> Plan:
     moves = await _moves(conn, state, source) if source is not None else Plan([], [])
     if not state["migrated"] and not (state["tables"] or moves.steps):
         raise ConfigurationError(
-            f"postgres: no thread schema in {schema} — run rfnry-thread create --schema {schema}"
+            f"postgres: no thread schema in {schema} — {await remedy(conn, schema)}"
         )
     if not state["migrated"]:
         rest = _steps(MIGRATIONS[1:])
@@ -222,6 +250,8 @@ async def _moves(conn: Any, state: Any, source: str) -> Plan:
         list(_INITIALIZED),
     )
     names = [row["tablename"] for row in held]
+    if "thread_threads" not in names and state["migrated"]:
+        return Plan([], [])
     if "thread_threads" not in names:
         raise ConfigurationError(f"postgres: {source} holds no thread tables initialize() made")
     migrated = await conn.fetchval(
@@ -257,9 +287,7 @@ async def apply(
     try:
         for made in before:
             await conn.execute(made)
-        await conn.execute(
-            "SELECT pg_advisory_xact_lock(hashtextextended('thread.migrate:' || current_schema(), 0))"
-        )
+        await conn.execute(LOCK)
         planned = await planner(conn)
         plan = Plan(planned.steps, [*before, *planned.statements])
         if expected is not None and plan != expected:

@@ -470,12 +470,12 @@ Receives every thread the caller is a member of, from now on, and each thread it
 from the moment it is added, as a `Joined` on `events()`; returns the `Joined` of each thread it
 receives now. With `resume=True`, each thread's events after the caller's mark come first (from
 where it was added when it has no mark yet; a membership older than marks starts now), at most the
-server's `replay_limit`, beyond which the latest and `truncated=True`. Following is not presence:
-no `Present` is announced, and the caller may still signal and receive signals in every thread.
-A thread the connection already receives is not handed again. After a dropped socket the client
+server's `replay_limit`, beyond which the latest and `truncated=True`. Following is not presence: no
+`Present` is announced, and the caller may still signal and receive signals in every thread. A
+thread the connection already receives is not handed again. After a dropped socket the client
 follows again from what it has seen, without the threads it had left unless it was added to them
-again since. Threads `authorize` refuses to `read` are left out. Raises `InputError` for a negative
-position.
+again since or they were deleted and made again. Threads `authorize` refuses to `read` are left out.
+Raises `InputError` for a negative position.
 
 ### `Client.mark`
 
@@ -515,9 +515,10 @@ async def history(
 
 Returns the latest `limit` events below `before` (a `seq`), in `seq` order; `kinds` keeps only those
 kinds. With `after` (a `seq`), the first `limit` events after it, in `seq` order; `before` and
-`after` together are a range. In a `since_added` thread it reads from the caller's add. Raises `InputError` when `after` is negative or `limit` is not between
-1 and 500, `NotFoundError` when the scope holds no such thread, `ForbiddenError` when the caller is
-not a member or `authorize` refuses `read`.
+`after` together are a range. In a `since_added` thread it reads from the caller's add. Raises
+`InputError` when `after` is negative or `limit` is not between 1 and 500, `NotFoundError` when the
+scope holds no such thread, `ForbiddenError` when the caller is not a member or `authorize` refuses
+`read`.
 
 ### `Client.get_event`
 
@@ -526,8 +527,8 @@ async def get_event(self, thread_id: str, event_id: str) -> Event: ...
 ```
 
 Reads one event of the thread by its id, as it is stored, like `history`. Raises `NotFoundError`
-when the scope holds no such thread or the thread no such event the caller may read, `ForbiddenError` when the caller is
-not a member or `authorize` refuses `read`.
+when the scope holds no such thread or the thread no such event the caller may read,
+`ForbiddenError` when the caller is not a member or `authorize` refuses `read`.
 
 ### `Client.present`
 
@@ -1163,11 +1164,11 @@ class Thread(BaseModel):
 ```
 
 A conversation: `id` yours or the server's, `scope` its tenant, `metadata` yours, `history` who
-reads what came before an add (`"all"`, or `"since_added"`: each member from its add). A listed thread
-also carries `last_seq` and `last_message_at` (when its latest message was written); listed for a
-member, `marked` (the member's private read position, `None` without one) and `unread` (messages by
-others after it, at most 100); with `preview`, `last_message` (the latest message not retracted
-among its last five, with its edits). Fields without a value are left out on the wire.
+reads what came before an add (`"all"`, or `"since_added"`: each member from its add). A listed
+thread also carries `last_seq` and `last_message_at` (when its latest message was written); listed
+for a member, `marked` (the member's private read position, `None` without one) and `unread`
+(messages by others after it, at most 100); with `preview`, `last_message` (the latest message not
+retracted among its last five, with its edits). Fields without a value are left out on the wire.
 
 ### `Member`
 
@@ -1452,13 +1453,14 @@ class PostgresStorage:
 Implements `Storage` on Postgres through an asyncpg-compatible pool you built, in four tables,
 `thread_threads`, `thread_members`, `thread_events` and `thread_marks`, in the schema first on the
 pool's `search_path`, which the `rfnry-thread` command creates and upgrades. `check` raises
-`ConfigurationError` naming the command to run when that schema holds no thread tables, is behind or
-ahead of this version, or holds tables `initialize()` made in 0.1.1 or earlier. An event is stored
-and announced with `NOTIFY` in one transaction, on two channels named for the connection's current
-schema, so deployments in different schemas of one database do not hear each other and replicas
-sharing a schema do; `listen` holds one connection from the pool, taking another with jittered
-backoff when it drops. Raises `StorageError` when the database fails, and from `publish`, when a
-notification is over 7900 bytes.
+`ConfigurationError` naming the command to run when that schema holds no thread tables (naming
+tables `initialize()` made in another schema to move with `upgrade --from`), is behind or ahead of
+this version, holds tables `initialize()` made in 0.1.1 or earlier, or is one the pool's role cannot
+use. An event is stored and announced with `NOTIFY` in one transaction, on two channels named for
+the connection's current schema, so deployments in different schemas of one database do not hear
+each other and replicas sharing a schema do; `listen` holds one connection from the pool, taking
+another with jittered backoff when it drops. Raises `StorageError` when the database fails, and from
+`publish`, when a notification is over 7900 bytes.
 
 ## Errors
 
@@ -1777,11 +1779,11 @@ from the moment it is added, as a `Joined` to the listeners; returns the `Joined
 receives now. With `resume: true`, each thread's events after the caller's mark come first (from
 where it was added when it has no mark yet; a membership older than marks starts now), at most the
 server's `replay_limit`, beyond which the latest and `truncated: true`. Following is not presence:
-no `Present` is announced, and the caller may still signal and receive signals in every thread.
-A thread the connection already receives is not handed again. After a dropped socket the client
+no `Present` is announced, and the caller may still signal and receive signals in every thread. A
+thread the connection already receives is not handed again. After a dropped socket the client
 follows again from what it has seen, without the threads it had left unless it was added to them
-again since. Threads `authorize` refuses to `read` are left out. Raises `InputError` for a negative
-position.
+again since or they were deleted and made again. Threads `authorize` refuses to `read` are left out.
+Raises `InputError` for a negative position.
 
 ### `Client.mark`
 
@@ -1818,9 +1820,9 @@ async history(
 Returns the latest `limit` events (50 when left out) below `before` (a `seq`), in `seq` order;
 `kinds` keeps only those kinds. With `after` (a `seq`), the first `limit` events after it, in `seq`
 order; `before` and `after` together are a range. In a `since_added` thread it reads from the
-caller's add. Raises `InputError` when `after` is negative or
-`limit` is not between 1 and 500, `NotFoundError` when the scope holds no such thread,
-`ForbiddenError` when the caller is not a member or `authorize` refuses `read`.
+caller's add. Raises `InputError` when `after` is negative or `limit` is not between 1 and 500,
+`NotFoundError` when the scope holds no such thread, `ForbiddenError` when the caller is not a
+member or `authorize` refuses `read`.
 
 ### `Client.getEvent`
 
@@ -1829,8 +1831,8 @@ async getEvent(threadId: string, eventId: string): Promise<Event>
 ```
 
 Reads one event of the thread by its id, as it is stored, like `history`. Raises `NotFoundError`
-when the scope holds no such thread or the thread no such event the caller may read, `ForbiddenError` when the caller is
-not a member or `authorize` refuses `read`.
+when the scope holds no such thread or the thread no such event the caller may read,
+`ForbiddenError` when the caller is not a member or `authorize` refuses `read`.
 
 ### `Client.present`
 
@@ -2475,11 +2477,11 @@ type Thread = {
 ```
 
 A conversation: `id` yours or the server's, `scope` its tenant, `metadata` yours, `history` who
-reads what came before an add (`'all'`, or `'since_added'`: each member from its add). A listed thread
-also carries `last_seq` and `last_message_at` (when its latest message was written); listed for a
-member, `marked` (the member's private read position, omitted without one) and `unread` (messages by
-others after it, at most 100); with `preview`, `last_message` (the latest message not retracted
-among its last five, with its edits). Fields without a value are left out on the wire.
+reads what came before an add (`'all'`, or `'since_added'`: each member from its add). A listed
+thread also carries `last_seq` and `last_message_at` (when its latest message was written); listed
+for a member, `marked` (the member's private read position, omitted without one) and `unread`
+(messages by others after it, at most 100); with `preview`, `last_message` (the latest message not
+retracted among its last five, with its edits). Fields without a value are left out on the wire.
 
 ### `Member`
 

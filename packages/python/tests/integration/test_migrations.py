@@ -1,9 +1,12 @@
 from datetime import timedelta
 from functools import partial
 from typing import Any
+from urllib.parse import urlsplit, urlunsplit
+from uuid import uuid4
 
+import asyncpg
 import pytest
-from database import Schemas, quoted
+from database import URL, Schemas, admin, quoted
 from unit.factories import ANA, AT
 
 from rfnry_thread import migrations
@@ -325,14 +328,18 @@ async def test_upgrade_from_refuses_a_source_without_tables_or_a_target_that_hol
     schemas: Schemas,
 ) -> None:
     empty = await schemas.create()
+    fresh = await schemas.create()
     target, pool = await created(schemas)
     source, _ = await initialized(schemas)
-    async with pool.acquire() as conn:
+    async with (await schemas.pool(fresh)).acquire() as conn:
         with pytest.raises(
             ConfigurationError,
             match=f"^postgres: {empty} holds no thread tables initialize\\(\\) made$",
         ):
             await migrations.apply(conn, partial(migrations.plan_upgrade, source=empty))
+    async with pool.acquire() as conn:
+        done = await migrations.apply(conn, partial(migrations.plan_upgrade, source=empty))
+        assert done == Plan([], [])
         with pytest.raises(
             ConfigurationError,
             match=f"^postgres: {target} already holds thread tables — "
@@ -424,3 +431,58 @@ def test_the_first_schema_of_a_search_path_is_read_as_postgres_reads_it() -> Non
     assert migrations._first('"Odd ""x""", public', "thread", None) == 'Odd "x"'
     assert migrations._first("Thread, public", "thread", None) == "thread"
     assert migrations._first("", "thread", None) is None
+
+
+async def test_check_and_upgrade_point_at_tables_initialize_made_in_another_schema(
+    schemas: Schemas,
+) -> None:
+    old, _ = await initialized(schemas)
+
+    async def problem(pool: Any) -> str:
+        with pytest.raises(ConfigurationError) as raised:
+            await PostgresStorage(pool).check()
+        return str(raised.value)
+
+    missing = schemas.name()
+    found = await problem(await schemas.pool(missing))
+    assert f"there is no schema {missing} on search_path" in found
+    assert f"run rfnry-thread upgrade --schema {missing} --from {old}" in found
+    empty = await schemas.create()
+    pool = await schemas.pool(empty)
+    assert f"run rfnry-thread upgrade --schema {empty} --from {old}" in await problem(pool)
+    async with pool.acquire() as conn:
+        with pytest.raises(ConfigurationError, match=f"--schema {empty} --from {old}"):
+            await migrations.apply(conn, migrations.plan_upgrade)
+
+
+async def test_check_names_a_role_that_cannot_use_the_schema_and_an_empty_search_path(
+    schemas: Schemas,
+) -> None:
+    name, _ = await created(schemas)
+    role = f"thread_probe_{uuid4().hex[:8]}"
+    await admin(f"CREATE ROLE {role} LOGIN PASSWORD 'probe'")
+    try:
+        url = urlunsplit(
+            urlsplit(URL)._replace(
+                netloc=f"{role}:probe@{urlsplit(URL).hostname}:{urlsplit(URL).port}"
+            )
+        )
+        pool = await asyncpg.create_pool(
+            url, min_size=1, max_size=1, server_settings={"search_path": quoted(name)}
+        )
+        try:
+            with pytest.raises(ConfigurationError) as raised:
+                await PostgresStorage(pool).check()
+        finally:
+            await pool.close()
+        assert str(raised.value) == (
+            f"postgres: {role} cannot use schema {name} — grant it USAGE on the schema and "
+            "SELECT, INSERT, UPDATE, DELETE on its tables"
+        )
+    finally:
+        await admin(f"DROP ROLE {role}")
+    empty = await schemas.pool("")
+    with pytest.raises(
+        ConfigurationError, match=r"^postgres: no schema on search_path '\"\"' exists"
+    ):
+        await PostgresStorage(empty).check()

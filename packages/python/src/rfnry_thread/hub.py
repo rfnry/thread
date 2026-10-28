@@ -66,6 +66,10 @@ class Session:
         self.outbound.put(Push(name="joined", payload=joined.model_dump(mode="json")))
 
 
+def _removes(event: Event, session: Session) -> bool:
+    return isinstance(event, MemberRemoved) and event.identity.id == session.identity.id
+
+
 def _size(payload: dict[str, Any]) -> int:
     return len(json.dumps(payload).encode())
 
@@ -108,7 +112,7 @@ class Hub:
         try:
             yield touched
         finally:
-            self._watching.remove(touched)
+            self._watching = [watch for watch in self._watching if watch is not touched]
 
     def _touch(self, scope: str, thread_id: str) -> None:
         for touched in self._watching:
@@ -164,7 +168,12 @@ class Hub:
                     truncated = True
                 else:
                     replay = await self.storage.list_events(
-                        scope, thread_id, since=start, limit=self.replay_limit, floor=floor
+                        scope,
+                        thread_id,
+                        since=start,
+                        before=head + 1,
+                        limit=self.replay_limit,
+                        floor=floor,
                     )
             if session.dropped:
                 return Joined(thread=thread, seq=head), False
@@ -265,13 +274,19 @@ class Hub:
                     limit=event.seq - cursor - 1,
                     floor=floor,
                 )
+                removed = next((e for e in missing if _removes(e, session)), None)
                 for earlier in missing:
                     session.push_event(earlier, earlier.model_dump(mode="json"))
+                    if earlier is removed:
+                        break
+                if removed is not None:
+                    cut.append(session)
+                    continue
             if target < floor:
                 session.joined[event.thread_id] = event.seq
                 continue
             session.push_event(event, payload)
-            if isinstance(event, MemberRemoved) and event.identity.id == session.identity.id:
+            if _removes(event, session):
                 cut.append(session)
         return cut
 
@@ -285,7 +300,11 @@ class Hub:
 
     async def on_event(self, scope: str, thread_id: str, seq: int) -> None:
         self._touch(scope, thread_id)
-        if not any(s.joined.get(thread_id, seq) < seq for s in self._room(scope, thread_id)):
+        lock = self._locks.get((scope, thread_id))
+        entering = lock is not None and lock.locked()
+        if not entering and not any(
+            s.joined.get(thread_id, seq) < seq for s in self._room(scope, thread_id)
+        ):
             return
         try:
             async with self._lock(scope, thread_id):

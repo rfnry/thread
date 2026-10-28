@@ -165,3 +165,79 @@ async def test_a_thread_another_replica_wrote_between_a_listing_and_its_enter_is
     assert [j["seq"] for j in reply["joined"]] == [3]
     pushed = [p["content"][0]["text"] for p in await helper.quiet() if p["kind"] == "message"]
     assert pushed == ["from far"]
+
+
+async def test_a_removal_after_a_follow_listing_cuts_the_follower_when_its_notice_is_late(
+    storage: PostgresStorage, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    near, far = Server(storage), Server(storage)
+    heard = near._hub.on_event
+
+    async def late(scope: str, thread_id: str, seq: int) -> None:
+        await asyncio.sleep(0.3)
+        await heard(scope, thread_id, seq)
+
+    monkeypatch.setattr(near._hub, "on_event", late)
+    await near.start()
+    await far.start()
+    try:
+        ana = await Peer.open(far, ANA)
+        await ana.call("thread.create", thread_id="t1")
+        await ana.call("member.add", thread_id="t1", identity=HELPER.model_dump(mode="json"))
+        await say(ana, "t1", "one")
+        await asyncio.sleep(0.6)
+        listing = storage.list_threads
+        removed: list[bool] = []
+
+        async def listed(*args: Any, **kwargs: Any) -> Any:
+            found = await listing(*args, **kwargs)
+            if args[1] == "helper" and not removed:
+                removed.append(True)
+                await ana.call("member.remove", thread_id="t1", identity_id="helper")
+            return found
+
+        monkeypatch.setattr(storage, "list_threads", listed)
+        helper = await Peer.open(near, HELPER)
+        await helper.call("thread.follow", since={"t1": 0})
+        kinds = [p["kind"] for p in await helper.quiet(0.6) if "seq" in p]
+        assert kinds[-1] == "member_removed"
+        await say(ana, "t1", "said after helper was removed")
+        assert await helper.quiet(0.8) == []
+    finally:
+        await near.stop()
+        await far.stop()
+
+
+async def test_a_notice_landing_while_a_follower_enters_is_delivered_at_once(
+    storage: PostgresStorage, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    near, far = Server(storage), Server(storage)
+    await near.start()
+    await far.start()
+    try:
+        ana = await Peer.open(far, ANA)
+        await ana.call("thread.create", thread_id="t1")
+        await ana.call("member.add", thread_id="t1", identity=HELPER.model_dump(mode="json"))
+        await say(ana, "t1", "one")
+        await asyncio.sleep(0.3)
+        real = storage.list_events
+        done: list[bool] = []
+
+        async def replaying(*args: Any, **kwargs: Any) -> Any:
+            found = await real(*args, **kwargs)
+            if kwargs.get("since") == 0 and not done:
+                done.append(True)
+                await say(ana, "t1", "late")
+                await asyncio.sleep(0.4)
+            return found
+
+        monkeypatch.setattr(storage, "list_events", replaying)
+        helper = await Peer.open(near, HELPER)
+        await helper.call("thread.follow", since={"t1": 0})
+        pushed = [
+            p["content"][0]["text"] for p in await helper.quiet(0.6) if p["kind"] == "message"
+        ]
+        assert pushed == ["one", "late"]
+    finally:
+        await near.stop()
+        await far.stop()

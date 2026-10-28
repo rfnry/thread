@@ -2,7 +2,7 @@ from typing import Any
 
 import pytest
 
-from rfnry_thread.errors import InputError, NotFoundError
+from rfnry_thread.errors import ForbiddenError, InputError, NotFoundError
 from rfnry_thread.models import Identity
 from rfnry_thread.postgres import PostgresStorage
 from rfnry_thread.server import Server
@@ -157,3 +157,41 @@ async def test_a_long_history_before_the_add_does_not_truncate_a_replay_from_it(
     rewound = await helper.call("thread.join", thread_id="t1", since=0)
     assert rewound["truncated"] is False
     assert kinds(await helper.quiet()) == ["member_added", "after"]
+
+
+async def test_a_member_removed_between_the_checks_reads_nothing(
+    storage: PostgresStorage, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    server = Server(storage)
+    await made(server)
+    helper = await Peer.open(server, HELPER)
+    real = storage.is_member
+
+    async def removed_meanwhile(scope: str, thread_id: str, identity_id: str) -> bool:
+        found = await real(scope, thread_id, identity_id)
+        if identity_id == "helper":
+            await storage.remove_member(scope, thread_id, identity_id)
+        return found
+
+    monkeypatch.setattr(storage, "is_member", removed_meanwhile)
+    with pytest.raises(ForbiddenError, match="^server: 'helper' is not a member of thread 't1'$"):
+        await helper.call("thread.history", thread_id="t1")
+
+
+async def test_an_event_before_the_add_cannot_be_probed_by_editing_or_retracting_it(
+    server: Server,
+) -> None:
+    ana, before = await made(server)
+    await say(ana, "t1", "see above", in_reply_to=before[0]["id"])
+    helper = await Peer.open(server, HELPER)
+    for kind, extra in (("retract", {}), ("edit", {"content": [{"type": "text", "text": "x"}]})):
+        for target in (before[0]["id"], "nope"):
+            with pytest.raises(NotFoundError, match=f"^server: event {target!r} was not found$"):
+                await helper.call(
+                    "event.send",
+                    thread_id="t1",
+                    kind=kind,
+                    client_id=f"{kind}-{target}",
+                    target=target,
+                    **extra,
+                )

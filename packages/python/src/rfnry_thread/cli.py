@@ -77,7 +77,7 @@ async def _run(args: argparse.Namespace) -> int:
         if not exists and args.command != "create" and not moving:
             print(
                 f"cli: there is no schema {args.schema} — "
-                f"run rfnry-thread create --schema {args.schema}",
+                f"{await migrations.remedy(conn, args.schema)}",
                 file=sys.stderr,
             )
             return 1
@@ -100,8 +100,13 @@ async def _run(args: argparse.Namespace) -> int:
         shown = await migrations.apply(conn, planner, run=False, before=before)
         if args.sql:
             print(f"{setting};")
-            for statement in shown.statements:
+            print("BEGIN;")
+            for statement in before:
                 print(f"{statement};")
+            print(f"{migrations.LOCK};")
+            for statement in shown.statements[len(before) :]:
+                print(f"{statement};")
+            print("COMMIT;")
             return 0
         if not shown.steps:
             print(f"schema {args.schema}: nothing to do")

@@ -238,7 +238,7 @@ class PostgresStorage:
             body = await conn.fetchval(
                 "INSERT INTO thread_members (scope, thread_id, identity_id, added_at, body, added_seq) "
                 "SELECT $1, $2, $3, $4, $5::jsonb, t.last_seq + 1 FROM thread_threads t "
-                "WHERE t.scope = $1 AND t.id = $2 "
+                "WHERE t.scope = $1 AND t.id = $2 FOR SHARE "
                 "ON CONFLICT (scope, thread_id, identity_id) DO NOTHING RETURNING body",
                 scope,
                 member.thread_id,

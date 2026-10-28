@@ -19,6 +19,7 @@ METHODS = frozenset(
         "thread.join",
         "thread.follow",
         "thread.leave",
+        "thread.away",
         "thread.history",
         "thread.mark",
         "thread.marked",

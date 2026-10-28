@@ -2,7 +2,7 @@ import asyncio
 import contextlib
 from collections.abc import AsyncIterator, Sequence
 from http import HTTPStatus
-from typing import Any
+from typing import Any, Literal
 
 import pytest
 from until import until
@@ -10,7 +10,7 @@ from websockets.asyncio.server import ServerConnection, serve
 from websockets.http11 import Request, Response
 from websockets.typing import Subprotocol
 
-from rfnry_thread import client as client_module, server as server_module
+from rfnry_thread import client as client_module, server as server_module, verbs as verbs_module
 from rfnry_thread.client import Client, Item
 from rfnry_thread.errors import (
     ConfigurationError,
@@ -961,3 +961,32 @@ async def test_a_thread_left_open_away_stays_away_after_a_drop(live: Live, follo
     assert await anas(bruno) == []
     await ana.join("t1")
     assert await anas(bruno) == ["present"]
+
+
+async def test_against_a_server_from_before_away_a_thread_stays_present_and_delivered(
+    live: Live, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    class Before(server_module._Args):
+        thread_id: str
+        since: int | None = None
+        resume: bool = False
+        away: Literal[False] = False
+
+    async def unknown(self: Any, session: Any, thread_id: str) -> None:
+        raise InputError("server: unknown method 'thread.away'")
+
+    monkeypatch.setattr(server_module, "_Join", Before)
+    monkeypatch.setattr(verbs_module.Verbs, "away", unknown)
+    ana = await Client.connect(live.url, headers=ANA_HEADERS)
+    bruno = await live.server.connect(identity=BRUNO, scope="acme")
+    await bruno.create_thread(thread_id="t1")
+    await bruno.add_member("t1", Identity(role="user", id="ana", name="Ana"))
+    await ana.join("t1")
+    with pytest.raises(InputError):
+        await ana.away("t1")
+    assert "t1" in ana._present
+    ana._present.discard("t1")
+    await drop_and_reopen(live, ana)
+    await bruno.send("t1", "after the drop")
+    said = [first_text(m) for m in await drain(ana) if isinstance(m, Message)]
+    assert said == ["after the drop"]

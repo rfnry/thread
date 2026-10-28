@@ -398,16 +398,17 @@ minute passes, then a `TransportError`. The server deduplicates on the thread, t
 `client_id`, and answers a repeat with the event it stored the first time.
 
 From the server to a client, delivery is in order and complete per connection: a connection never
-sees `seq` 7 before `seq` 6, and never skips one. A dropped socket reconnects with jittered backoff,
-with fresh `headers`; a following client follows again from the last `seq` it saw in each thread
-(and joins each one instead when that fails), and every client re-joins every thread it had joined
-from there; the missed events arrive before anything new. A re-follow's or re-join's `Joined` also
-arrives in `events()`, and when it says `truncated`, redraw from the latest page. A reconnect your
-endpoint refuses (HTTP 401 or 403 on the upgrade, or 1008 before the hello is answered), or whose
-`headers` function raises `ForbiddenError`, stops the client, and `events()` raises that error; an
-error from `headers` that is not the library's is a failed attempt, retried with backoff and the
-function called again. Items wait in the client until you read them, so an assistant that joins and
-then starts reading misses nothing.
+sees `seq` 7 before `seq` 6, and never skips one it may read (in a `since_added` thread, an edit or
+retraction of what came before the add is one it may not). A dropped socket reconnects with jittered
+backoff, with fresh `headers`; a following client follows again from the last `seq` it saw in each
+thread (and joins each one instead when that fails), and every client re-joins every thread it had
+joined from there; the missed events arrive before anything new. A re-follow's or re-join's `Joined`
+also arrives in `events()`, and when it says `truncated`, redraw from the latest page. A reconnect
+your endpoint refuses (HTTP 401 or 403 on the upgrade, or 1008 before the hello is answered), or
+whose `headers` function raises `ForbiddenError`, stops the client, and `events()` raises that
+error; an error from `headers` that is not the library's is a failed attempt, retried with backoff
+and the function called again. Items wait in the client until you read them, so an assistant that
+joins and then starts reading misses nothing.
 
 A client's `status` says where its connection is: `"open"`; `"reconnecting"` from the moment its
 socket drops until it follows again, if it was following, and every thread it had joined is joined
@@ -779,8 +780,11 @@ rfnry-thread create --schema thread --sql    # print every statement, run nothin
 ```
 
 It takes the connection string with `--url`, or reads Postgres' standard `PG*` variables, and never
-prints it. `--sql` starts with the `search_path` the statements run under, so they land in the same
-schema when you run them yourself. Thread's tables never go in `public`.
+prints it. `--sql` prints the statements as the command runs them — the `search_path` they run
+under, then one transaction holding the migration lock — so they land in the same schema when you
+run them yourself. Thread's tables never go in `public`. An app that connects as a role of its own,
+not the one that ran the command, needs `USAGE` on the schema and `SELECT`, `INSERT`, `UPDATE` and
+`DELETE` on its tables; `check()` says so when it lacks them.
 
 Your pool points at the schema, and the app checks it at start:
 
@@ -816,7 +820,9 @@ with the default `search_path` put them, move into thread's schema in the same t
 rfnry-thread upgrade --schema thread --from public
 ```
 
-and the pool's `search_path` then names `thread`.
+and the pool's `search_path` then names `thread`. Run again, it has nothing left to do; until it
+runs, `check()` and the command point at it whenever thread's schema is missing or empty while
+tables `initialize()` made sit in another.
 
 Deployments in different schemas of one database do not hear each other's notices, and replicas
 sharing a schema do.

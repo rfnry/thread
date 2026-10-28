@@ -74,11 +74,15 @@ async def test_create_with_sql_prints_every_statement_and_makes_nothing(
     name = schemas.name()
     assert await run("create", "--schema", name, "--sql") == 0
     out = capsys.readouterr().out
-    assert out.startswith(f'SET search_path TO "{name}";\nCREATE SCHEMA IF NOT EXISTS "{name}";\n')
+    assert out.startswith(
+        f'SET search_path TO "{name}";\nBEGIN;\nCREATE SCHEMA IF NOT EXISTS "{name}";\n'
+        f"{migrations.LOCK};\n"
+    )
     assert "CREATE TABLE IF NOT EXISTS thread_events" in out
     last = migrations.MIGRATIONS[-1]
     assert out.endswith(
         f"INSERT INTO thread_migrations (version, name) VALUES ({last.version}, '{last.name}');\n"
+        "COMMIT;\n"
     )
     assert not await exists(await schemas.pool("public"), name)
 
@@ -106,8 +110,11 @@ async def test_upgrade_asks_before_it_runs_and_sql_runs_nothing(
     assert await run("upgrade", "--schema", name, "--sql") == 0
     assert capsys.readouterr().out == (
         f"SET search_path TO {quoted(name)};\n"
+        "BEGIN;\n"
+        f"{migrations.LOCK};\n"
         "CREATE TABLE thread_notes (id INTEGER);\n"
         f"INSERT INTO thread_migrations (version, name) VALUES ({NEXT}, 'notes');\n"
+        "COMMIT;\n"
     )
     monkeypatch.setattr("builtins.input", lambda prompt: "n")
     assert await run("upgrade", "--schema", name) == 0
@@ -134,6 +141,8 @@ async def test_upgrade_from_moves_the_tables_initialize_made_into_the_schema(
     storage = PostgresStorage(await schemas.pool(target))
     await storage.check()
     assert [e.seq for e in await storage.list_events("acme", "t1")] == [1, 2]
+    assert await run("upgrade", "--schema", target, "--from", source, "--yes") == 0
+    assert capsys.readouterr().out == f"schema {target}: nothing to do\n"
 
 
 async def test_from_and_schema_name_two_schemas(capsys: pytest.CaptureFixture[str]) -> None:
@@ -216,3 +225,14 @@ def test_an_interrupt_at_the_prompt_runs_nothing(monkeypatch: pytest.MonkeyPatch
         asked = worker.submit(cli._confirmed, argparse.Namespace(yes=False))
         assert asked.exception() is None
         assert asked.result() is False
+
+
+async def test_upgrade_into_a_missing_schema_points_at_tables_initialize_made(
+    schemas: Schemas, capsys: pytest.CaptureFixture[str]
+) -> None:
+    old, _ = await initialized(schemas)
+    name = schemas.name()
+    for command in ("check", "upgrade"):
+        assert await run(command, "--schema", name) == 1
+        err = capsys.readouterr().err
+        assert f"run rfnry-thread upgrade --schema {name} --from {old}" in err

@@ -267,7 +267,9 @@ class Verbs:
         if actor.role == "system" or thread.history == "all":
             return 0
         found = await self._storage.head(scope, thread.id, actor.id)
-        return 0 if found is None else found[1]
+        if found is None:
+            raise ForbiddenError(f"server: {actor.id!r} is not a member of thread {thread.id!r}")
+        return found[1]
 
     async def get_event(self, actor: Identity, scope: str, thread_id: str, event_id: str) -> Event:
         thread = await self.thread(actor, scope, thread_id, "read")
@@ -409,7 +411,7 @@ class Verbs:
             raise InputError(
                 f"server: invalid {kind} event: {exc.errors(include_url=False)[0]['msg'].lower()}"
             ) from exc
-        await self._check(scope, actor, event)
+        await self._check(scope, actor, event, await self._floor(actor, scope, thread))
         if self._redact is not None and isinstance(event, Message | Edit):
             sent = await self._storage.find_event(scope, thread_id, actor.id, event.client_id)
             if sent is not None:
@@ -445,7 +447,7 @@ class Verbs:
                 f"server: inline media is {size} bytes; the cap is {self._max_inline} — upload it and send a url"
             )
 
-    async def _check(self, scope: str, actor: Identity, event: Event) -> None:
+    async def _check(self, scope: str, actor: Identity, event: Event, floor: int) -> None:
         if isinstance(event, Message | Edit | Step):
             self._inline(event.output if isinstance(event, Step) else event.content)
         if isinstance(event, Custom) and len(json.dumps(event.payload).encode()) > CUSTOM_LIMIT:
@@ -454,7 +456,7 @@ class Verbs:
             raise InputError(f"server: message metadata is at most {METADATA_LIMIT} bytes")
         if isinstance(event, Edit | Retract):
             verb = "edit" if isinstance(event, Edit) else "retract"
-            target = await self._storage.get_event(scope, event.thread_id, event.target)
+            target = await self._storage.get_event(scope, event.thread_id, event.target, floor)
             if target is None:
                 raise NotFoundError(f"server: event {event.target!r} was not found")
             if target.author.id != actor.id:
