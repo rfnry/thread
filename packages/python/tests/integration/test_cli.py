@@ -95,7 +95,12 @@ async def test_a_schema_name_that_needs_quoting_works_through_every_command(
     assert await run("check", "--schema", name) == 0
     assert await run("upgrade", "--schema", name) == 0
     assert capsys.readouterr().out.endswith(f"schema {name}: nothing to do\n")
-    await PostgresStorage(await schemas.pool(name)).check()
+    assert await run("set", "--search", "--schema", name, "--yes") == 0
+    assert await run("check", "--schema", name) == 0
+    assert capsys.readouterr().out.endswith(f"schema {name} fits rfnry-thread: version {NOW}\n")
+    storage = PostgresStorage(await schemas.pool(name))
+    await storage.check()
+    assert await storage.list_threads("acme", None, query="pump") == []
 
 
 async def test_upgrade_asks_before_it_runs_and_sql_runs_nothing(
@@ -298,9 +303,9 @@ async def test_set_search_installs_pg_trgm_only_when_it_is_absent(
     assert install not in capsys.readouterr().out
     held = migrations.search_state
 
-    async def absent(conn: Any) -> tuple[bool | None, bool]:
+    async def absent(conn: Any) -> tuple[bool | None, str | None]:
         made, _ = await held(conn)
-        return made, False
+        return made, None
 
     monkeypatch.setattr(migrations, "search_state", absent)
     assert await run("set", "--search", "--schema", name, "--sql") == 0

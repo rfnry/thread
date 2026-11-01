@@ -289,8 +289,10 @@ searches every thread of the scope.
 Matching is by substring, so it reads any language, CJK included, and does no stemming: "refund"
 finds "refunded", and "refunded" does not find "refund". Case folds as the database's locale folds
 it, and the trigram index reads a script whose characters that locale counts as letters, as a UTF-8
-locale counts CJK. A query needs a word and is at most 1000 characters; without search set up it
-raises `ConfigurationError` naming the command that sets it up.
+locale counts CJK. A word given twice counts once. A word of one or two characters cannot use the
+index, so a query made only of such words reads every text it may match. A query needs a word and is
+at most 1000 characters; without search set up it raises `ConfigurationError` naming the command
+that sets it up.
 
 ### Sending and streaming
 
@@ -868,18 +870,20 @@ rfnry-thread set --search --schema thread       # lists the steps, asks, runs th
 rfnry-thread set --no-search --schema thread    # drops what search made
 ```
 
-`set --search` installs Postgres' `pg_trgm` extension into `public` when the database lacks it — the
-one step that needs a role allowed to create extensions, and the command says so when yours is not —
-then makes `thread_texts`: the current text of every message and the string values of every
-thread's metadata, filled from the log and the threads, kept current by triggers on `thread_events`
-and `thread_threads` in each write's own transaction, and indexed by trigrams. Appends and new
-threads wait until the fill is done — about a minute for a million messages on a laptop, half of it
-the index, which builds faster with more `maintenance_work_mem` for the role that runs the command —
-so it asks before it runs unless `--yes`. Once on, the triggers add a fraction of a millisecond to
-an append, and a search over a million messages answers in tens of milliseconds. `--no-search`
-drops the table, its triggers and the index, and keeps the extension. `check()` names a search half
-set up — a trigger dropped by hand, say — and `set --search` makes it whole again. An app role needs
-`SELECT`, `INSERT`, `UPDATE` and `DELETE` on `thread_texts` too.
+`set --search` installs Postgres' `pg_trgm` extension into `public` when the database lacks it, and
+uses it where it is when it has it — creating it is the one step that needs a role allowed to create
+extensions, and the command says so when yours is not. It then makes `thread_texts`: the current
+text of every message and the string values of every thread's metadata, filled from the log and the
+threads, kept current by triggers on `thread_events` and `thread_threads` in each write's own
+transaction, indexed by trigrams, and given the owner and grants `thread_events` has, so an app role
+that writes the log writes it too. Appends and new threads wait until it is done, while reads go on
+— about a minute for a million messages on a laptop, half of it the index, which builds faster with
+more `maintenance_work_mem` for the role that runs the command — so it asks before it runs unless
+`--yes`. Once on, the triggers add a fraction of a millisecond to an append, and a search over a
+million messages answers in tens of milliseconds. `--no-search` holds both tables for a moment to
+drop the table, its triggers and the index, and keeps the extension. `check()` names a search half
+set up — a trigger dropped or disabled by hand, or a schema renamed since — and `set --search` makes
+it whole again.
 
 Tables made by `initialize()` in rfnry-thread 0.1.1 or earlier are adopted where they are:
 `rfnry-thread upgrade --schema <their schema>` records them as version 1, adds whatever an older

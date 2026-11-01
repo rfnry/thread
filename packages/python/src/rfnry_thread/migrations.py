@@ -133,17 +133,22 @@ _LACKING = (
 
 
 _SEARCH_STATE = (
-    "SELECT EXISTS (SELECT 1 FROM pg_extension WHERE extname = 'pg_trgm') AS trigram, "
+    "SELECT (SELECT quote_ident(n.nspname) FROM pg_extension e JOIN pg_namespace n "
+    "ON n.oid = e.extnamespace WHERE e.extname = 'pg_trgm') AS trigram, "
     "ARRAY[to_regprocedure(quote_ident(current_schema()) || '.thread_text(jsonb)') IS NOT NULL, "
     "to_regprocedure(quote_ident(current_schema()) || '.thread_strings(jsonb)') IS NOT NULL, "
     "to_regprocedure(quote_ident(current_schema()) || '.thread_texts_follow()') IS NOT NULL, "
     "to_regprocedure(quote_ident(current_schema()) || '.thread_texts_name()') IS NOT NULL, "
     "to_regclass(quote_ident(current_schema()) || '.thread_texts') IS NOT NULL, "
     "to_regclass(quote_ident(current_schema()) || '.ix_thread_texts_trgm') IS NOT NULL, "
-    "EXISTS (SELECT 1 FROM pg_trigger WHERE tgname = 'thread_texts_follow' "
-    "AND tgrelid = to_regclass(quote_ident(current_schema()) || '.thread_events')), "
-    "EXISTS (SELECT 1 FROM pg_trigger WHERE tgname = 'thread_texts_name' "
-    "AND tgrelid = to_regclass(quote_ident(current_schema()) || '.thread_threads'))] AS made"
+    "EXISTS (SELECT 1 FROM pg_trigger t JOIN pg_proc p ON p.oid = t.tgfoid "
+    "WHERE t.tgname = 'thread_texts_follow' AND t.tgenabled <> 'D' "
+    "AND t.tgrelid = to_regclass(quote_ident(current_schema()) || '.thread_events') "
+    "AND p.proconfig = ARRAY['search_path=' || quote_ident(current_schema())]), "
+    "EXISTS (SELECT 1 FROM pg_trigger t JOIN pg_proc p ON p.oid = t.tgfoid "
+    "WHERE t.tgname = 'thread_texts_name' AND t.tgenabled <> 'D' "
+    "AND t.tgrelid = to_regclass(quote_ident(current_schema()) || '.thread_threads') "
+    "AND p.proconfig = ARRAY['search_path=' || quote_ident(current_schema())])] AS made"
 )
 
 
@@ -154,6 +159,32 @@ SEARCH_ON = (
 
 
 SEARCH_OFF = "no search: thread_texts, its triggers and index dropped"
+
+
+_GRANTS = (
+    "SELECT CASE WHEN a.grantee = 0 THEN 'PUBLIC' ELSE quote_ident(pg_get_userbyid(a.grantee)) "
+    "END AS grantee, string_agg(a.privilege_type, ', ' ORDER BY a.privilege_type) AS privileges "
+    "FROM pg_class c CROSS JOIN LATERAL aclexplode(c.relacl) a "
+    "WHERE c.oid = to_regclass(quote_ident(current_schema()) || '.thread_events') "
+    "AND a.grantee <> c.relowner AND a.privilege_type IN ('SELECT', 'INSERT', 'UPDATE', 'DELETE') "
+    "GROUP BY 1 ORDER BY 1"
+)
+
+
+_OWNER = (
+    "SELECT quote_ident(pg_get_userbyid(relowner)) FROM pg_class "
+    "WHERE oid = to_regclass(quote_ident(current_schema()) || '.thread_events') "
+    "AND pg_get_userbyid(relowner) <> current_user"
+)
+
+
+_SEALED = "LOCK TABLE thread_threads, thread_events IN ACCESS EXCLUSIVE MODE"
+
+
+_HELD = (
+    "LOCK TABLE thread_threads IN EXCLUSIVE MODE",
+    "LOCK TABLE thread_events IN SHARE ROW EXCLUSIVE MODE",
+)
 
 
 _UNSEARCHED = (
@@ -167,7 +198,7 @@ _UNSEARCHED = (
 )
 
 
-def _searched(schema: str) -> list[str]:
+def _searched(schema: str, trigram: str) -> list[str]:
     return [
         "CREATE FUNCTION thread_text(body jsonb) RETURNS text LANGUAGE sql IMMUTABLE PARALLEL SAFE "
         "BEGIN ATOMIC SELECT coalesce(string_agg(p.part->>'text', E'\\n' ORDER BY p.n), '') "
@@ -229,15 +260,15 @@ def _searched(schema: str) -> list[str]:
             AND r.body->>'target' = m.id)""",
         "ALTER TABLE thread_texts ADD FOREIGN KEY (scope, thread_id) "
         "REFERENCES thread_threads (scope, id) ON DELETE CASCADE",
-        "CREATE INDEX ix_thread_texts_trgm ON thread_texts USING gin (text public.gin_trgm_ops)",
+        f"CREATE INDEX ix_thread_texts_trgm ON thread_texts USING gin (text {trigram}.gin_trgm_ops)",
         "ANALYZE thread_texts",
     ]
 
 
-async def search_state(conn: Any) -> tuple[bool | None, bool]:
+async def search_state(conn: Any) -> tuple[bool | None, str | None]:
     row = await conn.fetchrow(_SEARCH_STATE)
     made = list(row["made"])
-    return (True if all(made) else False if not any(made) else None), bool(row["trigram"])
+    return (True if all(made) else False if not any(made) else None), row["trigram"]
 
 
 def _names(path: str, role: str, schema: str | None) -> list[str]:
@@ -455,14 +486,20 @@ async def plan_search(conn: Any, *, on: bool) -> Plan:
     if made is on:
         return Plan([], [])
     if not on:
-        return Plan([SEARCH_OFF], list(_UNSEARCHED))
+        return Plan([SEARCH_OFF], [_SEALED, *_UNSEARCHED])
     target = await conn.fetchval("SELECT quote_ident(current_schema())")
+    owner = await conn.fetchval(_OWNER)
     return Plan(
         [*([] if trigram else ["extension pg_trgm in public"]), SEARCH_ON],
         [
             *([] if trigram else ["CREATE EXTENSION IF NOT EXISTS pg_trgm SCHEMA public"]),
-            *(_UNSEARCHED if made is None else ()),
-            *_searched(target),
+            *([_SEALED, *_UNSEARCHED] if made is None else _HELD),
+            *_searched(target, trigram or "public"),
+            *[
+                f"GRANT {r['privileges']} ON thread_texts TO {r['grantee']}"
+                for r in await conn.fetch(_GRANTS)
+            ],
+            *([] if owner is None else [f"ALTER TABLE thread_texts OWNER TO {owner}"]),
         ],
     )
 

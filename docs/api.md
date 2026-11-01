@@ -290,8 +290,8 @@ Raises `InputError` when the scope is empty, `NotFoundError` when the scope hold
 async def delete_scope(self, scope: str) -> int: ...
 ```
 
-Removes every thread, member and event of the scope and returns how many rows it removed. Raises
-`InputError` when the scope is empty.
+Removes every thread, member and event of the scope, with search its `thread_texts`, and returns
+how many rows it removed. Raises `InputError` when the scope is empty.
 
 ### `Server.verify_absent`
 
@@ -1510,12 +1510,13 @@ this version, holds tables `initialize()` made in 0.1.1 or earlier, or is one wh
 the pool's role cannot use, or holds a search half set up. With search set up by
 `rfnry-thread set --search`, triggers keep `thread_texts` — each message's current text, and each
 thread's metadata strings under `seq` 0 — in step with every append and every change of metadata,
-and `query` and `search` read its trigram index, each planned for its own words; without it they
-raise `ConfigurationError` naming the command. An event is stored and announced with `NOTIFY` in one
-transaction, on two channels named for the connection's current schema, so deployments in different
-schemas of one database do not hear each other and replicas sharing a schema do; `listen` holds one
-connection from the pool, taking another with jittered backoff when it drops. Raises `StorageError`
-when the database fails, and from `publish`, when a notification is over 7900 bytes.
+and `query` and `search` read its trigram index in the pool's schema, each planned for its own words
+and read with its messages in one snapshot; without it they raise `ConfigurationError` naming the
+command. An event is stored and announced with `NOTIFY` in one transaction, on two channels named
+for the connection's current schema, so deployments in different schemas of one database do not hear
+each other and replicas sharing a schema do; `listen` holds one connection from the pool, taking
+another with jittered backoff when it drops. Raises `StorageError` when the database fails, and from
+`publish`, when a notification is over 7900 bytes.
 
 ## Errors
 

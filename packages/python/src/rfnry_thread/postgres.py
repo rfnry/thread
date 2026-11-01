@@ -3,7 +3,7 @@ import contextlib
 import hashlib
 import json
 import random
-from collections.abc import AsyncIterator, Sequence
+from collections.abc import AsyncIterator, Callable, Sequence
 from contextlib import asynccontextmanager
 from typing import Any
 
@@ -69,7 +69,12 @@ def _count(status: str) -> int:
 
 
 def _terms(query: str) -> list[str]:
-    words = query.split()
+    if "\x00" in query:
+        raise InputError("postgres: a query cannot hold a NUL character")
+    seen: dict[str, str] = {}
+    for word in query.split():
+        seen.setdefault(word.lower(), word)
+    words = list(seen.values())
     if not words:
         raise InputError("postgres: a query needs at least one word")
     return [
@@ -83,13 +88,17 @@ def _holds(column: str, first: int, count: int) -> str:
 
 
 _UNSEARCHED = ("42P01", "42883")
-_TEXTS = "SELECT to_regclass('thread_texts') IS NOT NULL"
+_TEXTS = (
+    "SELECT quote_ident(current_schema()) || '.thread_texts' AS name, "
+    "to_regclass(quote_ident(current_schema()) || '.thread_texts') IS NOT NULL AS held"
+)
 
 
 class PostgresStorage:
     def __init__(self, pool: Any) -> None:
         self._pool = pool
         self._names: tuple[str, str] | None = None
+        self._texts: str | None = None
 
     async def _channels(self) -> tuple[str, str]:
         if self._names is None:
@@ -227,11 +236,12 @@ class PostgresStorage:
                 first = len(args) + 1
                 args.extend(terms)
                 hit = (
-                    "SELECT x.seq FROM thread_texts x WHERE x.scope = t.scope "
+                    f"SELECT x.seq FROM {await self._held(conn)} x WHERE x.scope = t.scope "
                     f"AND x.thread_id = t.id AND {_holds('x.text', first, len(terms))}"
                 )
-                rows = await self._searched(
+                rows, found = await self._searched(
                     conn,
+                    scope,
                     f"WITH picked AS MATERIALIZED (SELECT t.id FROM thread_threads t {member}"
                     f"WHERE {' AND '.join(where)} AND EXISTS ({hit} "
                     f"AND (x.seq = 0 OR x.seq >= {floor})) {ordered}) "
@@ -240,11 +250,9 @@ class PostgresStorage:
                     "ORDER BY x.seq DESC LIMIT 1) h ON true "
                     f"WHERE t.scope = $1 AND t.id IN (SELECT id FROM picked) {ordered}",
                     args,
-                )
-                found = await self._current(
-                    conn,
-                    scope,
-                    [(row["id"], int(row["hit"])) for row in rows if row["hit"] is not None],
+                    lambda listed: [
+                        (row["id"], int(row["hit"])) for row in listed if row["hit"] is not None
+                    ],
                 )
                 threads = [
                     _listed(row).model_copy(update={"match": found.get((row["id"], row["hit"]))})
@@ -278,16 +286,34 @@ class PostgresStorage:
             for t in threads
         ]
 
-    async def _searched(self, conn: Any, sql: str, args: Sequence[Any]) -> list[Any]:
+    async def _held(self, conn: Any) -> str:
+        if self._texts is None:
+            row = await conn.fetchrow(_TEXTS)
+            if row["name"] is None:
+                raise StorageError("postgres: no schema on the search_path exists")
+            self._texts = str(row["name"])
+        return self._texts
+
+    async def _searched(
+        self,
+        conn: Any,
+        scope: str,
+        sql: str,
+        args: Sequence[Any],
+        hits: Callable[[list[Any]], list[tuple[str, int]]],
+    ) -> tuple[list[Any], dict[tuple[str, int], Message]]:
         try:
-            async with conn.transaction():
+            async with conn.transaction(isolation="repeatable_read", readonly=True):
                 await conn.execute("SET LOCAL plan_cache_mode = force_custom_plan")
-                return list(await conn.fetch(sql, *args))
+                rows = list(await conn.fetch(sql, *args))
+                return rows, await self._current(conn, scope, hits(rows))
         except Exception as exc:
             if getattr(exc, "sqlstate", None) not in _UNSEARCHED:
                 raise
             schema = await conn.fetchval("SELECT current_schema()")
             made, _ = await migrations.search_state(conn)
+            if made:
+                raise
             state = "half set up" if made is None else "not set up"
             raise ConfigurationError(
                 f"postgres: search is {state} in {schema} — "
@@ -340,13 +366,14 @@ class PostgresStorage:
         size = len(args)
         where.append(_holds("x.text", size + 1, len(terms)))
         async with self._guard("search"), self._pool.acquire() as conn:
-            rows = await self._searched(
+            _, found = await self._searched(
                 conn,
-                f"SELECT x.seq FROM thread_texts x WHERE {' AND '.join(where)} "
+                scope,
+                f"SELECT x.seq FROM {await self._held(conn)} x WHERE {' AND '.join(where)} "
                 f"ORDER BY x.seq DESC LIMIT ${size}",
                 [*args, *terms],
+                lambda rows: [(thread_id, int(row["seq"])) for row in rows],
             )
-            found = await self._current(conn, scope, [(thread_id, int(r["seq"])) for r in rows])
         return [found[key] for key in sorted(found)]
 
     async def update_thread(
@@ -613,9 +640,9 @@ class PostgresStorage:
     async def delete_scope(self, scope: str) -> int:
         async with self._guard("delete_scope"), self._pool.acquire() as conn, conn.transaction():
             removed = 0
-            texts = ("thread_texts",) if await conn.fetchval(_TEXTS) else ()
+            texts = await conn.fetchrow(_TEXTS)
             for table in (
-                *texts,
+                *([texts["name"]] if texts["held"] else []),
                 "thread_marks",
                 "thread_events",
                 "thread_members",
@@ -628,7 +655,7 @@ class PostgresStorage:
 
     async def verify_absent(self, scope: str) -> bool:
         async with self._guard("verify_absent"), self._pool.acquire() as conn:
-            texts = ("thread_texts",) if await conn.fetchval(_TEXTS) else ()
+            texts = await conn.fetchrow(_TEXTS)
             counts = [
                 await conn.fetchval(f"SELECT count(*) FROM {table} WHERE scope = $1", scope)
                 for table in (
@@ -636,7 +663,7 @@ class PostgresStorage:
                     "thread_members",
                     "thread_events",
                     "thread_marks",
-                    *texts,
+                    *([texts["name"]] if texts["held"] else []),
                 )
             ]
         return all(count == 0 for count in counts)
