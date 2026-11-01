@@ -536,12 +536,18 @@ class Client:
         limit: int = 50,
         order: Order = "created",
         preview: bool = False,
+        metadata: dict[str, Any] | None = None,
+        query: str | None = None,
     ) -> list[Thread]:
         payload: dict[str, Any] = {"before": before, "limit": limit}
         if order != "created":
             payload["order"] = order
         if preview:
             payload["preview"] = True
+        if metadata is not None:
+            payload["metadata"] = metadata
+        if query is not None:
+            payload["query"] = query
         reply = await self._request("thread.list", payload)
         return [Thread.model_validate(t) for t in reply["threads"]]
 
@@ -643,6 +649,15 @@ class Client:
             payload["after"] = after
         reply = await self._request("thread.history", payload)
         return [EVENTS.validate_python(e) for e in reply["events"]]
+
+    async def search(
+        self, thread_id: str, query: str, before: int | None = None, limit: int = 50
+    ) -> list[Message]:
+        reply = await self._request(
+            "thread.search",
+            {"thread_id": thread_id, "query": query, "before": before, "limit": limit},
+        )
+        return [Message.model_validate(m) for m in reply["events"]]
 
     async def get_event(self, thread_id: str, event_id: str) -> Event:
         reply = await self._request("event.get", {"thread_id": thread_id, "event_id": event_id})

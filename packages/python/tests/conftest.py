@@ -1,5 +1,6 @@
 import asyncio
 from collections.abc import AsyncIterator
+from functools import partial
 from typing import Any
 
 import asyncpg
@@ -21,6 +22,7 @@ async def create() -> None:
     try:
         async with pool.acquire() as conn:
             await migrations.apply(conn, migrations.plan_create)
+            await migrations.apply(conn, partial(migrations.plan_search, on=True))
     finally:
         await pool.close()
 

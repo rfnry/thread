@@ -79,6 +79,7 @@ CLIENT = {
     "mark",
     "marked",
     "history",
+    "search",
     "get_event",
     "present",
     "add_member",

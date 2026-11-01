@@ -543,11 +543,15 @@ export class Client {
       limit?: number
       order?: 'created' | 'activity'
       preview?: boolean
+      metadata?: Record<string, unknown>
+      query?: string
     } = {}
   ): Promise<Thread[]> {
     const payload: Payload = { before: options.before ?? null, limit: options.limit ?? 50 }
     if (options.order !== undefined && options.order !== 'created') payload.order = options.order
     if (options.preview) payload.preview = true
+    if (options.metadata !== undefined) payload.metadata = options.metadata
+    if (options.query !== undefined) payload.query = options.query
     const reply = await this.request('thread.list', payload)
     return reply.threads as Thread[]
   }
@@ -660,6 +664,20 @@ export class Client {
     if (options.after !== undefined) payload.after = options.after
     const reply = await this.request('thread.history', payload)
     return reply.events as Event[]
+  }
+
+  async search(
+    threadId: string,
+    query: string,
+    options: { before?: number; limit?: number } = {}
+  ): Promise<Message[]> {
+    const reply = await this.request('thread.search', {
+      thread_id: threadId,
+      query,
+      before: options.before ?? null,
+      limit: options.limit ?? 50,
+    })
+    return reply.events as Message[]
   }
 
   async getEvent(threadId: string, eventId: string): Promise<Event> {

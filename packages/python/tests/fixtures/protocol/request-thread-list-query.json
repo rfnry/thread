@@ -1,0 +1,14 @@
+{
+  "id": "7",
+  "method": "thread.list",
+  "payload": {
+    "before": null,
+    "limit": 20,
+    "metadata": {
+      "topic": "billing"
+    },
+    "order": "activity",
+    "query": "double charge"
+  },
+  "type": "request"
+}

@@ -22,6 +22,10 @@ async def test_nothing_of_a_is_reachable_from_b(storage: Storage) -> None:
         "MARKER-A" not in str(e) for e in (await b.call("thread.history", thread_id="t1"))["events"]
     )
     assert all("MARKER-A" not in str(t) for t in (await b.call("thread.list"))["threads"])
+    assert (await b.call("thread.list", query="marker"))["threads"] == []
+    assert (await b.call("thread.search", thread_id="t1", query="marker"))["events"] == []
+    assert await server.list_threads("tenant-b", query="marker") == []
+    assert [t["id"] for t in (await a.call("thread.list", query="marker"))["threads"]] == ["t1"]
 
 
 async def test_erasure_is_provable_and_falsifiable(storage: Storage) -> None:
@@ -30,7 +34,7 @@ async def test_erasure_is_provable_and_falsifiable(storage: Storage) -> None:
     await server.add_member("tenant-a", "t1", ANA)
     await server.create_thread("tenant-b", thread_id="t1")
     assert not await server.verify_absent("tenant-a")
-    assert await server.delete_scope("tenant-a") == 4
+    assert await server.delete_scope("tenant-a") == 5
     assert await server.verify_absent("tenant-a")
     assert not await server.verify_absent("tenant-b")
     await storage.create_thread(

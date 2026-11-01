@@ -53,6 +53,7 @@ async def test_a_non_member_is_forbidden_everywhere_and_a_missing_thread_is_not_
         ("thread.update", {"metadata": {}}),
         ("thread.delete", {}),
         ("thread.create", {}),
+        ("thread.search", {"query": "x"}),
     ]
     for method, extra in calls:
         with pytest.raises(
@@ -278,9 +279,10 @@ async def test_listing_skips_what_authorize_refuses_and_reads_on_to_fill_the_pag
         metadata: dict[str, Any] | None = None,
         order: Any = "created",
         preview: bool = False,
+        query: str | None = None,
     ) -> list[Thread]:
         reads.append(before.id if isinstance(before, Thread) else before)
-        return await original(scope, member_id, before, limit, metadata, order, preview)
+        return await original(scope, member_id, before, limit, metadata, order, preview, query)
 
     storage.list_threads = counted  # type: ignore[method-assign]
 
@@ -556,13 +558,17 @@ async def test_the_servers_list_never_asks_authorize_while_a_members_list_does(
     assert asked == [("ana", "read"), ("ana", "read")]
 
 
-async def test_a_members_own_list_is_unchanged_and_takes_no_metadata(server: Server) -> None:
-    await server.create_thread("acme", thread_id="elsewhere", metadata={"elevated": True})
+async def test_a_members_metadata_filter_reads_only_its_own_threads(server: Server) -> None:
+    await server.create_thread("acme", thread_id="elsewhere", metadata={"topic": "billing"})
     ana = await room(server)
-    assert [t["id"] for t in (await ana.call("thread.list"))["threads"]] == ["t1"]
+    await ana.call("thread.create", thread_id="t2", metadata={"topic": "refunds"})
+    assert [t["id"] for t in (await ana.call("thread.list"))["threads"]] == ["t2", "t1"]
+    found = await ana.call("thread.list", metadata={"topic": "billing"})
+    assert [t["id"] for t in found["threads"]] == ["t1"]
     with pytest.raises(InputError, match="^server: invalid thread.list payload"):
-        await ana.call("thread.list", metadata={"elevated": True})
-    assert [t.id for t in await server.list_threads("acme")] == ["t1", "elsewhere"]
+        await ana.call("thread.list", metadata=["topic"])
+    listed = await server.list_threads("acme", metadata={"topic": "billing"})
+    assert [t.id for t in listed] == ["t1", "elsewhere"]
 
 
 @pytest.mark.parametrize("scope", ["", " "])

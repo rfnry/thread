@@ -1,7 +1,7 @@
 from collections.abc import Awaitable, Callable, Sequence
 from typing import Any, Protocol, runtime_checkable
 
-from rfnry_thread.models import Event, Member, Order, Thread
+from rfnry_thread.models import Event, Member, Message, Order, Thread
 
 OnEvent = Callable[[str, str, int], Awaitable[None]]
 OnSignal = Callable[[str, str, dict[str, Any]], Awaitable[None]]
@@ -29,7 +29,18 @@ class Storage(Protocol):
         metadata: dict[str, Any] | None = None,
         order: Order = "created",
         preview: bool = False,
+        query: str | None = None,
     ) -> list[Thread]: ...
+
+    async def search(
+        self,
+        scope: str,
+        thread_id: str,
+        query: str,
+        before: int | None = None,
+        limit: int = 50,
+        floor: int = 0,
+    ) -> list[Message]: ...
 
     async def update_thread(
         self, scope: str, thread_id: str, metadata: dict[str, Any]

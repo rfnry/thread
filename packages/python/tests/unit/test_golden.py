@@ -155,6 +155,58 @@ def golden() -> dict[str, Frame]:
                 ]
             },
         ),
+        "request-thread-list-query": Request(
+            id="7",
+            method="thread.list",
+            payload={
+                "before": None,
+                "limit": 20,
+                "order": "activity",
+                "metadata": {"topic": "billing"},
+                "query": "double charge",
+            },
+        ),
+        "response-thread-list-match": Response(
+            id="7",
+            payload={
+                "threads": [
+                    thread.model_copy(
+                        update={
+                            "last_seq": 9,
+                            "last_message_at": AT,
+                            "match": Message(
+                                id="e10",
+                                seq=10,
+                                author=ANA,
+                                client_id="c10",
+                                content=[Text(text="I was charged twice, a double charge")],
+                                **base,
+                            ),
+                        }
+                    ).model_dump(mode="json")
+                ]
+            },
+        ),
+        "request-thread-search": Request(
+            id="10",
+            method="thread.search",
+            payload={"thread_id": "t1", "query": "double charge", "before": 12, "limit": 20},
+        ),
+        "response-thread-search": Response(
+            id="10",
+            payload={
+                "events": [
+                    Message(
+                        id="e10",
+                        seq=10,
+                        author=ANA,
+                        client_id="c10",
+                        content=[Text(text="I was charged twice, a double charge")],
+                        **base,
+                    ).model_dump(mode="json")
+                ]
+            },
+        ),
         "request-thread-join": Request(
             id="1", method="thread.join", payload={"thread_id": "t1", "since": 0}
         ),

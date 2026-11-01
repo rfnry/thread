@@ -127,12 +127,40 @@ class _ReadRecent(BaseModel):
     )
 
 
+class _Search(BaseModel):
+    query: str = Field(description="The words to find; a message matches when it holds every one")
+    limit: int = Field(
+        default=20, ge=1, le=200, description="How many of the latest matches to read"
+    )
+    before: int | None = Field(
+        default=None,
+        ge=1,
+        description="Search what came before this seq, the lowest seq you have found, to go further back",
+    )
+
+
 class _Working(BaseModel):
     label: str = Field(description="What you are doing right now, as a person would read it")
 
 
 class _Idle(BaseModel):
     pass
+
+
+def _parts(events: Iterable[Message | Step]) -> list[Part]:
+    found: list[Part] = []
+    for event in events:
+        header: dict[str, Any] = {
+            "seq": event.seq,
+            "kind": event.kind,
+            "in_reply_to": event.in_reply_to,
+            "author": event.author.model_dump(mode="json", include={"role", "id", "name"}),
+        }
+        if isinstance(event, Step):
+            header |= {"name": event.name, "input": event.input, "is_error": event.is_error}
+        found.append(Text(text=json.dumps(header)))
+        found.extend(event.output if isinstance(event, Step) else event.content)
+    return found
 
 
 async def _changed_since(client: Client, thread_id: str, seq: int) -> list[Event]:
@@ -153,6 +181,7 @@ class ThreadTools(Tools):
         thread_id: str,
         triggered_by: IdentityLike | None = None,
         in_reply_to: str | None = None,
+        search: bool = False,
     ) -> None:
         if not thread_id:
             raise ConfigurationError("tools: a thread_id is required")
@@ -172,20 +201,17 @@ class ThreadTools(Tools):
             )
             if before is not None and events:
                 events += await _changed_since(client, thread_id, int(before) - 1)
-            view = [e for e in resolve(events) if isinstance(e, Message | Step)][-limit:]
-            found: list[Part] = []
-            for event in view:
-                header: dict[str, Any] = {
-                    "seq": event.seq,
-                    "kind": event.kind,
-                    "in_reply_to": event.in_reply_to,
-                    "author": event.author.model_dump(mode="json", include={"role", "id", "name"}),
-                }
-                if isinstance(event, Step):
-                    header |= {"name": event.name, "input": event.input, "is_error": event.is_error}
-                found.append(Text(text=json.dumps(header)))
-                found.extend(event.output if isinstance(event, Step) else event.content)
-            return found
+            return _parts([e for e in resolve(events) if isinstance(e, Message | Step)][-limit:])
+
+        async def find(args: dict[str, Any]) -> Result:
+            return _parts(
+                await client.search(
+                    thread_id,
+                    args["query"],
+                    before=args.get("before"),
+                    limit=int(args.get("limit", 20)),
+                )
+            )
 
         async def working(args: dict[str, Any]) -> Result:
             await client.working(thread_id, label=args["label"])
@@ -195,6 +221,14 @@ class ThreadTools(Tools):
             await client.idle(thread_id)
             return "ok"
 
+        searching = Tool(
+            "search",
+            "Find the messages of the conversation that hold every word of the query, in any "
+            "case and anywhere in a word: the latest matches, as they read now, each under its "
+            "seq; with before, the matches before that seq",
+            body=find,
+            args=_Search,
+        )
         super().__init__(
             [
                 Tool("send", "Post a message to the conversation", body=send, args=_Send),
@@ -205,6 +239,7 @@ class ThreadTools(Tools):
                     body=read_recent,
                     args=_ReadRecent,
                 ),
+                *([searching] if search else []),
                 Tool(
                     "working",
                     "Show the people in the conversation what you are doing",

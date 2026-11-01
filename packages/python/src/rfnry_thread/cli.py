@@ -9,6 +9,8 @@ from urllib.parse import urlsplit
 from rfnry_thread.errors import ThreadException
 
 _WARNING = "take a snapshot of the database and stop app instances running the old version first"
+_SEARCHING = "appends to every thread wait until thread_texts is filled from the log"
+_UNSEARCHING = "searches fail until set --search runs again"
 
 
 def _parser() -> argparse.ArgumentParser:
@@ -39,6 +41,15 @@ def _parser() -> argparse.ArgumentParser:
     )
     upgrade.add_argument("--sql", action="store_true", help="print the statements and run nothing")
     upgrade.add_argument("--yes", action="store_true", help="run without asking")
+    change = command("set", "change a setting of the schema")
+    change.add_argument(
+        "--search",
+        action=argparse.BooleanOptionalAction,
+        required=True,
+        help="search over message text and thread metadata, with pg_trgm; --no-search drops it",
+    )
+    change.add_argument("--sql", action="store_true", help="print the statements and run nothing")
+    change.add_argument("--yes", action="store_true", help="run without asking")
     return parser
 
 
@@ -54,10 +65,10 @@ def _quoted(name: str) -> str:
     return '"' + name.replace('"', '""') + '"'
 
 
-def _confirmed(args: argparse.Namespace) -> bool:
+def _confirmed(args: argparse.Namespace, warning: str = _WARNING) -> bool:
     if args.yes:
         return True
-    print(_WARNING)
+    print(warning)
     try:
         answer = input("run these steps? [y/N] ")
     except EOFError, KeyboardInterrupt:
@@ -100,6 +111,8 @@ async def _run(args: argparse.Namespace) -> int:
             before = [f"CREATE SCHEMA IF NOT EXISTS {_quoted(args.schema)}"]
         if args.command == "create":
             planner = partial(migrations.plan_create, fresh=args.fresh)
+        elif args.command == "set":
+            planner = partial(migrations.plan_search, on=args.search)
         else:
             planner = partial(migrations.plan_upgrade, source=args.source)
         shown = await migrations.apply(conn, planner, run=False, before=before)
@@ -118,11 +131,17 @@ async def _run(args: argparse.Namespace) -> int:
             return 0
         for step in shown.steps:
             print(f"  {step}")
-        if args.command != "create" and not _confirmed(args):
+        warning = _WARNING
+        if args.command == "set":
+            warning = _SEARCHING if args.search else _UNSEARCHING
+        if args.command != "create" and not _confirmed(args, warning):
             print("nothing was run")
             return 0
         await migrations.apply(conn, planner, expected=shown, before=before)
-        print(f"schema {args.schema} is at version {migrations.LATEST}")
+        if args.command == "set":
+            print(f"schema {args.schema}: search is {'on' if args.search else 'off'}")
+        else:
+            print(f"schema {args.schema} is at version {migrations.LATEST}")
         return 0
     finally:
         await conn.close()

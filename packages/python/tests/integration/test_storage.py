@@ -260,7 +260,11 @@ async def test_the_same_thread_id_in_two_scopes_is_two_threads(storage: Storage)
         AT,
         0,
     )
-    assert await storage.delete_scope("tenant-a") == 3
+    assert await storage.list_threads("tenant-b", "ana", query="marker") == []
+    assert await storage.list_threads("tenant-b", None, query="marker") == []
+    assert await storage.search("tenant-b", "t1", "marker") == []
+    assert [m.id for m in await storage.search("tenant-a", "t1", "marker")] == ["id-c1-MARKER-A"]
+    assert await storage.delete_scope("tenant-a") == 5
     assert await storage.verify_absent("tenant-a")
     assert not await storage.verify_absent("tenant-b")
 
@@ -372,7 +376,7 @@ async def test_a_mark_is_read_for_one_membership_and_is_none_without_one(
 async def test_a_deleted_scope_takes_its_marks_along(storage: Storage) -> None:
     await room(storage, "t1", "acme", ANA)
     await storage.mark("acme", "t1", "ana", 0)
-    assert await storage.delete_scope("acme") == 3
+    assert await storage.delete_scope("acme") == 4
     assert await storage.verify_absent("acme")
 
 

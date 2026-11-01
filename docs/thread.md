@@ -260,6 +260,38 @@ and says `truncated=True` too, and the client follows the thread from `joined.se
 A participant that follows never needs this: a thread it is added to arrives on its own
 ([Following and catching up](#following-and-catching-up)).
 
+### Search
+
+When the database has search set up (`rfnry-thread set --search`,
+[Preparing the database](#preparing-the-database)), a member finds conversations across its whole
+list, not only the pages it has fetched, as a search bar does:
+
+```python
+found = await ana.list_threads(query="charged twice", order="activity", limit=20)
+found[0].match
+billing = await ana.list_threads(metadata={"topic": "billing"}, query="invoice")
+messages = await ana.search(thread.id, "charged twice", limit=20)
+older = await ana.search(thread.id, "charged", before=messages[0].seq)
+```
+
+A query is words. A thread is found when every word appears — in any case, anywhere in a word — in
+the string values of its metadata, a title or a topic, or in one message the member may read. A
+message is matched as it reads now: an edit replaces what it said, a retracted message is never
+found, and in a `since_added` thread nothing from before the member's add is. Each thread found
+carries `match`, the latest message that matched, with its edits — `None` when only the metadata
+did. The rest is the listing's own: `order="activity"` puts the latest conversations first, and
+`before=`, `limit`, `preview` and an `authorize` that skips threads work as they do without a query.
+`metadata=` keeps the threads whose metadata holds those keys and values, with a query or without.
+`search` finds the messages of one thread: the latest `limit` that hold every word, below `before=`
+(a `seq`) when given, in `seq` order, as they read now. `server.list_threads(scope, query=...)`
+searches every thread of the scope.
+
+Matching is by substring, so it reads any language, CJK included, and does no stemming: "refund"
+finds "refunded", and "refunded" does not find "refund". Case folds as the database's locale folds
+it, and the trigram index reads a script whose characters that locale counts as letters, as a UTF-8
+locale counts CJK. A query needs a word and is at most 1000 characters; without search set up it
+raises `ConfigurationError` naming the command that sets it up.
+
 ### Sending and streaming
 
 Every verb that writes returns the stored event:
@@ -635,16 +667,16 @@ const message = await client.send(threadId, 'Can you check my invoice?')
 ```
 
 The verbs are the Python ones in camelCase — `createThread`, `getThread`, `listThreads`,
-`updateThread`, `deleteThread`, `join`, `leave`, `follow`, `mark`, `marked`, `history`, `getEvent`,
-`present`, `addMember`, `removeMember`, `listMembers`, `send`, `stream`, `step`, `edit`, `retract`,
-`read`, `custom`, `working`, `idle`, `cancel`, `close` — with the same outbox, reconnect and resume.
-Events and signals are the wire shapes, fields as they travel (`thread_id`, `in_reply_to`); options
-are camelCase, and `send` and `stream` take `metadata` beside `inReplyTo`. A browser cannot set
-headers on a WebSocket, so the upgrade carries your session cookie — check its `Origin` — or a token
-in `protocols`, the subprotocol list; an endpoint that reads a token there accepts with one of the
-offered subprotocols (`await websocket.accept(subprotocol="thread")`). Listeners get what arrives
-after they subscribe, so subscribe before joining. A UI usually wants its own messages too, echoed
-from other tabs, hence `includeOwn`. Streaming:
+`updateThread`, `deleteThread`, `join`, `leave`, `follow`, `mark`, `marked`, `history`, `search`,
+`getEvent`, `present`, `addMember`, `removeMember`, `listMembers`, `send`, `stream`, `step`, `edit`,
+`retract`, `read`, `custom`, `working`, `idle`, `cancel`, `close` — with the same outbox, reconnect
+and resume. Events and signals are the wire shapes, fields as they travel (`thread_id`,
+`in_reply_to`); options are camelCase, and `send` and `stream` take `metadata` beside `inReplyTo`. A
+browser cannot set headers on a WebSocket, so the upgrade carries your session cookie — check its
+`Origin` — or a token in `protocols`, the subprotocol list; an endpoint that reads a token there
+accepts with one of the offered subprotocols (`await websocket.accept(subprotocol="thread")`).
+Listeners get what arrives after they subscribe, so subscribe before joining. A UI usually wants its
+own messages too, echoed from other tabs, hence `includeOwn`. Streaming:
 
 ```ts
 const reply = client.stream(threadId, { inReplyTo: message.id })
@@ -690,6 +722,18 @@ the 200 before that `seq` instead, with every edit and retraction made since, so
 back as far as it chooses. The thread is fixed when the tools are built and a model cannot name
 another.
 
+With search set up, `search=True` adds a fifth tool:
+
+```python
+searching = ThreadTools(helper, thread_id=thread.id, search=True)
+found = await searching.dispatch("search", {"query": "charged twice"})
+```
+
+`search(query, limit, before)` finds the messages of the thread that hold every word of the query,
+as they read now — the latest `limit` of them, 20 unless the model asks for more, in the parts
+`read_recent` returns; with `before`, the ones before that `seq`. It is yours to add, because only
+you know the database has search set up.
+
 `Tool` and `Tools` are the family's tool block, copied byte for byte from rfnry-engine: a tool is a
 name, a description, an input schema and a body; a `Tools` combines with `+` and narrows with
 `only` and `without`:
@@ -715,7 +759,8 @@ for again on every turn. The answer is selection, not fitting:
 
 - **The thread keeps everything**, and the model reads back into it when it chooses:
   `read_recent` returns each message and step under its `seq`, and `before=` that `seq` reads the
-  page before it, as far back as the thread goes.
+  page before it, as far back as the thread goes; with search set up, `search` finds a message by
+  its words.
 - **Each run is given a short recent window** as its history. rfnry-engine's
   [Long conversations](https://github.com/rfnry/engine/blob/main/docs/engine.md#long-conversations)
   is how a run starts partway into a conversation.
@@ -766,9 +811,9 @@ engine; both recipes are your code.
 
 Postgres is the storage: `PostgresStorage(pool)` takes an asyncpg-compatible pool you built
 (`rfnry-thread[postgres]` installs asyncpg), on a database where thread has a schema of its own for
-its tables — `thread_threads`, `thread_members`, `thread_events`, `thread_marks`, and
-`thread_migrations`, the record of the migrations run — so one database can also hold rfnry-engine's
-and rfnry-memory's, each in a schema of its own.
+its tables — `thread_threads`, `thread_members`, `thread_events`, `thread_marks`,
+`thread_migrations`, the record of the migrations run, and with search `thread_texts` — so one
+database can also hold rfnry-engine's and rfnry-memory's, each in a schema of its own.
 
 ### Preparing the database
 
@@ -815,6 +860,26 @@ rfnry-thread check --schema thread            # exits 0 when the schema fits thi
 
 Take a snapshot and stop the app instances running the old version first: `upgrade` reminds you,
 asks before it runs unless `--yes`, and runs every pending step in one transaction under a lock.
+
+Search is a setting of the schema, off until you set it:
+
+```sh
+rfnry-thread set --search --schema thread       # lists the steps, asks, runs them
+rfnry-thread set --no-search --schema thread    # drops what search made
+```
+
+`set --search` installs Postgres' `pg_trgm` extension into `public` when the database lacks it — the
+one step that needs a role allowed to create extensions, and the command says so when yours is not —
+then makes `thread_texts`: the current text of every message and the string values of every
+thread's metadata, filled from the log and the threads, kept current by triggers on `thread_events`
+and `thread_threads` in each write's own transaction, and indexed by trigrams. Appends and new
+threads wait until the fill is done — about a minute for a million messages on a laptop, half of it
+the index, which builds faster with more `maintenance_work_mem` for the role that runs the command —
+so it asks before it runs unless `--yes`. Once on, the triggers add a fraction of a millisecond to
+an append, and a search over a million messages answers in tens of milliseconds. `--no-search`
+drops the table, its triggers and the index, and keeps the extension. `check()` names a search half
+set up — a trigger dropped by hand, say — and `set --search` makes it whole again. An app role needs
+`SELECT`, `INSERT`, `UPDATE` and `DELETE` on `thread_texts` too.
 
 Tables made by `initialize()` in rfnry-thread 0.1.1 or earlier are adopted where they are:
 `rfnry-thread upgrade --schema <their schema>` records them as version 1, adds whatever an older
@@ -880,15 +945,16 @@ from a connection that has not joined the thread, and on a client, an upgrade re
 or 403, a connection closed with 1008 before its hello is answered, or a `headers` or `protocols`
 function that raised `ForbiddenError`. `InputError` for a request the library refuses: an empty
 scope, an empty thread id given to `create_thread`, an identity whose fields do not fit, a `system`
-identity added as a member, a `limit` outside 1 to 500 on `list_threads` or `history`, a join given
-both `since` and `resume`, a `working` label over 1000 characters, a media part with both or neither
-of `data` and `url`, inline media over the cap, a custom payload over 64 KiB, message metadata over
-8 KiB or not a JSON object, a message or edit that redaction leaves empty, an edit of anything but a
-message, a retraction of anything but a message or a step, an unknown event or signal kind, a
-malformed frame. `ConfigurationError` for a setup that cannot work: a limit that is not positive, a
-`system` identity given to `serve` or `server.connect`, a `redact` that returns something other than
-parts, a `ThreadTools` with an empty `thread_id`, two tools with the same name in one `Tools`, a
-`Tool` with no body when it is called. `StorageError` for the database. `TransportError` for the
+identity added as a member, a `limit` outside 1 to 500 on `list_threads`, `history` or `search`, a
+join given both `since` and `resume`, a `working` label over 1000 characters, a media part with both
+or neither of `data` and `url`, inline media over the cap, a custom payload over 64 KiB, message
+metadata over 8 KiB or not a JSON object, a query with no word or over 1000 characters, a message or
+edit that redaction leaves empty, an edit of anything but a message, a retraction of anything but a
+message or a step, an unknown event or signal kind, a malformed frame. `ConfigurationError` for a
+setup that cannot work: a limit that is not positive, a `system` identity given to `serve` or
+`server.connect`, a `redact` that returns something other than parts, a `ThreadTools` with an empty
+`thread_id`, two tools with the same name in one `Tools`, a `Tool` with no body when it is called, a
+query on a database without search set up. `StorageError` for the database. `TransportError` for the
 socket: a write not acknowledged within its deadline, a client used after `close()`, a connection
 that cannot be opened. On a client, an error the server raised is raised again with its class and
 message.

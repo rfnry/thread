@@ -8,8 +8,14 @@ from contextlib import asynccontextmanager
 from typing import Any
 
 from rfnry_thread import migrations
-from rfnry_thread.errors import ConfigurationError, NotFoundError, StorageError, ThreadException
-from rfnry_thread.models import EVENT_KINDS, EVENTS, Event, Member, Order, Thread
+from rfnry_thread.errors import (
+    ConfigurationError,
+    InputError,
+    NotFoundError,
+    StorageError,
+    ThreadException,
+)
+from rfnry_thread.models import EVENT_KINDS, EVENTS, Edit, Event, Member, Message, Order, Thread
 from rfnry_thread.resolve import last_message
 from rfnry_thread.storage import PREVIEW_DEPTH, UNREAD_CAP, OnEvent, OnResume, OnSignal, Stop
 
@@ -60,6 +66,24 @@ def _visible(floor: int) -> str:
 
 def _count(status: str) -> int:
     return int(status.rsplit(" ", 1)[-1])
+
+
+def _terms(query: str) -> list[str]:
+    words = query.split()
+    if not words:
+        raise InputError("postgres: a query needs at least one word")
+    return [
+        "%" + word.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_") + "%"
+        for word in words
+    ]
+
+
+def _holds(column: str, first: int, count: int) -> str:
+    return " AND ".join(f"{column} ILIKE ${n}" for n in range(first, first + count))
+
+
+_UNSEARCHED = ("42P01", "42883")
+_TEXTS = "SELECT to_regclass('thread_texts') IS NOT NULL"
 
 
 class PostgresStorage:
@@ -132,25 +156,33 @@ class PostgresStorage:
         metadata: dict[str, Any] | None = None,
         order: Order = "created",
         preview: bool = False,
+        query: str | None = None,
     ) -> list[Thread]:
+        terms = None if query is None else _terms(query)
         args: list[Any] = [scope]
+        member = ""
         join = ""
+        floor = "0"
         marks = "NULL::bigint AS marked, NULL::bigint AS unread, 0::bigint AS floor"
         if member_id is not None:
             args.append(member_id)
             who = f"${len(args)}"
             args.append(UNREAD_CAP)
-            join = (
+            member = (
                 "JOIN thread_members m ON m.scope = t.scope AND m.thread_id = t.id "
-                f"AND m.identity_id = {who} LEFT JOIN thread_marks k ON k.scope = m.scope "
+                f"AND m.identity_id = {who} "
+            )
+            join = (
+                f"{member}LEFT JOIN thread_marks k ON k.scope = m.scope "
                 "AND k.thread_id = m.thread_id AND k.identity_id = m.identity_id "
             )
+            floor = "CASE WHEN t.history = 'since_added' THEN m.added_seq ELSE 0 END"
             marks = (
                 "k.seq AS marked, CASE WHEN k.seq IS NULL THEN NULL ELSE (SELECT count(*) FROM "
                 "(SELECT 1 FROM thread_events e WHERE e.scope = t.scope AND e.thread_id = t.id "
                 f"AND e.seq > k.seq AND e.kind = 'message' AND e.author_id <> {who} "
                 f"LIMIT ${len(args)}) u) END AS unread, "
-                "CASE WHEN t.history = 'since_added' THEN m.added_seq ELSE 0 END AS floor"
+                f"{floor} AS floor"
             )
         where = ["t.scope = $1"]
         if metadata:
@@ -178,14 +210,46 @@ class PostgresStorage:
                 args.extend([latest or before.created_at, before.id])
                 where.append(f"({key}, t.id) < (${len(args) - 1}::timestamptz, ${len(args)}::text)")
             args.append(max(limit, 0))
-            rows = await conn.fetch(
-                f"SELECT t.scope, t.id, t.metadata, t.created_at, t.history, t.last_seq, "
-                f"t.last_message_at, "
-                f"{marks} FROM thread_threads t {join}WHERE {' AND '.join(where)} "
-                f"ORDER BY {key} DESC, t.id DESC LIMIT ${len(args)}",
-                *args,
+            size = f"${len(args)}"
+            columns = (
+                "t.scope, t.id, t.metadata, t.created_at, t.history, t.last_seq, "
+                f"t.last_message_at, {marks}"
             )
-            threads = [_listed(row) for row in rows]
+            ordered = f"ORDER BY {key} DESC, t.id DESC LIMIT {size}"
+            if terms is None:
+                rows = await conn.fetch(
+                    f"SELECT {columns} FROM thread_threads t {join}"
+                    f"WHERE {' AND '.join(where)} {ordered}",
+                    *args,
+                )
+                threads = [_listed(row) for row in rows]
+            else:
+                first = len(args) + 1
+                args.extend(terms)
+                hit = (
+                    "SELECT x.seq FROM thread_texts x WHERE x.scope = t.scope "
+                    f"AND x.thread_id = t.id AND {_holds('x.text', first, len(terms))}"
+                )
+                rows = await self._searched(
+                    conn,
+                    f"WITH picked AS MATERIALIZED (SELECT t.id FROM thread_threads t {member}"
+                    f"WHERE {' AND '.join(where)} AND EXISTS ({hit} "
+                    f"AND (x.seq = 0 OR x.seq >= {floor})) {ordered}) "
+                    f"SELECT {columns}, h.seq AS hit FROM thread_threads t {join}"
+                    f"LEFT JOIN LATERAL ({hit} AND x.seq >= GREATEST({floor}, 1) "
+                    "ORDER BY x.seq DESC LIMIT 1) h ON true "
+                    f"WHERE t.scope = $1 AND t.id IN (SELECT id FROM picked) {ordered}",
+                    args,
+                )
+                found = await self._current(
+                    conn,
+                    scope,
+                    [(row["id"], int(row["hit"])) for row in rows if row["hit"] is not None],
+                )
+                threads = [
+                    _listed(row).model_copy(update={"match": found.get((row["id"], row["hit"]))})
+                    for row in rows
+                ]
             if preview and threads:
                 floors = [int(row["floor"]) for row in rows]
                 threads = await self._previewed(conn, scope, threads, floors)
@@ -213,6 +277,77 @@ class PostgresStorage:
             t.model_copy(update={"last_message": last_message(found.get(t.id, []))})
             for t in threads
         ]
+
+    async def _searched(self, conn: Any, sql: str, args: Sequence[Any]) -> list[Any]:
+        try:
+            async with conn.transaction():
+                await conn.execute("SET LOCAL plan_cache_mode = force_custom_plan")
+                return list(await conn.fetch(sql, *args))
+        except Exception as exc:
+            if getattr(exc, "sqlstate", None) not in _UNSEARCHED:
+                raise
+            schema = await conn.fetchval("SELECT current_schema()")
+            made, _ = await migrations.search_state(conn)
+            state = "half set up" if made is None else "not set up"
+            raise ConfigurationError(
+                f"postgres: search is {state} in {schema} — "
+                f"run rfnry-thread set --search --schema {schema}"
+            ) from exc
+
+    async def _current(
+        self, conn: Any, scope: str, hits: list[tuple[str, int]]
+    ) -> dict[tuple[str, int], Message]:
+        if not hits:
+            return {}
+        rows = await conn.fetch(
+            "SELECT e.thread_id, e.seq, e.body, (SELECT d.body FROM thread_events d "
+            "WHERE d.scope = e.scope AND d.thread_id = e.thread_id AND d.kind = 'edit' "
+            "AND d.body->>'target' = e.id ORDER BY d.seq DESC LIMIT 1) AS edit "
+            "FROM unnest($2::text[], $3::bigint[]) AS p(id, seq) JOIN thread_events e "
+            "ON e.scope = $1 AND e.thread_id = p.id AND e.seq = p.seq",
+            scope,
+            [thread_id for thread_id, _ in hits],
+            [seq for _, seq in hits],
+        )
+        found: dict[tuple[str, int], Message] = {}
+        for row in rows:
+            message = _event(row["body"])
+            edit = None if row["edit"] is None else _event(row["edit"])
+            if isinstance(edit, Edit):
+                message = message.model_copy(update={"content": edit.content})
+            if isinstance(message, Message):
+                found[(row["thread_id"], int(row["seq"]))] = message
+        return found
+
+    async def search(
+        self,
+        scope: str,
+        thread_id: str,
+        query: str,
+        before: int | None = None,
+        limit: int = 50,
+        floor: int = 0,
+    ) -> list[Message]:
+        terms = _terms(query)
+        if limit < 1:
+            return []
+        args: list[Any] = [scope, thread_id, floor]
+        where = ["x.scope = $1", "x.thread_id = $2", "x.seq >= GREATEST($3::bigint, 1)"]
+        if before is not None:
+            args.append(before)
+            where.append(f"x.seq < ${len(args)}")
+        args.append(limit)
+        size = len(args)
+        where.append(_holds("x.text", size + 1, len(terms)))
+        async with self._guard("search"), self._pool.acquire() as conn:
+            rows = await self._searched(
+                conn,
+                f"SELECT x.seq FROM thread_texts x WHERE {' AND '.join(where)} "
+                f"ORDER BY x.seq DESC LIMIT ${size}",
+                [*args, *terms],
+            )
+            found = await self._current(conn, scope, [(thread_id, int(r["seq"])) for r in rows])
+        return [found[key] for key in sorted(found)]
 
     async def update_thread(
         self, scope: str, thread_id: str, metadata: dict[str, Any]
@@ -478,7 +613,14 @@ class PostgresStorage:
     async def delete_scope(self, scope: str) -> int:
         async with self._guard("delete_scope"), self._pool.acquire() as conn, conn.transaction():
             removed = 0
-            for table in ("thread_marks", "thread_events", "thread_members", "thread_threads"):
+            texts = ("thread_texts",) if await conn.fetchval(_TEXTS) else ()
+            for table in (
+                *texts,
+                "thread_marks",
+                "thread_events",
+                "thread_members",
+                "thread_threads",
+            ):
                 removed += _count(
                     await conn.execute(f"DELETE FROM {table} WHERE scope = $1", scope)
                 )
@@ -486,9 +628,16 @@ class PostgresStorage:
 
     async def verify_absent(self, scope: str) -> bool:
         async with self._guard("verify_absent"), self._pool.acquire() as conn:
+            texts = ("thread_texts",) if await conn.fetchval(_TEXTS) else ()
             counts = [
                 await conn.fetchval(f"SELECT count(*) FROM {table} WHERE scope = $1", scope)
-                for table in ("thread_threads", "thread_members", "thread_events", "thread_marks")
+                for table in (
+                    "thread_threads",
+                    "thread_members",
+                    "thread_events",
+                    "thread_marks",
+                    *texts,
+                )
             ]
         return all(count == 0 for count in counts)
 

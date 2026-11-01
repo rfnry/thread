@@ -249,3 +249,86 @@ async def test_create_with_fresh_starts_empty_beside_tables_initialize_made(
     assert f"--from {old} to keep their threads" in capsys.readouterr().err
     assert await run("create", "--schema", name, "--fresh") == 0
     assert await run("check", "--schema", name) == 0
+
+
+async def test_set_search_asks_then_turns_search_on_and_off(
+    schemas: Schemas, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    name = schemas.name()
+    assert await run("create", "--schema", name) == 0
+    pool = await schemas.pool(name)
+    capsys.readouterr()
+    assert await run("set", "--search", "--schema", name, "--sql") == 0
+    out = capsys.readouterr().out
+    assert out.startswith(f"SET search_path TO {quoted(name)};\nBEGIN;\n{migrations.LOCK};\n")
+    assert "CREATE TABLE thread_texts" in out and out.endswith("COMMIT;\n")
+    monkeypatch.setattr("builtins.input", lambda prompt: "n")
+    assert await run("set", "--search", "--schema", name) == 0
+    out = capsys.readouterr().out
+    assert f"  {migrations.SEARCH_ON}\n" in out and "appends to every thread wait" in out
+    assert out.endswith("nothing was run\n")
+    async with pool.acquire() as conn:
+        assert await conn.fetchval("SELECT to_regclass('thread_texts')") is None
+    assert await run("set", "--search", "--schema", name, "--yes") == 0
+    assert capsys.readouterr().out.endswith(
+        f"  {migrations.SEARCH_ON}\nschema {name}: search is on\n"
+    )
+    assert await run("set", "--search", "--schema", name) == 0
+    assert capsys.readouterr().out == f"schema {name}: nothing to do\n"
+    assert await run("check", "--schema", name) == 0
+    assert await PostgresStorage(pool).list_threads("acme", None, query="anything") == []
+    monkeypatch.setattr("builtins.input", lambda prompt: "y")
+    assert await run("set", "--no-search", "--schema", name) == 0
+    assert capsys.readouterr().out.endswith(
+        f"  {migrations.SEARCH_OFF}\nsearches fail until set --search runs again\n"
+        f"schema {name}: search is off\n"
+    )
+    assert await run("set", "--no-search", "--schema", name) == 0
+    assert capsys.readouterr().out == f"schema {name}: nothing to do\n"
+
+
+async def test_set_search_installs_pg_trgm_only_when_it_is_absent(
+    schemas: Schemas, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    name = schemas.name()
+    assert await run("create", "--schema", name) == 0
+    capsys.readouterr()
+    install = "CREATE EXTENSION IF NOT EXISTS pg_trgm SCHEMA public;\n"
+    assert await run("set", "--search", "--schema", name, "--sql") == 0
+    assert install not in capsys.readouterr().out
+    held = migrations.search_state
+
+    async def absent(conn: Any) -> tuple[bool | None, bool]:
+        made, _ = await held(conn)
+        return made, False
+
+    monkeypatch.setattr(migrations, "search_state", absent)
+    assert await run("set", "--search", "--schema", name, "--sql") == 0
+    assert f"{migrations.LOCK};\n{install}" in capsys.readouterr().out
+    monkeypatch.setattr("builtins.input", lambda prompt: "n")
+    assert await run("set", "--search", "--schema", name) == 0
+    out = capsys.readouterr().out
+    assert out.startswith(f"  extension pg_trgm in public\n  {migrations.SEARCH_ON}\n")
+
+
+async def test_set_needs_the_schema_at_this_version(
+    schemas: Schemas, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    name = schemas.name()
+    assert await run("create", "--schema", name) == 0
+    capsys.readouterr()
+    noting(monkeypatch)
+    assert await run("set", "--search", "--schema", name, "--yes") == 1
+    assert capsys.readouterr().err == (
+        f"postgres: {name} is at version {NOW}, this rfnry-thread needs {NEXT} — "
+        f"run rfnry-thread upgrade --schema {name}\n"
+    )
+    empty = await schemas.create()
+    assert await run("set", "--search", "--schema", empty, "--yes") == 1
+    assert capsys.readouterr().err == (
+        f"postgres: no thread schema in {empty} — run rfnry-thread create --schema {empty}\n"
+    )
+    with pytest.raises(SystemExit) as exited:
+        cli.main(["set", "--schema", name])
+    assert exited.value.code == 2
+    assert "--search" in capsys.readouterr().err

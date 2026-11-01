@@ -1,0 +1,31 @@
+{
+  "id": "10",
+  "payload": {
+    "events": [
+      {
+        "author": {
+          "id": "ana",
+          "metadata": {},
+          "name": "Ana",
+          "role": "user"
+        },
+        "client_id": "c10",
+        "content": [
+          {
+            "text": "I was charged twice, a double charge",
+            "type": "text"
+          }
+        ],
+        "created_at": "2026-01-01T12:00:00Z",
+        "id": "e10",
+        "in_reply_to": null,
+        "kind": "message",
+        "metadata": {},
+        "seq": 10,
+        "thread_id": "t1",
+        "triggered_by": null
+      }
+    ]
+  },
+  "type": "response"
+}

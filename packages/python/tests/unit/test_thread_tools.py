@@ -122,3 +122,31 @@ async def test_read_recent_pages_back_from_a_seq_with_what_was_edited_since(
         await tools.dispatch("read_recent", {"before": 0})
     [definition] = [d for d in tools.definitions() if d["name"] == "read_recent"]
     assert "before" in definition["input_schema"]["properties"]
+
+
+async def test_with_search_a_model_finds_the_messages_of_its_thread(server: Server) -> None:
+    ana, helper = await pair(server)
+    assert "search" not in ThreadTools(helper, thread_id="t1")
+    image = Image(media_type="image/png", url="https://files.example.com/pump.png")
+    sent = [await ana.send("t1", f"pump {n}") for n in range(3)]
+    await ana.send("t1", "valve")
+    await ana.edit("t1", sent[2].id, [Text(text="pump 2, fixed"), image])
+    tools = ThreadTools(helper, thread_id="t1", search=True)
+    assert tools.names == ["send", "read_recent", "search", "working", "idle"]
+
+    async def found(**args: object) -> list[tuple[int, str]]:
+        parts = await tools.dispatch("search", dict(args))
+        assert isinstance(parts, list)
+        headers = [json.loads(p.text) for p in parts if isinstance(p, Text) and p.text[0] == "{"]
+        assert all(h["kind"] == "message" and h["author"]["id"] == "ana" for h in headers)
+        texts = [p.text for p in parts if isinstance(p, Text) and p.text[0] != "{"]
+        return [(h["seq"], t) for h, t in zip(headers, texts, strict=True)]
+
+    latest = await found(query="PUMP", limit=2)
+    assert latest == [(sent[1].seq, "pump 1"), (sent[2].seq, "pump 2, fixed")]
+    assert await found(query="pump", before=latest[0][0]) == [(sent[0].seq, "pump 0")]
+    assert image in await tools.dispatch("search", {"query": "fixed"})
+    with pytest.raises(InputError, match="^tools: invalid arguments for search"):
+        await tools.dispatch("search", {"query": "pump", "limit": 0})
+    [definition] = [d for d in tools.definitions() if d["name"] == "search"]
+    assert set(definition["input_schema"]["properties"]) == {"query", "limit", "before"}

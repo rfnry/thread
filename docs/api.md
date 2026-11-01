@@ -210,13 +210,17 @@ async def list_threads(
     limit: int = 50,
     order: Order = "created",
     preview: bool = False,
+    query: str | None = None,
 ) -> list[Thread]: ...
 ```
 
 Returns every thread of the scope, member or not, newest first, up to `limit`; `metadata` is
-containment compared as JSON, and `before` a thread id for the next page. Raises `InputError` when
-the scope is empty or `limit` is not between 1 and 500, and `NotFoundError` when `before` names no
-thread, one deleted since it was listed: list again from the top.
+containment compared as JSON, and `before` a thread id for the next page. `query` keeps the threads
+whose metadata strings or messages hold every word of it, each with its `match`, as
+`Client.list_threads` reads them. Raises `InputError` when the scope is empty, `limit` is not
+between 1 and 500 or `query` has no word or is over 1000 characters, `NotFoundError` when `before`
+names no thread, one deleted since it was listed: list again from the top, and `ConfigurationError`
+for a `query` when the database has no search set up.
 
 `order` is an `Order`, which is `Literal["created", "activity"]`: `"activity"` lists by the latest
 message. `preview=True` fills `last_message`; a system listing has no `marked` or `unread`.
@@ -388,17 +392,23 @@ async def list_threads(
     limit: int = 50,
     order: Order = "created",
     preview: bool = False,
+    metadata: dict[str, Any] | None = None,
+    query: str | None = None,
 ) -> list[Thread]: ...
 ```
 
-Returns the threads the caller is a member of, newest first, up to `limit`; `before` is a thread
-id, for the next page. `order` is an `Order`, which is `Literal["created", "activity"]`:
-`"activity"` orders them by their latest message. Each carries
-`last_seq`, `last_message_at`, `marked` and `unread`, and with `preview=True` its `last_message`.
-With an `authorize`, the threads it refuses to `read` are skipped and a page still holds up to
-`limit`. Raises `InputError` when `limit` is not between 1 and 500 or `order` is neither, and
-`NotFoundError` when `before` names no thread, one deleted since it was listed: list again from the
-top.
+Returns the threads the caller is a member of, newest first, up to `limit`; `before` is a thread id,
+for the next page. `order` is an `Order`, which is `Literal["created", "activity"]`: `"activity"`
+orders them by their latest message. Each carries `last_seq`, `last_message_at`, `marked` and
+`unread`, and with `preview=True` its `last_message`. With an `authorize`, the threads it refuses to
+`read` are skipped and a page still holds up to `limit`. `metadata` keeps the threads whose metadata
+contains it, compared as JSON. `query` keeps the threads where every word of it —
+whitespace-separated, any case, anywhere in a word — is in their metadata's string values or in one
+message the caller may read, as it reads now; each carries `match`, the latest such message with its
+edits, `None` when only the metadata held them. Raises `InputError` when `limit` is not between 1
+and 500, `order` is neither, or `query` has no word or is over 1000 characters, `NotFoundError` when
+`before` names no thread, one deleted since it was listed: list again from the top, and
+`ConfigurationError` for a `query` when the database has no search set up.
 
 ### `Client.update_thread`
 
@@ -519,6 +529,22 @@ kinds. With `after` (a `seq`), the first `limit` events after it, in `seq` order
 `InputError` when `after` is negative or `limit` is not between 1 and 500, `NotFoundError` when the
 scope holds no such thread, `ForbiddenError` when the caller is not a member or `authorize` refuses
 `read`.
+
+### `Client.search`
+
+```python
+async def search(
+    self, thread_id: str, query: str, before: int | None = None, limit: int = 50
+) -> list[Message]: ...
+```
+
+Returns the latest `limit` messages of the thread below `before` (a `seq`) where every word of
+`query` — whitespace-separated, any case, anywhere in a word — appears, in `seq` order, as they read
+now: with their edits, and never one retracted. In a `since_added` thread it reads from the caller's
+add. Raises `InputError` when `query` has no word or is over 1000 characters or `limit` is not
+between 1 and 500, `NotFoundError` when the scope holds no such thread, `ForbiddenError` when the
+caller is not a member or `authorize` refuses `read`, and `ConfigurationError` when the database has
+no search set up.
 
 ### `Client.get_event`
 
@@ -1161,6 +1187,7 @@ class Thread(BaseModel):
     marked: int | None = None
     unread: int | None = None
     last_message: Message | None = None
+    match: Message | None = None
 ```
 
 A conversation: `id` yours or the server's, `scope` its tenant, `metadata` yours, `history` who
@@ -1168,7 +1195,9 @@ reads what came before an add (`"all"`, or `"since_added"`: each member from its
 thread also carries `last_seq` and `last_message_at` (when its latest message was written); listed
 for a member, `marked` (the member's private read position, `None` without one) and `unread`
 (messages by others after it, at most 100); with `preview`, `last_message` (the latest message not
-retracted among its last five, with its edits). Fields without a value are left out on the wire.
+retracted among its last five, with its edits); listed for a `query`, `match` (the latest message
+that matched, with its edits, `None` when only the metadata did). Fields without a value are left
+out on the wire.
 
 ### `Member`
 
@@ -1219,6 +1248,7 @@ class ThreadTools(Tools):
         thread_id: str,
         triggered_by: IdentityLike | None = None,
         in_reply_to: str | None = None,
+        search: bool = False,
     ) -> None: ...
 ```
 
@@ -1226,8 +1256,11 @@ A `Tools` pinned to one client, one thread and one cause: `send(text)` posts a m
 bound `in_reply_to` and `triggered_by`, `read_recent(limit, before)` returns the latest messages and
 steps, resolved, as parts, from the latest 200 messages, steps, edits and retractions, so many edits
 can leave fewer than `limit` — with `before` (a `seq`), from the 200 before it, with every edit and
-retraction made since — and `working(label)` and `idle()` show what the assistant is doing. Raises
-`ConfigurationError` when `thread_id` is empty, `InputError` when `triggered_by` does not fit.
+retraction made since — and `working(label)` and `idle()` show what the assistant is doing. With
+`search=True`, for a database with search set up, `search(query, limit, before)` returns the latest
+`limit` messages (20 by default) that hold every word of `query`, as `Client.search` finds them, in
+the parts `read_recent` returns. Raises `ConfigurationError` when `thread_id` is empty, `InputError`
+when `triggered_by` does not fit.
 
 ### `Tool`
 
@@ -1351,7 +1384,18 @@ class Storage(Protocol):
         metadata: dict[str, Any] | None = None,
         order: Order = "created",
         preview: bool = False,
+        query: str | None = None,
     ) -> list[Thread]: ...
+
+    async def search(
+        self,
+        scope: str,
+        thread_id: str,
+        query: str,
+        before: int | None = None,
+        limit: int = 50,
+        floor: int = 0,
+    ) -> list[Message]: ...
 
     async def update_thread(
         self, scope: str, thread_id: str, metadata: dict[str, Any]
@@ -1421,7 +1465,14 @@ of the same author and `client_id` comes back with `False`, and a new event gets
 newest first and `list_events` events in `seq` order, with `since` the first after it and without it
 the latest. `order` is an `Order`, which is `Literal["created", "activity"]`: `"activity"` lists by
 the latest message instead, a thread without messages by its creation; `preview=True` fills each
-thread's `last_message`. A page continues below `before`: a thread id, at that thread's place now,
+thread's `last_message`. `query` keeps the threads where every word of it — split on whitespace,
+matched in any case anywhere in a word — is in the string values of their metadata or in the current
+text of one of their messages at or above the member's floor (every message for a system listing,
+`member_id` `None`); a retracted message holds nothing, an edited one its latest edit; each thread
+found carries `match`, the latest such message with its latest edit, `None` when only the metadata
+held them. `search` returns the latest `limit` messages of one thread at or above `floor` and below
+`before` that hold every word, in `seq` order, each with its latest edit. Both raise `InputError`
+for a query with no word. A page continues below `before`: a thread id, at that thread's place now,
 or a `Thread` a page listed, at the place its own `created_at`, `last_message_at` and `id` give it,
 so paging holds when that thread is deleted or moves meanwhile. A member listing gives each thread's
 `last_seq` as it was when read, and `follow` enters a thread whose `history` is `"all"` at it unless
@@ -1430,15 +1481,15 @@ floor when `identity_id` is a member of it, `None` otherwise: the one read that 
 a connection. The floor is 0 in a thread whose `history` is `"all"`, and in a `"since_added"` one
 the thread's last `seq` plus one when the member was added (`add_member` records it); `list_events`
 and `get_event` given a `floor` leave out events below it and edits and retractions of them.
-`listen` takes an `OnEvent`, `on_event(scope, thread_id, seq)`, and an `OnSignal`, `on_signal(scope,
-thread_id, payload)`, called for what any server on the storage appends or publishes, and an
-`OnResume`, `on_resume()`, called once a dropped listener is back; it returns a `Stop`, `stop()`,
-that ends it, and all four are async functions returning `None`. Raises `NotFoundError`, from
-`add_member`, `append_event` and `list_threads` with a `before` id, when the scope holds no such
-thread, and `StorageError`, from `create_thread`, when the thread's scope is not `scope`. `mark`
-stores the identity's private read position in the thread, never lowering it unless `back` is true,
-and returns it with the count of `message` events by others after it, at most 100, and whether it
-moved (a first mark, or a different one); `get_mark` returns it, `None` without one;
+`listen` takes an `OnEvent`, `on_event(scope, thread_id, seq)`, and an `OnSignal`,
+`on_signal(scope, thread_id, payload)`, called for what any server on the storage appends or
+publishes, and an `OnResume`, `on_resume()`, called once a dropped listener is back; it returns a
+`Stop`, `stop()`, that ends it, and all four are async functions returning `None`. Raises
+`NotFoundError`, from `add_member`, `append_event` and `list_threads` with a `before` id, when the
+scope holds no such thread, and `StorageError`, from `create_thread`, when the thread's scope is not
+`scope`. `mark` stores the identity's private read position in the thread, never lowering it unless
+`back` is true, and returns it with the count of `message` events by others after it, at most 100,
+and whether it moved (a first mark, or a different one); `get_mark` returns it, `None` without one;
 `baseline_marks` stores each thread's last `seq` as the mark of every membership of `identity_id`
 that has none, and returns how many it stored. `mark` raises `NotFoundError` when the identity is
 not a member of the thread.
@@ -1456,11 +1507,15 @@ pool's `search_path`, which the `rfnry-thread` command creates and upgrades. `ch
 `ConfigurationError` naming the command to run when that schema holds no thread tables (naming
 tables `initialize()` made in another schema to move with `upgrade --from`), is behind or ahead of
 this version, holds tables `initialize()` made in 0.1.1 or earlier, or is one whose schema or tables
-the pool's role cannot use. An event is stored and announced with `NOTIFY` in one transaction, on
-two channels named for the connection's current schema, so deployments in different schemas of one
-database do not hear each other and replicas sharing a schema do; `listen` holds one connection from
-the pool, taking another with jittered backoff when it drops. Raises `StorageError` when the
-database fails, and from `publish`, when a notification is over 7900 bytes.
+the pool's role cannot use, or holds a search half set up. With search set up by
+`rfnry-thread set --search`, triggers keep `thread_texts` — each message's current text, and each
+thread's metadata strings under `seq` 0 — in step with every append and every change of metadata,
+and `query` and `search` read its trigram index, each planned for its own words; without it they
+raise `ConfigurationError` naming the command. An event is stored and announced with `NOTIFY` in one
+transaction, on two channels named for the connection's current schema, so deployments in different
+schemas of one database do not hear each other and replicas sharing a schema do; `listen` holds one
+connection from the pool, taking another with jittered backoff when it drops. Raises `StorageError`
+when the database fails, and from `publish`, when a notification is over 7900 bytes.
 
 ## Errors
 
@@ -1699,17 +1754,21 @@ async listThreads(
     limit?: number
     order?: 'created' | 'activity'
     preview?: boolean
+    metadata?: Record<string, unknown>
+    query?: string
   } = {}
 ): Promise<Thread[]>
 ```
 
 Returns the threads the caller is a member of, newest first, up to `limit` (50 when left out);
-`before` is a thread id, for the next page. `order: 'activity'` orders them by their latest
-message. Each carries `last_seq`, `last_message_at`, `marked` and `unread`, and with `preview: true`
-its `last_message`. With an `authorize`, the threads it refuses to `read` are skipped and a page
-still holds up to `limit`. Raises `InputError` when `limit` is not between 1 and 500 or `order` is
-neither, and `NotFoundError` when `before` names no thread, one deleted since it was listed: list
-again from the top.
+`before` is a thread id, for the next page. `order: 'activity'` orders them by their latest message.
+Each carries `last_seq`, `last_message_at`, `marked` and `unread`, and with `preview: true` its
+`last_message`. With an `authorize`, the threads it refuses to `read` are skipped and a page still
+holds up to `limit`. `metadata` and `query` find threads as the Python `list_threads` does, each
+found by a message carrying its `match`. Raises `InputError` when `limit` is not between 1 and 500,
+`order` is neither, or `query` has no word or is over 1000 characters, `NotFoundError` when `before`
+names no thread, one deleted since it was listed: list again from the top, and `ConfigurationError`
+for a `query` when the database has no search set up.
 
 ### `Client.updateThread`
 
@@ -1823,6 +1882,23 @@ order; `before` and `after` together are a range. In a `since_added` thread it r
 caller's add. Raises `InputError` when `after` is negative or `limit` is not between 1 and 500,
 `NotFoundError` when the scope holds no such thread, `ForbiddenError` when the caller is not a
 member or `authorize` refuses `read`.
+
+### `Client.search`
+
+```ts
+async search(
+  threadId: string,
+  query: string,
+  options: { before?: number; limit?: number } = {}
+): Promise<Message[]>
+```
+
+Returns the latest `limit` messages (50 when left out) of the thread below `before` (a `seq`) that
+hold every word of `query`, in `seq` order, as they read now, as the Python `search` does. Raises
+`InputError` when `query` has no word or is over 1000 characters or `limit` is not between 1 and
+500, `NotFoundError` when the scope holds no such thread, `ForbiddenError` when the caller is not a
+member or `authorize` refuses `read`, and `ConfigurationError` when the database has no search set
+up.
 
 ### `Client.getEvent`
 
@@ -2473,6 +2549,7 @@ type Thread = {
   marked?: number
   unread?: number
   last_message?: Message
+  match?: Message
 }
 ```
 
@@ -2481,7 +2558,9 @@ reads what came before an add (`'all'`, or `'since_added'`: each member from its
 thread also carries `last_seq` and `last_message_at` (when its latest message was written); listed
 for a member, `marked` (the member's private read position, omitted without one) and `unread`
 (messages by others after it, at most 100); with `preview`, `last_message` (the latest message not
-retracted among its last five, with its edits). Fields without a value are left out on the wire.
+retracted among its last five, with its edits); listed for a `query`, `match` (the latest message
+that matched, with its edits, omitted when only the metadata did). Fields without a value are left
+out on the wire.
 
 ### `Member`
 

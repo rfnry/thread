@@ -120,6 +120,9 @@ _OCCUPIED = (
 _MIGRATED = "SELECT to_regclass(quote_ident($1) || '.thread_migrations') IS NOT NULL"
 
 
+_TEXTS = "SELECT to_regclass(quote_ident(current_schema()) || '.thread_texts') IS NOT NULL"
+
+
 _LACKING = (
     "SELECT t.name AS table_name, p.name AS privilege "
     "FROM unnest($1::text[]) WITH ORDINALITY AS t(name, n) "
@@ -127,6 +130,114 @@ _LACKING = (
     "WHERE NOT has_table_privilege(quote_ident(current_schema()) || '.' || t.name, p.name) "
     "ORDER BY p.m, t.name"
 )
+
+
+_SEARCH_STATE = (
+    "SELECT EXISTS (SELECT 1 FROM pg_extension WHERE extname = 'pg_trgm') AS trigram, "
+    "ARRAY[to_regprocedure(quote_ident(current_schema()) || '.thread_text(jsonb)') IS NOT NULL, "
+    "to_regprocedure(quote_ident(current_schema()) || '.thread_strings(jsonb)') IS NOT NULL, "
+    "to_regprocedure(quote_ident(current_schema()) || '.thread_texts_follow()') IS NOT NULL, "
+    "to_regprocedure(quote_ident(current_schema()) || '.thread_texts_name()') IS NOT NULL, "
+    "to_regclass(quote_ident(current_schema()) || '.thread_texts') IS NOT NULL, "
+    "to_regclass(quote_ident(current_schema()) || '.ix_thread_texts_trgm') IS NOT NULL, "
+    "EXISTS (SELECT 1 FROM pg_trigger WHERE tgname = 'thread_texts_follow' "
+    "AND tgrelid = to_regclass(quote_ident(current_schema()) || '.thread_events')), "
+    "EXISTS (SELECT 1 FROM pg_trigger WHERE tgname = 'thread_texts_name' "
+    "AND tgrelid = to_regclass(quote_ident(current_schema()) || '.thread_threads'))] AS made"
+)
+
+
+SEARCH_ON = (
+    "search: thread_texts filled from the log and the threads' metadata, kept current by "
+    "triggers, with a trigram index"
+)
+
+
+SEARCH_OFF = "no search: thread_texts, its triggers and index dropped"
+
+
+_UNSEARCHED = (
+    "DROP TRIGGER IF EXISTS thread_texts_follow ON thread_events",
+    "DROP TRIGGER IF EXISTS thread_texts_name ON thread_threads",
+    "DROP TABLE IF EXISTS thread_texts",
+    "DROP FUNCTION IF EXISTS thread_texts_follow()",
+    "DROP FUNCTION IF EXISTS thread_texts_name()",
+    "DROP FUNCTION IF EXISTS thread_strings(jsonb)",
+    "DROP FUNCTION IF EXISTS thread_text(jsonb)",
+)
+
+
+def _searched(schema: str) -> list[str]:
+    return [
+        "CREATE FUNCTION thread_text(body jsonb) RETURNS text LANGUAGE sql IMMUTABLE PARALLEL SAFE "
+        "BEGIN ATOMIC SELECT coalesce(string_agg(p.part->>'text', E'\\n' ORDER BY p.n), '') "
+        "FROM jsonb_array_elements(CASE WHEN jsonb_typeof(body->'content') = 'array' "
+        "THEN body->'content' ELSE '[]'::jsonb END) WITH ORDINALITY AS p(part, n) "
+        "WHERE p.part->>'type' = 'text'; END",
+        "CREATE FUNCTION thread_strings(metadata jsonb) RETURNS text LANGUAGE sql IMMUTABLE "
+        "PARALLEL SAFE BEGIN ATOMIC SELECT coalesce(string_agg(v.value #>> '{}', E'\\n'), '') "
+        "FROM jsonb_path_query(metadata, 'strict $.** ? (@.type() == \"string\")') AS v(value); "
+        "END",
+        """CREATE TABLE thread_texts (
+        scope TEXT NOT NULL, thread_id TEXT NOT NULL, seq BIGINT NOT NULL, text TEXT NOT NULL,
+        PRIMARY KEY (scope, thread_id, seq))""",
+        f"""CREATE FUNCTION thread_texts_follow() RETURNS trigger LANGUAGE plpgsql
+        SET search_path = {schema} AS $follow$
+        BEGIN
+            IF NEW.kind = 'message' THEN
+                INSERT INTO thread_texts (scope, thread_id, seq, text)
+                VALUES (NEW.scope, NEW.thread_id, NEW.seq, thread_text(NEW.body));
+            ELSIF NEW.kind = 'edit' THEN
+                UPDATE thread_texts x SET text = thread_text(NEW.body) FROM thread_events e
+                WHERE e.scope = NEW.scope AND e.thread_id = NEW.thread_id
+                AND e.id = NEW.body->>'target' AND x.scope = e.scope
+                AND x.thread_id = e.thread_id AND x.seq = e.seq;
+            ELSE
+                DELETE FROM thread_texts x USING thread_events e
+                WHERE e.scope = NEW.scope AND e.thread_id = NEW.thread_id
+                AND e.id = NEW.body->>'target' AND x.scope = e.scope
+                AND x.thread_id = e.thread_id AND x.seq = e.seq;
+            END IF;
+            RETURN NULL;
+        END
+        $follow$""",
+        "CREATE TRIGGER thread_texts_follow AFTER INSERT ON thread_events FOR EACH ROW "
+        "WHEN (NEW.kind IN ('message', 'edit', 'retract')) EXECUTE FUNCTION thread_texts_follow()",
+        f"""CREATE FUNCTION thread_texts_name() RETURNS trigger LANGUAGE plpgsql
+        SET search_path = {schema} AS $name$
+        BEGIN
+            INSERT INTO thread_texts (scope, thread_id, seq, text)
+            VALUES (NEW.scope, NEW.id, 0, thread_strings(NEW.metadata))
+            ON CONFLICT (scope, thread_id, seq) DO UPDATE SET text = EXCLUDED.text;
+            RETURN NULL;
+        END
+        $name$""",
+        "CREATE TRIGGER thread_texts_name AFTER INSERT OR UPDATE OF metadata ON thread_threads "
+        "FOR EACH ROW EXECUTE FUNCTION thread_texts_name()",
+        "INSERT INTO thread_texts (scope, thread_id, seq, text) "
+        "SELECT scope, id, 0, thread_strings(metadata) FROM thread_threads",
+        """INSERT INTO thread_texts (scope, thread_id, seq, text)
+        SELECT m.scope, m.thread_id, m.seq, thread_text(coalesce(d.body, m.body))
+        FROM thread_events m LEFT JOIN (
+            SELECT DISTINCT ON (scope, thread_id, body->>'target')
+                scope, thread_id, body->>'target' AS target, body
+            FROM thread_events WHERE kind = 'edit'
+            ORDER BY scope, thread_id, body->>'target', seq DESC) d
+        ON d.scope = m.scope AND d.thread_id = m.thread_id AND d.target = m.id
+        WHERE m.kind = 'message' AND NOT EXISTS (SELECT 1 FROM thread_events r
+            WHERE r.scope = m.scope AND r.thread_id = m.thread_id AND r.kind = 'retract'
+            AND r.body->>'target' = m.id)""",
+        "ALTER TABLE thread_texts ADD FOREIGN KEY (scope, thread_id) "
+        "REFERENCES thread_threads (scope, id) ON DELETE CASCADE",
+        "CREATE INDEX ix_thread_texts_trgm ON thread_texts USING gin (text public.gin_trgm_ops)",
+        "ANALYZE thread_texts",
+    ]
+
+
+async def search_state(conn: Any) -> tuple[bool | None, bool]:
+    row = await conn.fetchrow(_SEARCH_STATE)
+    made = list(row["made"])
+    return (True if all(made) else False if not any(made) else None), bool(row["trigram"])
 
 
 def _names(path: str, role: str, schema: str | None) -> list[str]:
@@ -196,8 +307,10 @@ async def remedy(conn: Any, schema: str, path: Sequence[str] = ()) -> str:
 
 
 async def _lacking(conn: Any, role: str) -> list[str]:
+    texts = await conn.fetchval(_TEXTS)
+    tables = [*_INITIALIZED, *(["thread_texts"] if texts else [])]
     rows = [
-        *await conn.fetch(_LACKING, list(_INITIALIZED), list(_WRITES)),
+        *await conn.fetch(_LACKING, tables, list(_WRITES)),
         *await conn.fetch(_LACKING, ["thread_migrations"], ["SELECT"]),
     ]
     if not rows:
@@ -249,15 +362,26 @@ async def problems(conn: Any) -> list[str]:
     lacking = await _lacking(conn, role)
     if lacking:
         return lacking
+    behind = await _behind(conn, schema)
+    if behind is not None:
+        return [behind]
+    if (await search_state(conn))[0] is None:
+        return [
+            f"search is half set up in {schema} — run rfnry-thread set --search --schema {schema}"
+        ]
+    return []
+
+
+async def _behind(conn: Any, schema: str) -> str | None:
     version = int(await conn.fetchval("SELECT max(version) FROM thread_migrations") or 0)
     if version < LATEST:
-        return [
+        return (
             f"{schema} is at version {version}, this rfnry-thread needs {LATEST} — "
             f"run rfnry-thread upgrade --schema {schema}"
-        ]
+        )
     if version > LATEST:
-        return [_ahead(schema, version)]
-    return []
+        return _ahead(schema, version)
+    return None
 
 
 def _ahead(schema: str, version: int) -> str:
@@ -315,6 +439,32 @@ async def plan_upgrade(conn: Any, *, source: str | None = None) -> Plan:
         raise ConfigurationError(f"postgres: {_ahead(schema, newest)}")
     pending = [m for m in MIGRATIONS if m.version not in applied]
     return _steps(pending) if pending else Plan([], [])
+
+
+async def plan_search(conn: Any, *, on: bool) -> Plan:
+    state = await conn.fetchrow(_STATE)
+    schema = state["schema"]
+    if not state["migrated"]:
+        raise ConfigurationError(
+            f"postgres: no thread schema in {schema} — {await remedy(conn, schema)}"
+        )
+    behind = await _behind(conn, schema)
+    if behind is not None:
+        raise ConfigurationError(f"postgres: {behind}")
+    made, trigram = await search_state(conn)
+    if made is on:
+        return Plan([], [])
+    if not on:
+        return Plan([SEARCH_OFF], list(_UNSEARCHED))
+    target = await conn.fetchval("SELECT quote_ident(current_schema())")
+    return Plan(
+        [*([] if trigram else ["extension pg_trgm in public"]), SEARCH_ON],
+        [
+            *([] if trigram else ["CREATE EXTENSION IF NOT EXISTS pg_trgm SCHEMA public"]),
+            *(_UNSEARCHED if made is None else ()),
+            *_searched(target),
+        ],
+    )
 
 
 async def _moves(conn: Any, state: Any, source: str) -> Plan:
@@ -386,4 +536,9 @@ async def _execute(conn: Any, statement: str) -> None:
     try:
         await conn.execute(statement)
     except Exception as exc:
+        if statement.startswith("CREATE EXTENSION"):
+            raise ConfigurationError(
+                f"postgres: {statement} failed: {exc} — run it as a privileged role, then run "
+                "this command again"
+            ) from exc
         raise StorageError(f"postgres: {statement.split(chr(10))[0]} failed: {exc}") from exc

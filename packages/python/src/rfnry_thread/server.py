@@ -60,6 +60,8 @@ class _List(_Args):
     limit: int = 50
     order: Order = "created"
     preview: bool = False
+    metadata: dict[str, Any] | None = None
+    query: str | None = None
 
 
 class _Ref(_Args):
@@ -92,6 +94,12 @@ class _History(_Ref):
     after: int | None = None
     limit: int = 50
     kinds: list[str] | None = None
+
+
+class _Search(_Ref):
+    query: str
+    before: int | None = None
+    limit: int = 50
 
 
 class _Mark(_Ref):
@@ -284,9 +292,10 @@ class Server:
                         scope,
                         listing.before,
                         listing.limit,
-                        None,
+                        listing.metadata,
                         listing.order,
                         listing.preview,
+                        listing.query,
                     )
                 ]
             }
@@ -332,6 +341,12 @@ class Server:
                 history.after,
             )
             return {"events": [_dump(e) for e in events]}
+        if method == "thread.search":
+            search = _args(_Search, method, payload)
+            found = await verbs.search(
+                actor, scope, search.thread_id, search.query, search.before, search.limit
+            )
+            return {"events": [_dump(m) for m in found]}
         if method == "thread.mark":
             mark = _args(_Mark, method, payload)
             seq, unread = await verbs.mark(session, mark.thread_id, mark.seq, mark.back)
@@ -423,9 +438,10 @@ class Server:
         limit: int = 50,
         order: Order = "created",
         preview: bool = False,
+        query: str | None = None,
     ) -> list[Thread]:
         return await self._verbs.list_threads(
-            SYSTEM, _scope(scope), before, limit, metadata, order, preview
+            SYSTEM, _scope(scope), before, limit, metadata, order, preview, query
         )
 
     async def update_thread(self, scope: str, thread_id: str, metadata: dict[str, Any]) -> Thread:

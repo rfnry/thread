@@ -175,4 +175,31 @@ describe.skipIf(!url)('a live server', () => {
     await ana.close()
     await bruno.close()
   })
+
+  it('finds its threads by their words, and a message inside one as it reads now', async () => {
+    const carol = await connect({ url, protocols: ['thread', 'carol'] })
+    const pumps = await carol.createThread({
+      threadId: 'e2e-search-pumps',
+      metadata: { title: 'Pump gaskets' },
+    })
+    await carol.createThread({ threadId: 'e2e-search-other', metadata: { title: 'Other' } })
+    const sent = await carol.send(pumps.id, 'the gasket leaks')
+    await carol.edit(pumps.id, sent.id, 'the gasket leaks oil')
+    const found = await carol.listThreads({ query: 'GASKET', order: 'activity' })
+    expect(found.map((thread) => thread.id)).toEqual([pumps.id])
+    expect(found[0]?.match).toMatchObject({
+      id: sent.id,
+      content: [{ type: 'text', text: 'the gasket leaks oil' }],
+    })
+    const titled = await carol.listThreads({ query: 'other' })
+    expect(titled.map((thread) => [thread.id, thread.match])).toEqual([
+      ['e2e-search-other', undefined],
+    ])
+    const filtered = await carol.listThreads({ metadata: { title: 'Pump gaskets' } })
+    expect(filtered.map((thread) => thread.id)).toEqual([pumps.id])
+    const messages = await carol.search(pumps.id, 'leaks oil')
+    expect(messages.map((message) => message.id)).toEqual([sent.id])
+    await expect(carol.search(pumps.id, '  ')).rejects.toBeInstanceOf(InputError)
+    await carol.close()
+  })
 })

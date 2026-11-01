@@ -643,6 +643,27 @@ describe('client', () => {
     await client.close()
   })
 
+  it('finds threads by a query or their metadata, and the messages inside one', async () => {
+    server.handlers.set('thread.search', () => ({ events: [message(4, 'the pump leaks')] }))
+    const client = await connect({ url: 'ws://fake', protocols: ['thread', 'tok'] })
+    await client.listThreads({ order: 'activity', metadata: { team: 'ops' }, query: 'pump' })
+    const found = await client.search('t1', 'pump', { before: 9, limit: 5 })
+    await client.search('t1', 'leaks')
+    expect(server.sent('thread.list').at(-1)?.payload).toEqual({
+      before: null,
+      limit: 50,
+      order: 'activity',
+      metadata: { team: 'ops' },
+      query: 'pump',
+    })
+    expect(server.sent('thread.search').map((frame) => frame.payload)).toEqual([
+      { thread_id: 't1', query: 'pump', before: 9, limit: 5 },
+      { thread_id: 't1', query: 'leaks', before: null, limit: 50 },
+    ])
+    expect(found).toEqual([message(4, 'the pump leaks')])
+    await client.close()
+  })
+
   it('leaves out the new fields at their defaults, so a server from before them still answers', async () => {
     const client = await connect({ url: 'ws://fake', protocols: ['thread', 'tok'] })
     await client.history('t1')

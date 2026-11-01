@@ -33,7 +33,7 @@ const SIGNAL_KINDS = Object.keys({
 
 describe('golden fixtures', () => {
   it('exist', () => {
-    expect(files.length).toBe(46)
+    expect(files.length).toBe(50)
   })
 
   it.each(files)('%s round-trips', (name) => {
@@ -75,6 +75,20 @@ describe('golden fixtures', () => {
       unread: 2,
       last_message: { kind: 'message', seq: 1, content: [{ type: 'text', text: 'hello!' }] },
     })
+  })
+
+  it('carry a thread a query found with the message that matched', () => {
+    const text = readFileSync(join(FIXTURES, 'response-thread-list-match.json'), 'utf8')
+    const [thread] = ((decode(text) as Response).payload as { threads: Thread[] }).threads
+    expect(thread?.last_message).toBeUndefined()
+    expect(thread?.match).toMatchObject({
+      kind: 'message',
+      seq: 10,
+      content: [{ type: 'text', text: 'I was charged twice, a double charge' }],
+    })
+    const found = readFileSync(join(FIXTURES, 'response-thread-search.json'), 'utf8')
+    const { events } = (decode(found) as Response).payload as { events: Message[] }
+    expect(events.map((event) => [event.kind, event.seq])).toEqual([['message', 10]])
   })
 
   it('refuses a malformed frame', () => {

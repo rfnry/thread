@@ -389,6 +389,7 @@ def test_serve_and_connect_take_who_and_where_by_keyword() -> None:
         "limit",
         "order",
         "preview",
+        "query",
     ]
 
 
@@ -698,6 +699,8 @@ async def test_history_and_list_threads_leave_out_the_new_fields_at_their_defaul
     await ana.list_threads()
     await ana.history("t1", after=0)
     await ana.list_threads(order="activity", preview=True)
+    await ana.list_threads(metadata={"team": "ops"}, query="pump")
+    await ana.search("t1", "pump")
     assert sent == [
         ("thread.history", {"thread_id": "t1", "before": None, "limit": 50, "kinds": None}),
         ("thread.list", {"before": None, "limit": 50}),
@@ -706,6 +709,11 @@ async def test_history_and_list_threads_leave_out_the_new_fields_at_their_defaul
             {"thread_id": "t1", "before": None, "limit": 50, "kinds": None, "after": 0},
         ),
         ("thread.list", {"before": None, "limit": 50, "order": "activity", "preview": True}),
+        (
+            "thread.list",
+            {"before": None, "limit": 50, "metadata": {"team": "ops"}, "query": "pump"},
+        ),
+        ("thread.search", {"thread_id": "t1", "query": "pump", "before": None, "limit": 50}),
     ]
 
 

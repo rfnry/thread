@@ -24,6 +24,7 @@ export type Thread = {
   marked?: number
   unread?: number
   last_message?: Message
+  match?: Message
 }
 
 export type Member = { thread_id: string; identity: Identity; added_at: string; added_by: Identity }

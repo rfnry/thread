@@ -86,7 +86,7 @@ def as_identity(value: IdentityLike) -> Identity:
 SYSTEM = Identity(role="system", id="system", name="system")
 
 
-LISTED = frozenset({"last_seq", "last_message_at", "marked", "unread", "last_message"})
+LISTED = frozenset({"last_seq", "last_message_at", "marked", "unread", "last_message", "match"})
 Order = Literal["created", "activity"]
 History = Literal["all", "since_added"]
 
@@ -102,6 +102,7 @@ class Thread(BaseModel):
     marked: int | None = None
     unread: int | None = None
     last_message: Message | None = None
+    match: Message | None = None
 
     @model_serializer(mode="wrap")
     def _listed(self, handler: SerializerFunctionWrapHandler) -> dict[str, Any]:

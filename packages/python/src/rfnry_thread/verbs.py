@@ -45,6 +45,7 @@ PARTS: TypeAdapter[list[Part]] = TypeAdapter(list[Part])
 CUSTOM_LIMIT = 64 * 1024
 METADATA_LIMIT = 8 * 1024
 LABEL_LIMIT = 1000
+QUERY_LIMIT = 1000
 PAGE_LIMIT = 500
 
 
@@ -56,6 +57,14 @@ def _limit(limit: int) -> int:
     if not 1 <= limit <= PAGE_LIMIT:
         raise InputError(f"server: limit must be between 1 and {PAGE_LIMIT}")
     return limit
+
+
+def _query(query: str) -> str:
+    if not query.split():
+        raise InputError("server: a query needs at least one word")
+    if len(query) > QUERY_LIMIT:
+        raise InputError(f"server: a query is at most {QUERY_LIMIT} characters")
+    return query
 
 
 class Verbs:
@@ -153,12 +162,15 @@ class Verbs:
         metadata: dict[str, Any] | None = None,
         order: Order = "created",
         preview: bool = False,
+        query: str | None = None,
     ) -> list[Thread]:
         limit = _limit(limit)
+        if query is not None:
+            _query(query)
 
         async def page(member_id: str | None, after: str | Thread | None) -> list[Thread]:
             return await self._storage.list_threads(
-                scope, member_id, after, limit, metadata, order, preview
+                scope, member_id, after, limit, metadata, order, preview, query
             )
 
         if actor.role == "system":
@@ -260,6 +272,26 @@ class Verbs:
             before=before,
             limit=_limit(limit),
             kinds=kinds,
+            floor=await self._floor(actor, scope, thread),
+        )
+
+    async def search(
+        self,
+        actor: Identity,
+        scope: str,
+        thread_id: str,
+        query: str,
+        before: int | None,
+        limit: int,
+    ) -> list[Message]:
+        _query(query)
+        thread = await self.thread(actor, scope, thread_id, "read")
+        return await self._storage.search(
+            scope,
+            thread_id,
+            query,
+            before=before,
+            limit=_limit(limit),
             floor=await self._floor(actor, scope, thread),
         )
 
