@@ -199,13 +199,23 @@ async def test_only_the_author_edits_or_retracts_and_only_what_can_be(server: Se
         ForbiddenError, match=f"^server: only its author can edit event '{mine['id']}'$"
     ):
         await helper.call(
-            "event.send", thread_id="t1", kind="edit", client_id="e2", target=mine["id"], content=[]
+            "event.send",
+            thread_id="t1",
+            kind="edit",
+            client_id="e2",
+            target=mine["id"],
+            content=[{"type": "text", "text": "x"}],
         )
     with pytest.raises(
         InputError, match=f"^server: only a message can be edited; '{step['id']}' is a step$"
     ):
         await helper.call(
-            "event.send", thread_id="t1", kind="edit", client_id="e3", target=step["id"], content=[]
+            "event.send",
+            thread_id="t1",
+            kind="edit",
+            client_id="e3",
+            target=step["id"],
+            content=[{"type": "text", "text": "x"}],
         )
     await helper.call(
         "event.send", thread_id="t1", kind="retract", client_id="r1", target=step["id"]
@@ -689,3 +699,162 @@ async def test_concurrent_updates_store_what_the_last_event_says(server: Server)
     last = [e for e in history["events"] if e["kind"] == "thread_updated"][-1]
     stored = await ana.call("thread.get", thread_id="t1")
     assert stored["thread"]["metadata"] == last["metadata"]
+
+
+async def test_a_nul_anywhere_is_refused_as_input(server: Server) -> None:
+    ana = await room(server)
+    nul = "^server: text cannot hold a NUL character$"
+    with pytest.raises(InputError, match=nul):
+        await say(ana, "t1", "a\x00b")
+    with pytest.raises(InputError, match=nul):
+        await ana.call("thread.update", thread_id="t1", metadata={"k": "a\x00"})
+    with pytest.raises(InputError, match=nul):
+        await ana.call("thread.update", thread_id="t1", metadata={"k\x00": "a"})
+    with pytest.raises(InputError, match=nul):
+        await ana.call("thread.create", thread_id="x\x00")
+    with pytest.raises(InputError, match=nul):
+        await ana.call("thread.create", thread_id="x2", metadata={"k": "\x00"})
+    with pytest.raises(InputError, match=nul):
+        await ana.call("thread.get", thread_id="t1\x00")
+    with pytest.raises(InputError, match=nul):
+        await ana.call(
+            "event.send",
+            thread_id="t1",
+            kind="custom",
+            client_id="c1",
+            name="r\x00",
+            payload={},
+        )
+    with pytest.raises(InputError, match=nul):
+        await ana.call(
+            "event.send",
+            thread_id="t1",
+            kind="custom",
+            client_id="c2",
+            name="r",
+            payload={"k": "\x00"},
+        )
+    with pytest.raises(InputError, match=nul):
+        await ana.call(
+            "event.send",
+            thread_id="t1",
+            kind="message",
+            client_id="c3\x00",
+            content=[{"type": "text", "text": "hi"}],
+        )
+    with pytest.raises(InputError, match=nul):
+        await ana.call(
+            "member.add", thread_id="t1", identity={"role": "user", "id": "b\x00", "name": "B"}
+        )
+
+
+async def test_ids_are_at_most_256_bytes(server: Server) -> None:
+    ana = await room(server)
+    await ana.call("thread.create", thread_id="x" * 256)
+    with pytest.raises(InputError, match="^server: a thread id is at most 256 bytes$"):
+        await ana.call("thread.create", thread_id="x" * 257)
+    await ana.call("thread.create", thread_id="😀" * 64)
+    with pytest.raises(InputError, match="^server: a thread id is at most 256 bytes$"):
+        await ana.call("thread.create", thread_id="😀" * 65)
+    await say(ana, "t1", "hi", client_id="😀" * 64)
+    with pytest.raises(InputError, match="^server: a client id is at most 256 bytes$"):
+        await say(ana, "t1", "hi", client_id="😀" * 65)
+    await ana.call("member.add", thread_id="t1", identity={"role": "user", "id": "😀" * 64})
+    with pytest.raises(InputError, match="^server: an identity id is at most 256 bytes$"):
+        await ana.call("member.add", thread_id="t1", identity={"role": "user", "id": "😀" * 65})
+    await server.connect(identity=Identity(role="user", id="😀" * 64), scope="😀" * 64)
+    with pytest.raises(InputError, match="^server: a scope is at most 256 bytes$"):
+        await server.connect(identity=ANA, scope="😀" * 65)
+    with pytest.raises(InputError, match="^server: an identity id is at most 256 bytes$"):
+        await server.connect(identity=Identity(role="user", id="😀" * 65), scope="acme")
+
+
+async def test_sizes_count_utf8_bytes(server: Server) -> None:
+    ana = await room(server)
+    await say(ana, "t1", "hi", metadata={"k": "世" * 1404})
+    cjk = {"k": "世" * 2700}
+    await ana.call("thread.update", thread_id="t1", metadata=cjk)
+    await ana.call("thread.create", thread_id="t2", metadata=cjk)
+    over = {"k": "世" * 2800}
+    limit = "^server: thread metadata is at most 8192 bytes$"
+    with pytest.raises(InputError, match=limit):
+        await ana.call("thread.update", thread_id="t1", metadata=over)
+    with pytest.raises(InputError, match=limit):
+        await ana.call("thread.create", thread_id="t3", metadata=over)
+    await ana.call(
+        "event.send",
+        thread_id="t1",
+        kind="custom",
+        client_id="c9",
+        name="big",
+        payload={"x": "世" * 20000},
+    )
+    with pytest.raises(InputError, match="^server: a custom payload is at most 65536 bytes$"):
+        await ana.call(
+            "event.send",
+            thread_id="t1",
+            kind="custom",
+            client_id="c10",
+            name="big",
+            payload={"x": "世" * 22000},
+        )
+
+
+async def test_an_empty_message_or_edit_is_refused(server: Server) -> None:
+    ana = await room(server)
+    with pytest.raises(InputError, match="^server: a message needs content$"):
+        await ana.call("event.send", thread_id="t1", kind="message", client_id="c1", content=[])
+    sent = await say(ana, "t1", "hi")
+    with pytest.raises(InputError, match="^server: an edit needs content$"):
+        await ana.call(
+            "event.send",
+            thread_id="t1",
+            kind="edit",
+            client_id="c2",
+            target=sent["id"],
+            content=[],
+        )
+
+
+async def test_a_seq_beyond_64_bits_is_refused_as_input(server: Server) -> None:
+    ana = await room(server)
+    big = 2**64
+    calls = [
+        ("thread.history", {"thread_id": "t1", "before": big}),
+        ("thread.history", {"thread_id": "t1", "after": big}),
+        ("thread.search", {"thread_id": "t1", "query": "x", "before": big}),
+        ("thread.mark", {"thread_id": "t1", "seq": big}),
+        ("thread.join", {"thread_id": "t1", "since": big}),
+    ]
+    for method, payload in calls:
+        with pytest.raises(InputError, match=f"^server: invalid {method} payload"):
+            await ana.call(method, **payload)
+    with pytest.raises(InputError, match="^server: invalid thread.follow payload"):
+        await ana.call("thread.follow", since={"t1": big})
+    with pytest.raises(InputError, match="^server: invalid thread.follow payload"):
+        await ana.call("thread.follow", left={"t1": {"seq": big}})
+
+
+async def test_a_nul_in_a_removal_an_event_id_a_query_or_a_listing_is_refused(
+    server: Server,
+) -> None:
+    ana = await room(server)
+    nul = "^server: text cannot hold a NUL character$"
+    with pytest.raises(InputError, match=nul):
+        await ana.call("member.remove", thread_id="t1", identity_id="b\x00")
+    with pytest.raises(InputError, match="^server: an identity id is at most 256 bytes$"):
+        await ana.call("member.remove", thread_id="t1", identity_id="😀" * 65)
+    with pytest.raises(InputError, match=nul):
+        await ana.call("event.get", thread_id="t1", event_id="e\x00")
+    with pytest.raises(InputError, match=nul):
+        await ana.call("thread.search", thread_id="t1", query="a\x00b")
+    with pytest.raises(InputError, match=nul):
+        await ana.call("thread.list", query="a\x00b")
+    with pytest.raises(InputError, match=nul):
+        await ana.call("thread.list", before="t\x00")
+    with pytest.raises(InputError, match=nul):
+        await ana.call("thread.list", metadata={"k": "\x00"})
+    with pytest.raises(InputError, match="^server: invalid thread.history payload"):
+        await ana.call("thread.history", thread_id="t1", before=-1)
+    with pytest.raises(InputError, match="^server: invalid thread.search payload"):
+        await ana.call("thread.search", thread_id="t1", query="x", before=-1)

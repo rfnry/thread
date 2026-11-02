@@ -2,9 +2,9 @@ import asyncio
 import contextlib
 import logging
 from datetime import datetime
-from typing import Any
+from typing import Annotated, Any
 
-from pydantic import BaseModel, ConfigDict, ValidationError
+from pydantic import BaseModel, ConfigDict, Field, ValidationError
 
 from rfnry_thread.client import Client
 from rfnry_thread.connection import Connection
@@ -38,12 +38,15 @@ from rfnry_thread.protocol import (
 )
 from rfnry_thread.state import REFRESH
 from rfnry_thread.storage import Stop, Storage
-from rfnry_thread.verbs import Authorize, Redact, Verbs
+from rfnry_thread.verbs import Authorize, Redact, Verbs, _clean, _sized
 
 logger = logging.getLogger(__name__)
 
 IN_FLIGHT = 64
 ORDERED = frozenset({"thread.join", "thread.leave", "thread.away", "thread.follow"})
+
+
+Seq = Annotated[int, Field(ge=0, le=2**63 - 1)]
 
 
 class _Args(BaseModel):
@@ -74,37 +77,37 @@ class _Update(_Ref):
 
 
 class _Join(_Ref):
-    since: int | None = None
+    since: Seq | None = None
     resume: bool = False
     away: bool = False
 
 
 class _Gone(_Args):
-    seq: int
+    seq: Seq
     created_at: datetime | None = None
 
 
 class _Follow(_Args):
     resume: bool = False
-    since: dict[str, int] | None = None
+    since: dict[str, Seq] | None = None
     left: dict[str, _Gone] | None = None
 
 
 class _History(_Ref):
-    before: int | None = None
-    after: int | None = None
+    before: Seq | None = None
+    after: Seq | None = None
     limit: int = 50
     kinds: list[str] | None = None
 
 
 class _Search(_Ref):
     query: str
-    before: int | None = None
+    before: Seq | None = None
     limit: int = 50
 
 
 class _Mark(_Ref):
-    seq: int
+    seq: Seq
     back: bool = False
 
 
@@ -136,7 +139,7 @@ def _dump(model: BaseModel) -> dict[str, Any]:
 def _scope(scope: str) -> str:
     if not isinstance(scope, str) or not scope.strip():
         raise InputError("server: a scope is required")
-    return scope
+    return _sized(scope, "scope")
 
 
 def _identity(value: IdentityLike) -> Identity:
@@ -145,6 +148,8 @@ def _identity(value: IdentityLike) -> Identity:
         raise ConfigurationError(
             "server: 'system' is the library's role; connect as a user or an assistant"
         )
+    _sized(identity.id, "identity id")
+    _clean(identity.model_dump())
     return identity
 
 

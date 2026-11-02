@@ -114,7 +114,10 @@ async def test_a_refollow_skips_a_left_thread_unless_the_follower_was_added_to_i
         },
     )
     assert sorted(j["thread"]["id"] for j in reply["joined"]) == ["t2", "t3"]
-    with pytest.raises(InputError, match="^server: left cannot be negative$"):
+    with pytest.raises(
+        InputError,
+        match="^server: invalid thread.follow payload: input should be greater than or equal to 0$",
+    ):
         await helper.call("thread.follow", left={"t1": {"seq": -1}})
 
 
@@ -277,7 +280,10 @@ async def test_a_followed_thread_that_is_deleted_ends_with_one_notice(server: Se
 
 async def test_follow_refuses_a_negative_since(server: Server) -> None:
     helper = await Peer.open(server, HELPER)
-    with pytest.raises(InputError, match="^server: since cannot be negative$"):
+    with pytest.raises(
+        InputError,
+        match="^server: invalid thread.follow payload: input should be greater than or equal to 0$",
+    ):
         await helper.call("thread.follow", since={"t1": -1})
 
 
@@ -634,9 +640,13 @@ async def test_a_mark_never_moves_back_and_must_name_a_seq_in_the_thread(server:
     helper = await Peer.open(server, HELPER)
     assert (await helper.call("thread.mark", thread_id="t1", seq=4))["seq"] == 4
     assert (await helper.call("thread.mark", thread_id="t1", seq=3))["seq"] == 4
-    for seq in (-1, 5):
-        with pytest.raises(InputError, match="^server: seq must be between 0 and 4$"):
-            await helper.call("thread.mark", thread_id="t1", seq=seq)
+    with pytest.raises(
+        InputError,
+        match="^server: invalid thread.mark payload: input should be greater than or equal to 0$",
+    ):
+        await helper.call("thread.mark", thread_id="t1", seq=-1)
+    with pytest.raises(InputError, match="^server: seq must be between 0 and 4$"):
+        await helper.call("thread.mark", thread_id="t1", seq=5)
     bruno = await Peer.open(server, BRUNO)
     with pytest.raises(ForbiddenError):
         await bruno.call("thread.mark", thread_id="t1", seq=0)
@@ -752,7 +762,10 @@ async def test_history_reads_forward_after_a_seq_and_within_a_range(server: Serv
     assert [e["seq"] for e in forward] == [4, 5]
     window = (await ana.call("thread.history", thread_id="t1", after=2, before=5))["events"]
     assert [e["seq"] for e in window] == [3, 4]
-    with pytest.raises(InputError, match="^server: after cannot be negative$"):
+    with pytest.raises(
+        InputError,
+        match="^server: invalid thread.history payload: input should be greater than or equal to 0$",
+    ):
         await ana.call("thread.history", thread_id="t1", after=-1)
 
 

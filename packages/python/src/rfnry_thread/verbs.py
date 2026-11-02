@@ -49,10 +49,44 @@ METADATA_LIMIT = 8 * 1024
 LABEL_LIMIT = 1000
 QUERY_LIMIT = 1000
 PAGE_LIMIT = 500
+ID_LIMIT = 256
 
 
 def now() -> datetime:
     return datetime.now(UTC)
+
+
+def _nul(value: Any) -> bool:
+    if isinstance(value, str):
+        return "\x00" in value
+    if isinstance(value, dict):
+        return any(_nul(k) or _nul(v) for k, v in value.items())
+    if isinstance(value, list | tuple):
+        return any(_nul(item) for item in value)
+    return False
+
+
+def _clean(value: Any) -> None:
+    if _nul(value):
+        raise InputError("server: text cannot hold a NUL character")
+
+
+def _sized(value: str, what: str) -> str:
+    _clean(value)
+    if len(value.encode()) > ID_LIMIT:
+        article = "an" if what[0] in "aeiou" else "a"
+        raise InputError(f"server: {article} {what} is at most {ID_LIMIT} bytes")
+    return value
+
+
+def _bytes(value: Any) -> int:
+    return len(json.dumps(value, ensure_ascii=False).encode())
+
+
+def _thread_metadata(metadata: dict[str, Any]) -> None:
+    _clean(metadata)
+    if _bytes(metadata) > METADATA_LIMIT:
+        raise InputError(f"server: thread metadata is at most {METADATA_LIMIT} bytes")
 
 
 def _limit(limit: int) -> int:
@@ -64,6 +98,7 @@ def _limit(limit: int) -> int:
 def _query(query: str) -> str:
     if not query.split():
         raise InputError("server: a query needs at least one word")
+    _clean(query)
     if len(query) > QUERY_LIMIT:
         raise InputError(f"server: a query is at most {QUERY_LIMIT} characters")
     return query
@@ -91,6 +126,7 @@ class Verbs:
             raise ForbiddenError(f"server: {actor.id!r} may not {action} in thread {thread.id!r}")
 
     async def thread(self, actor: Identity, scope: str, thread_id: str, action: str) -> Thread:
+        _sized(thread_id, "thread id")
         thread = await self._storage.get_thread(scope, thread_id)
         if thread is None:
             raise NotFoundError(f"server: thread {thread_id!r} was not found")
@@ -116,6 +152,9 @@ class Verbs:
     ) -> Thread:
         if thread_id is not None and not thread_id.strip():
             raise InputError("server: a thread id cannot be empty")
+        if thread_id is not None:
+            _sized(thread_id, "thread id")
+        _thread_metadata(metadata)
         if thread_id is not None and await self._storage.get_thread(scope, thread_id) is not None:
             return await self.thread(actor, scope, thread_id, "read")
         candidate = Thread(
@@ -169,6 +208,8 @@ class Verbs:
         query: str | None = None,
     ) -> list[Thread]:
         limit = _limit(limit)
+        _clean(before if isinstance(before, str) else None)
+        _clean(metadata)
         if query is not None:
             _query(query)
 
@@ -197,6 +238,7 @@ class Verbs:
     async def update_thread(
         self, actor: Identity, scope: str, thread_id: str, metadata: dict[str, Any]
     ) -> Thread:
+        _thread_metadata(metadata)
         await self.thread(actor, scope, thread_id, "manage")
         event = ThreadUpdated(
             id=uuid.uuid4().hex,
@@ -223,12 +265,15 @@ class Verbs:
     ) -> Member:
         if identity.role == "system":
             raise InputError("server: the system identity cannot be a member")
+        _sized(identity.id, "identity id")
+        _clean(identity.model_dump())
         thread = await self.thread(actor, scope, thread_id, "manage")
         return await self._admit(scope, thread, identity, actor)
 
     async def remove_member(
         self, actor: Identity, scope: str, thread_id: str, identity_id: str
     ) -> None:
+        _sized(identity_id, "identity id")
         await self.thread(actor, scope, thread_id, "manage")
         event = MemberRemoved(
             id=uuid.uuid4().hex,
@@ -299,6 +344,7 @@ class Verbs:
         return found[1]
 
     async def get_event(self, actor: Identity, scope: str, thread_id: str, event_id: str) -> Event:
+        _clean(event_id)
         thread = await self.thread(actor, scope, thread_id, "read")
         floor = await self._floor(actor, scope, thread)
         event = await self._storage.get_event(scope, thread_id, event_id, floor)
@@ -424,8 +470,11 @@ class Verbs:
         thread_id = payload.get("thread_id")
         if not isinstance(thread_id, str):
             raise InputError("server: event.send needs a thread_id")
-        if not payload.get("client_id"):
+        client_id = payload.get("client_id")
+        if not client_id:
             raise InputError("server: event.send needs a client_id")
+        if isinstance(client_id, str):
+            _sized(client_id, "client id")
         thread = await self.thread(actor, scope, thread_id, "send")
         fields = {
             k: v for k, v in payload.items() if k not in ("id", "seq", "author", "created_at")
@@ -475,11 +524,16 @@ class Verbs:
             )
 
     async def _check(self, scope: str, actor: Identity, event: Event, floor: int) -> None:
+        _clean(event.model_dump())
+        if isinstance(event, Message | Edit) and not event.content:
+            raise InputError(
+                f"server: {'a' if isinstance(event, Message) else 'an'} {event.kind} needs content"
+            )
         if isinstance(event, Message | Edit | Step):
             self._inline(event.output if isinstance(event, Step) else event.content)
-        if isinstance(event, Custom) and len(json.dumps(event.payload).encode()) > CUSTOM_LIMIT:
+        if isinstance(event, Custom) and _bytes(event.payload) > CUSTOM_LIMIT:
             raise InputError(f"server: a custom payload is at most {CUSTOM_LIMIT} bytes")
-        if isinstance(event, Message) and len(json.dumps(event.metadata).encode()) > METADATA_LIMIT:
+        if isinstance(event, Message) and _bytes(event.metadata) > METADATA_LIMIT:
             raise InputError(f"server: message metadata is at most {METADATA_LIMIT} bytes")
         if isinstance(event, Edit | Retract):
             verb = "edit" if isinstance(event, Edit) else "retract"

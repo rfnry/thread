@@ -142,7 +142,7 @@ async def serve(self, connection: Connection, *, identity: IdentityLike, scope: 
 Runs one accepted WebSocket until it closes, as `identity` in `scope`; returns when it closes. A
 first frame that is not the protocol's hello is answered with an error and the socket closed. Raises
 `ConfigurationError` when the identity's role is `system`, `InputError` when the identity does not
-fit or the scope is empty.
+fit, the scope is empty, or either holds a NUL character or an id over 256 bytes.
 
 ### `Server.connect`
 
@@ -187,7 +187,8 @@ async def create_thread(
 Creates a thread as the system, with no member, and returns it; with a `thread_id` the scope already
 holds, returns that thread. `history` is a `History`, `Literal["all", "since_added"]`, as
 `Client.create_thread` takes it. Never put to `authorize`. Raises `InputError` when the scope or
-`thread_id` is empty.
+`thread_id` is empty, a NUL character is in the scope, id or metadata, the scope or id is over 256
+bytes, or the metadata is over 8 KiB.
 
 ### `Server.get_thread`
 
@@ -232,7 +233,8 @@ async def update_thread(self, scope: str, thread_id: str, metadata: dict[str, An
 ```
 
 Replaces the thread's metadata, writes `ThreadUpdated` authored by the system and returns the
-updated thread. Raises `InputError` when the scope is empty, `NotFoundError` when the scope holds no
+updated thread. Raises `InputError` when the scope is empty, the metadata holds a NUL character or is
+over 8 KiB, `NotFoundError` when the scope holds no
 such thread.
 
 ### `Server.add_member`
@@ -615,7 +617,7 @@ Sends a message and returns it as stored. `in_reply_to` is the event it answers,
 caused it, `client_id` the write's idempotency key (generated when left out; a repeat returns the
 message stored the first time), and `metadata` yours, a JSON object of at most 8 KiB set once.
 Raises `InputError` when inline media is over the cap, the metadata is over 8 KiB or not an object,
-redaction leaves nothing or `triggered_by` does not fit, `NotFoundError` when the scope holds no
+the content is empty, the text holds a NUL character, the `client_id` is over 256 bytes, redaction leaves nothing or `triggered_by` does not fit, `NotFoundError` when the scope holds no
 such thread, `ForbiddenError` when the caller is not a member or `authorize` refuses `send`,
 `ConfigurationError` when `redact` returns something other than parts, and an `InputError` or
 `ForbiddenError` that `redact` raised.
