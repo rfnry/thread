@@ -1,2 +1,2 @@
 # renovate: datasource=git-refs depName=https://github.com/rfnry/tools branch=main
-TOOLS_COMMIT=33942a1bc0971c9a94f21cb089c19ccbcf9d386c
+TOOLS_COMMIT=1a88583be2645ac8bda8a66a55616f0605add8c6
