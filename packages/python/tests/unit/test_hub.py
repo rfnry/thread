@@ -7,6 +7,7 @@ from until import until
 
 from rfnry_thread.hub import Hub
 from rfnry_thread.models import (
+    Identity,
     MemberRemoved,
     StreamDelta,
     StreamStart,
@@ -17,7 +18,7 @@ from rfnry_thread.postgres import PostgresStorage
 from rfnry_thread.protocol import Request, encode
 from rfnry_thread.server import Server
 
-from .factories import ANA, AT, BRUNO, HELPER, message
+from .factories import ANA, AT, BRUNO, HELPER, added, message, removed
 from .hubkit import kinds, open_session, pushes
 from .legacy import enroll
 from .peer import Peer
@@ -261,6 +262,35 @@ async def test_an_invitation_without_a_seq_invites_and_hands_followers_the_threa
     await following.outbound.drain()
     assert [frame["name"] for frame in following_recorder.frames] == ["joined"]
     assert following.joined == {"t1": 2}
+
+
+async def test_an_invited_notice_for_a_non_member_is_ignored(storage: PostgresStorage) -> None:
+    hub, _ = await setup(storage, events=2)
+    mallory = Identity(id="mallory", role="user", name="Mallory")
+    plain, plain_recorder = open_session(mallory)
+    following, following_recorder = open_session(mallory)
+    following.following = True
+    hub.sessions.update({plain, following})
+    notice = {
+        "o": "elsewhere",
+        "kind": "invited",
+        "thread_id": "t1",
+        "sender": ANA.model_dump(mode="json"),
+        "to": "mallory",
+        "seq": 3,
+    }
+    await hub.on_signal("acme", "t1", dict(notice))
+    assert await pushes(plain, plain_recorder) == []
+    await following.outbound.drain()
+    assert following_recorder.frames == []
+    assert "t1" not in plain.joined and "t1" not in following.joined
+    await storage.add_member("acme", added("t1", mallory))
+    await storage.remove_member("acme", removed("t1", mallory))
+    await hub.on_signal("acme", "t1", dict(notice))
+    assert await pushes(plain, plain_recorder) == []
+    await following.outbound.drain()
+    assert following_recorder.frames == []
+    assert "t1" not in plain.joined and "t1" not in following.joined
 
 
 async def test_deletion_tells_the_room_and_empties_it(storage: PostgresStorage) -> None:

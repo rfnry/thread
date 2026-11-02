@@ -519,9 +519,11 @@ class Hub:
                 async with self._lock(scope, thread_id):
                     self.state.refresh(scope, thread_id, str(origin), payload["entries"])
                 return
-            if kind in ("added", "invited"):
+            if kind == "invited":
                 thread = await self.storage.get_thread(scope, thread_id)
-                if thread is not None:
+                if thread is not None and await self.storage.is_member(
+                    scope, thread_id, str(payload["to"])
+                ):
                     seq = payload.get("seq")
                     await self._added_here(
                         scope,
