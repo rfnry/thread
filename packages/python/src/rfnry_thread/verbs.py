@@ -169,7 +169,9 @@ class Verbs:
         if not created:
             return await self.thread(actor, scope, thread.id, "read")
         if creator is not None:
-            await self._admitted(scope, thread, actor, creator.model_copy(update={"seq": 1}))
+            await self._hub.shielded(
+                self._admitted(scope, thread, actor, creator.model_copy(update={"seq": 1}))
+            )
         return thread
 
     def _added(self, thread_id: str, identity: Identity, by: Identity) -> MemberAdded:
@@ -189,7 +191,7 @@ class Verbs:
     async def _admit(self, scope: str, thread: Thread, identity: Identity, by: Identity) -> Member:
         member, added = await self._storage.add_member(scope, self._added(thread.id, identity, by))
         if added is not None:
-            await self._admitted(scope, thread, by, added)
+            await self._hub.shielded(self._admitted(scope, thread, by, added))
         return member
 
     async def get_thread(self, actor: Identity, scope: str, thread_id: str) -> Thread:
@@ -252,13 +254,13 @@ class Verbs:
         if result is None:
             raise NotFoundError(f"server: thread {thread_id!r} was not found")
         thread, stored = result
-        await self._hub.deliver(scope, stored, thread.created_at)
+        await self._hub.shielded(self._hub.deliver(scope, stored, thread.created_at))
         return thread
 
     async def delete_thread(self, actor: Identity, scope: str, thread_id: str) -> None:
         await self.thread(actor, scope, thread_id, "delete")
         await self._storage.delete_thread(scope, thread_id)
-        await self._hub.deleted(scope, thread_id, actor)
+        await self._hub.shielded(self._hub.deleted(scope, thread_id, actor))
 
     async def add_member(
         self, actor: Identity, scope: str, thread_id: str, identity: Identity
@@ -286,7 +288,7 @@ class Verbs:
         stored = await self._storage.remove_member(scope, event)
         if stored is None:
             raise NotFoundError(f"server: {identity_id!r} is not a member of thread {thread_id!r}")
-        await self._hub.deliver(scope, stored, thread.created_at)
+        await self._hub.shielded(self._hub.deliver(scope, stored, thread.created_at))
 
     async def list_members(self, actor: Identity, scope: str, thread_id: str) -> list[Member]:
         await self.thread(actor, scope, thread_id, "read")
@@ -366,8 +368,10 @@ class Verbs:
             raise InputError(f"server: seq must be between {low} and {head}")
         stored, unread, moved = await self._storage.mark(scope, thread_id, actor.id, seq, back)
         if moved:
-            await self._hub.marked(
-                session, Marked(thread_id=thread_id, sender=actor, seq=stored, unread=unread)
+            await self._hub.shielded(
+                self._hub.marked(
+                    session, Marked(thread_id=thread_id, sender=actor, seq=stored, unread=unread)
+                )
             )
         return stored, unread
 
@@ -516,7 +520,7 @@ class Verbs:
             event = await self._redacted(self._redact, actor, thread, event)
         stored, created = await self._storage.append_event(scope, event)
         if created:
-            await self._hub.deliver(scope, stored, thread.created_at)
+            await self._hub.shielded(self._hub.deliver(scope, stored, thread.created_at))
         return stored
 
     async def _redacted(

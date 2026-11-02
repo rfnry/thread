@@ -438,7 +438,8 @@ await reminders.send(renewal.id, "Your plan renews Friday. Switch to yearly and 
 From a client to the server, delivery is at least once. Every write goes through an outbox: in
 order per thread, retried with backoff across reconnects until the server acknowledges it or a
 minute passes, then a `TransportError`. The server deduplicates on the thread, the author and
-`client_id`, and answers a repeat with the event it stored the first time.
+`client_id`, and answers a repeat with the event it stored the first time. Once stored, a write
+reaches the thread's connections even when the writer's own socket drops before its answer.
 
 From the server to a client, delivery is in order and complete per connection: a connection never
 sees `seq` 7 before `seq` 6, and never skips one it may read (in a `since_added` thread, an edit or

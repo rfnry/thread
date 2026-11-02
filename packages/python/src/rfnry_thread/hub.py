@@ -4,7 +4,7 @@ import json
 import logging
 import uuid
 import weakref
-from collections.abc import AsyncIterator, Awaitable, Callable, Iterator
+from collections.abc import AsyncIterator, Awaitable, Callable, Coroutine, Iterator
 from contextlib import asynccontextmanager, contextmanager
 from dataclasses import dataclass, field
 from datetime import datetime
@@ -72,6 +72,13 @@ class Session:
         self.outbound.put(Push(name="joined", payload=joined.model_dump(mode="json")))
 
 
+@dataclass
+class _Aftermath:
+    parted: list[Session] = field(default_factory=list)
+    again: list[tuple[Session, MemberAdded]] = field(default_factory=list)
+    emptied: dict[str, list[dict[str, Any]]] = field(default_factory=dict)
+
+
 def _removes(event: Event, session: Session) -> bool:
     return isinstance(event, MemberRemoved) and event.identity.id == session.identity.id
 
@@ -108,6 +115,13 @@ class Hub:
         self._unchecked: set[tuple[str, str]] = set()
         self._told: dict[tuple[str, str], list[Signal]] = {}
         self._sent = itertools.count(1)
+        self._shielded: set[asyncio.Future[None]] = set()
+
+    async def shielded(self, work: Coroutine[Any, Any, None]) -> None:
+        task = asyncio.ensure_future(work)
+        self._shielded.add(task)
+        task.add_done_callback(self._shielded.discard)
+        await asyncio.shield(task)
 
     def _lock(self, scope: str, thread_id: str) -> asyncio.Lock:
         lock = self._locks.get((scope, thread_id))
@@ -131,30 +145,25 @@ class Hub:
     @asynccontextmanager
     async def _locked(
         self, scope: str, thread_id: str, created: datetime | None = None
-    ) -> AsyncIterator[None]:
-        parted: list[Session] = []
-        again: list[tuple[Session, MemberAdded]] = []
-        emptied: dict[str, list[dict[str, Any]]] = {}
+    ) -> AsyncIterator[_Aftermath]:
+        after = _Aftermath()
         try:
             async with self._lock(scope, thread_id):
                 if self._doubted(scope, thread_id, created):
-                    await self._settle(scope, thread_id, parted, again, emptied)
-                yield
+                    await self._settle(scope, thread_id, after)
+                yield after
         finally:
-            for session in parted:
-                await self._parted(session, thread_id)
-        await self._reentered(scope, thread_id, [a for a in again if a[0] in parted])
-        if emptied:
-            await self._emptied(scope, emptied)
+            if after.parted or after.emptied:
+                await self.shielded(self._aftermath(scope, thread_id, after))
 
-    async def _settle(
-        self,
-        scope: str,
-        thread_id: str,
-        parted: list[Session],
-        again: list[tuple[Session, MemberAdded]],
-        emptied: dict[str, list[dict[str, Any]]],
-    ) -> None:
+    async def _aftermath(self, scope: str, thread_id: str, after: _Aftermath) -> None:
+        for session in after.parted:
+            await self._parted(session, thread_id)
+        await self._reentered(scope, thread_id, [a for a in after.again if a[0] in after.parted])
+        if after.emptied:
+            await self._emptied(scope, after.emptied)
+
+    async def _settle(self, scope: str, thread_id: str, after: _Aftermath) -> None:
         key = (scope, thread_id)
         room = self._room(scope, thread_id)
         self._unchecked.discard(key)
@@ -172,22 +181,19 @@ class Hub:
         stale = [s for s in room if thread is None or s.created.get(thread_id) != thread.created_at]
         gone = ThreadDeleted(thread_id=thread_id, sender=SYSTEM)
         if len(stale) == len(room):
-            emptied.update(self._wipe(scope, gone))
+            after.emptied.update(self._wipe(scope, gone))
             return
         payload = gone.model_dump(mode="json")
         for session in stale:
             session.push_signal(payload)
-            if self._part(session, thread_id):
-                parted.append(session)
+            self._cut(session, thread_id, after)
         if found:
             try:
-                cut = await self._deliver(scope, found[0], again)
+                await self._deliver(scope, found[0], after)
             except Exception as error:
                 logger.warning(
                     "hub: checking thread %r against storage failed: %s", thread_id, error
                 )
-            else:
-                parted.extend(s for s in cut if self._part(s, thread_id))
         told = None if key in self._unchecked else self._told.pop(key, None)
         if told is not None:
             now = self.state.snapshot(scope, thread_id, expired=True)
@@ -317,6 +323,10 @@ class Hub:
             found.append(joined)
         return found
 
+    def _cut(self, session: Session, thread_id: str, after: _Aftermath) -> None:
+        if self._part(session, thread_id):
+            after.parted.append(session)
+
     def _part(self, session: Session, thread_id: str) -> bool:
         session.floors.pop(thread_id, None)
         session.created.pop(thread_id, None)
@@ -335,7 +345,7 @@ class Hub:
         async with self._lock(session.scope, thread_id):
             parted = self._part(session, thread_id)
         if parted:
-            await self._parted(session, thread_id)
+            await self.shielded(self._parted(session, thread_id))
 
     async def _parted(self, session: Session, thread_id: str) -> None:
         for stream_id in sorted(s for t, s in session.streams if t == thread_id):
@@ -356,19 +366,11 @@ class Hub:
 
     async def deliver(self, scope: str, event: Event, created: datetime | None = None) -> None:
         self._touch(scope, event.thread_id)
-        async with self._locked(scope, event.thread_id, created):
-            again: list[tuple[Session, MemberAdded]] = []
-            cut = await self._deliver(scope, event, again)
-            parted = [s for s in cut if self._part(s, event.thread_id)]
-        for session in parted:
-            await self._parted(session, event.thread_id)
-        await self._reentered(scope, event.thread_id, [a for a in again if a[0] in parted])
+        async with self._locked(scope, event.thread_id, created) as after:
+            await self._deliver(scope, event, after)
 
-    async def _deliver(
-        self, scope: str, event: Event, again: list[tuple[Session, MemberAdded]]
-    ) -> list[Session]:
+    async def _deliver(self, scope: str, event: Event, after: _Aftermath) -> None:
         payload = event.model_dump(mode="json")
-        cut: list[Session] = []
         room = self._audience(scope, event.thread_id)
         target = await self._target(scope, event, room)
         for session in room:
@@ -401,21 +403,20 @@ class Hub:
                         e for e in (*missing, event) if _removes(e, session) or _adds(e, session)
                     ][-1]
                     if isinstance(last, MemberAdded):
-                        again.append((session, last))
+                        after.again.append((session, last))
                 for earlier in missing:
                     session.push_event(earlier, earlier.model_dump(mode="json"))
                     if earlier is removed:
                         break
                 if removed is not None:
-                    cut.append(session)
+                    self._cut(session, event.thread_id, after)
                     continue
             if target < floor:
                 session.joined[event.thread_id] = event.seq
                 continue
             session.push_event(event, payload)
             if _removes(event, session):
-                cut.append(session)
-        return cut
+                self._cut(session, event.thread_id, after)
 
     async def _reentered(
         self, scope: str, thread_id: str, again: list[tuple[Session, MemberAdded]]
@@ -460,18 +461,10 @@ class Hub:
         ):
             return
         try:
-            async with self._locked(scope, thread_id):
+            async with self._locked(scope, thread_id) as after:
                 found = await self.storage.list_events(scope, thread_id, since=seq - 1, limit=1)
-                again: list[tuple[Session, MemberAdded]] = []
-                cut = (
-                    await self._deliver(scope, found[0], again)
-                    if found and found[0].seq == seq
-                    else []
-                )
-                parted = [s for s in cut if self._part(s, thread_id)]
-            for session in parted:
-                await self._parted(session, thread_id)
-            await self._reentered(scope, thread_id, [a for a in again if a[0] in parted])
+                if found and found[0].seq == seq:
+                    await self._deliver(scope, found[0], after)
         except ThreadException as error:
             logger.warning("hub: a notice for thread %r failed: %s", thread_id, error)
 

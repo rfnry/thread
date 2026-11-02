@@ -1142,3 +1142,136 @@ async def test_an_event_is_stored_and_served_though_one_connection_fails_to_catc
     served = [[p["kind"] for p in await peer.quiet()].count("message") for peer in (first, second)]
     assert sorted(served) == [0, 1]
     assert [r for r in caplog.records if r.name == "rfnry_thread.hub"]
+
+
+def gated(
+    storage: PostgresStorage, monkeypatch: pytest.MonkeyPatch, name: str, after: int = 0
+) -> tuple[asyncio.Event, asyncio.Event]:
+    reached, release = asyncio.Event(), asyncio.Event()
+    real = getattr(storage, name)
+    calls = [0]
+
+    async def held(*args: Any, **kwargs: Any) -> Any:
+        if name != "list_events" or kwargs.get("before") is not None:
+            calls[0] += 1
+            if calls[0] == after + 1:
+                reached.set()
+                await release.wait()
+        return await real(*args, **kwargs)
+
+    monkeypatch.setattr(storage, name, held)
+    return reached, release
+
+
+async def test_a_member_cut_by_a_fan_out_that_is_cancelled_is_out_of_the_room_and_hears_nothing_more(
+    storage: PostgresStorage, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    hub, thread = await setup(storage)
+    bruno, bruno_recorder = open_session(BRUNO)
+    helper, helper_recorder = open_session(HELPER)
+    await hub.join(bruno, thread, None)
+    await hub.join(helper, thread, None)
+    await pushes(bruno, bruno_recorder)
+    room = hub._room
+    monkeypatch.setattr(
+        hub,
+        "_room",
+        lambda scope, thread_id: sorted(room(scope, thread_id), key=lambda s: s is helper),
+    )
+    await storage.remove_member("acme", removed("t1", BRUNO, ANA))
+    await storage.append_event("acme", message(2, "while out", HELPER))
+    live, _ = await storage.append_event("acme", message(3, "live", HELPER))
+    real = storage.list_events
+    reached, _ = gated(storage, monkeypatch, "list_events", after=1)
+    delivering = asyncio.create_task(hub.deliver("acme", live))
+    await asyncio.wait_for(reached.wait(), 5)
+    delivering.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await delivering
+    monkeypatch.setattr(storage, "list_events", real)
+    assert bruno not in room("acme", "t1") and "t1" not in bruno.joined
+    await until(lambda: [i.id for i in hub.state.present("acme", "t1")] == [HELPER.id])
+    after, _ = await storage.append_event("acme", message(4, "after the removal", HELPER))
+    await asyncio.wait_for(hub.deliver("acme", after), 5)
+    assert kinds(await pushes(bruno, bruno_recorder)) == ["member_removed"]
+
+
+async def test_a_member_removed_and_added_again_is_handed_the_thread_though_the_fan_out_is_cancelled(
+    storage: PostgresStorage, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    hub, bruno, recorder = await _bruno_in(storage, "all")
+    await storage.remove_member("acme", removed("t1", BRUNO, ANA))
+    await storage.add_member("acme", added("t1", BRUNO, ANA))
+    live, _ = await storage.append_event("acme", message(5, "after"))
+    reached, release = gated(storage, monkeypatch, "is_member")
+    delivering = asyncio.create_task(hub.deliver("acme", live))
+    await asyncio.wait_for(reached.wait(), 5)
+    delivering.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await delivering
+    release.set()
+    await until(lambda: bruno.joined.get("t1") == 5)
+    assert "joined" in _kinds(await pushes(bruno, recorder))
+
+
+async def test_a_member_removed_and_added_again_is_handed_the_thread_though_the_check_that_found_it_fails_after(
+    storage: PostgresStorage, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    hub, bruno, recorder = await _bruno_in(storage, "all")
+    thread = await storage.get_thread("acme", "t1")
+    assert thread is not None
+    await storage.remove_member("acme", removed("t1", BRUNO, ANA))
+    await storage.add_member("acme", added("t1", BRUNO, ANA))
+    hub._unchecked.add(("acme", "t1"))
+    head = storage.head
+    armed = [True]
+
+    async def flaky(*args: Any) -> Any:
+        if armed:
+            armed.pop()
+            raise StorageError("postgres: storage rejected head: connection reset")
+        return await head(*args)
+
+    monkeypatch.setattr(storage, "head", flaky)
+    ana, _ = open_session(ANA)
+    with pytest.raises(StorageError):
+        await asyncio.wait_for(hub.join(ana, thread, None), 5)
+    await until(lambda: bruno.joined.get("t1") == 4)
+    assert _kinds(await pushes(bruno, recorder))[-1] == "joined"
+
+
+async def test_a_write_reaches_the_others_though_the_writers_socket_drops_while_it_is_delivered(
+    storage: PostgresStorage, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    server = Server(storage)
+    ana = await Peer.open(server, ANA)
+    await ana.call("thread.create", thread_id="t1")
+    await ana.call("member.add", thread_id="t1", identity=HELPER.model_dump(mode="json"))
+    helper = await Peer.open(server, HELPER)
+    await helper.call("thread.join", thread_id="t1")
+    await helper.quiet()
+    behind = next(s for s in server._hub.sessions if s.identity.id == HELPER.id)
+    behind.joined["t1"] -= 1
+    reached, release = gated(storage, monkeypatch, "list_events")
+    writer = await Peer.open(server, ANA)
+    await writer.end.send_text(
+        encode(
+            Request(
+                id="1",
+                method="event.send",
+                payload={
+                    "thread_id": "t1",
+                    "kind": "message",
+                    "client_id": "c1",
+                    "content": [{"type": "text", "text": "live"}],
+                },
+            )
+        )
+    )
+    await asyncio.wait_for(reached.wait(), 5)
+    await writer.close()
+    await until(lambda: sum(s.identity.id == ANA.id for s in server._hub.sessions) == 1)
+    release.set()
+    assert [p["content"][0]["text"] for p in await helper.quiet(0.5) if p["kind"] == "message"] == [
+        "live"
+    ]
