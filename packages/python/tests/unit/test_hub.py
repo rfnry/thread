@@ -6,13 +6,14 @@ from typing import Any
 import pytest
 from until import until
 
-from rfnry_thread.errors import ForbiddenError, StorageError
+from rfnry_thread.errors import ForbiddenError, NotFoundError, StorageError
 from rfnry_thread.hub import Hub
 from rfnry_thread.models import (
     SYSTEM,
     Edit,
     Identity,
     Idle,
+    Joined,
     Left,
     MemberRemoved,
     Present,
@@ -605,7 +606,9 @@ async def test_an_invitation_crossing_the_deletion_of_its_scope_is_handed_over_a
     await until(lambda: sorted(checked) == ["ana", "helper"])
     assert not deleting.done()
     release.set()
-    await asyncio.wait_for(asyncio.gather(joining, deleting, *inviting), 2.0)
+    done = asyncio.gather(joining, deleting, *inviting, return_exceptions=True)
+    refused, *rest = await asyncio.wait_for(done, 2.0)
+    assert isinstance(refused, NotFoundError) and rest == [None] * 3
     for session in (ana, helper):
         await session.outbound.drain()
     told = [(f["name"], f["payload"].get("kind")) for f in ana_recorder.frames]
@@ -648,7 +651,10 @@ async def test_joins_and_a_signal_crossing_the_deletion_of_their_scope_leave_not
     working = asyncio.create_task(hub.signal(ana, Working(thread_id="t1", sender=ANA)))
     await asyncio.sleep(0)
     release.set()
-    await asyncio.wait_for(asyncio.gather(*joining, deleting, working), 2.0)
+    done = asyncio.gather(*joining, deleting, working, return_exceptions=True)
+    *joins, deleted, signalled = await asyncio.wait_for(done, 2.0)
+    assert all(isinstance(j, Joined | NotFoundError) for j in joins)
+    assert (deleted, signalled) == (None, None)
     assert hub.state.own() == {} and hub._local == {} and hub._rooms == {}
     assert kinds(await pushes(ana, ana_recorder)) == ["thread.deleted"]
     assert kinds(await pushes(bruno, bruno_recorder)) == ["present", "thread.deleted"]
@@ -1313,3 +1319,28 @@ async def test_an_edit_whose_target_cannot_be_read_after_it_is_stored_is_acknowl
     monkeypatch.setattr(storage, "get_event", get_event)
     await say(ana, "t1", "next")
     assert [p["kind"] for p in await bruno.quiet()] == ["edit", "message"]
+
+
+@pytest.mark.parametrize("crossing", ["deleted", "removed"])
+async def test_a_join_that_crosses_the_threads_deletion_or_its_own_removal_is_refused(
+    storage: PostgresStorage, monkeypatch: pytest.MonkeyPatch, crossing: str
+) -> None:
+    hub, thread = await setup(storage, events=2)
+    session, recorder = open_session(BRUNO)
+    reached, release = gated(storage, monkeypatch, "list_events")
+    joining = asyncio.create_task(hub.join(session, thread, 0))
+    await asyncio.wait_for(reached.wait(), 5)
+    if crossing == "deleted":
+        await storage.delete_thread("acme", "t1")
+        other = asyncio.create_task(hub.deleted("acme", "t1", ANA))
+    else:
+        removal = await storage.remove_member("acme", removed("t1", BRUNO, ANA))
+        assert removal is not None
+        other = asyncio.create_task(hub.deliver("acme", removal))
+    await asyncio.sleep(0.05)
+    release.set()
+    with pytest.raises(NotFoundError, match="^server: thread 't1' was not found$"):
+        await asyncio.wait_for(joining, 5)
+    await asyncio.wait_for(other, 5)
+    assert "t1" not in session.joined and "t1" not in session.present
+    assert hub._room("acme", "t1") == []

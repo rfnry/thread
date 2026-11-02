@@ -459,7 +459,8 @@ thread alone is marked there), and the `Joined`'s `thread.marked` is that mark, 
 keeps arriving live, and `since` or `resume` hands its events after that `seq` or the mark up to
 where the connection is, once; joins of it in flight at the same time each get their own. Raises
 `InputError` when `since` is negative or given with `resume`, `NotFoundError` when the scope holds
-no such thread, `ForbiddenError` when the caller is not a member or `authorize` refuses `read`.
+no such thread or it is deleted, or the caller removed from it, before the join is answered, and
+`ForbiddenError` when the caller is not a member or `authorize` refuses `read`.
 
 ### `Client.leave`
 
@@ -1860,8 +1861,9 @@ arrive first (`since: 0` for the whole log), then the current state, then live t
 thread the connection already receives, by following, keeps arriving live, and `since` or `resume`
 hands its events after that `seq` or the mark up to where the connection is, once; joins of it in
 flight at the same time each get their own. Raises `InputError` when `since` is negative or given
-with `resume`, `NotFoundError` when the scope holds no such thread, `ForbiddenError` when the caller
-is not a member or `authorize` refuses `read`.
+with `resume`, `NotFoundError` when the scope holds no such thread or it is deleted, or the caller
+removed from it, before the join is answered, and `ForbiddenError` when the caller is not a member
+or `authorize` refuses `read`.
 
 ### `Client.leave`
 

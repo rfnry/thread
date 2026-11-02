@@ -218,6 +218,8 @@ class Hub:
         joined, _ = await self._enter(session, thread, since)
         if not away and not session.dropped:
             await self._arrive(session, thread.id)
+        if thread.id not in session.joined and not session.dropped:
+            raise NotFoundError(f"server: thread {thread.id!r} was not found")
         return joined
 
     async def _enter(
