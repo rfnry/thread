@@ -97,6 +97,10 @@ def _limit(limit: int) -> int:
     return limit
 
 
+def _reachable(thread: Thread) -> bool:
+    return len(thread.id.encode()) <= ID_LIMIT
+
+
 def _remade(made: datetime | None, thread: Thread) -> bool:
     return made is not None and made != thread.created_at
 
@@ -215,26 +219,28 @@ class Verbs:
         if query is not None:
             _query(query)
 
-        async def page(member_id: str | None, after: str | Thread | None) -> list[Thread]:
-            return await self._storage.list_threads(
-                scope, member_id, after, limit, metadata, order, preview, query
-            )
+        system = actor.role == "system"
 
-        if actor.role == "system":
-            return await page(None, before)
-        if self._authorize is None:
-            return await page(actor.id, before)
-        readable: list[Thread] = []
+        async def readable(thread: Thread) -> bool:
+            if not _reachable(thread):
+                return False
+            if system or self._authorize is None:
+                return True
+            return await self._authorize(actor, "read", thread)
+
+        kept: list[Thread] = []
         anchor: str | Thread | None = before
         while True:
-            found = await page(actor.id, anchor)
+            found = await self._storage.list_threads(
+                scope, None if system else actor.id, anchor, limit, metadata, order, preview, query
+            )
             for thread in found:
-                if await self._authorize(actor, "read", thread):
-                    readable.append(thread)
-                    if len(readable) == limit:
-                        return readable
+                if await readable(thread):
+                    kept.append(thread)
+                    if len(kept) == limit:
+                        return kept
             if len(found) < limit:
-                return readable
+                return kept
             anchor = found[-1]
 
     async def update_thread(
@@ -476,7 +482,9 @@ class Verbs:
         while True:
             page = await self._storage.list_threads(scope, actor.id, before, PAGE_LIMIT)
             for thread in page:
-                if self._authorize is None or await self._authorize(actor, "read", thread):
+                if _reachable(thread) and (
+                    self._authorize is None or await self._authorize(actor, "read", thread)
+                ):
                     found.append(thread)
             if len(page) < PAGE_LIMIT:
                 return found

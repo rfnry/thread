@@ -11,7 +11,7 @@ from rfnry_thread.server import Server
 
 from .conftest import say
 from .factories import ANA, BRUNO, HELPER
-from .legacy import enroll
+from .legacy import enroll, unreachable
 from .peer import Peer
 
 
@@ -926,3 +926,14 @@ async def test_a_follow_since_a_position_in_the_thread_before_it_was_made_again_
     reply = await again.call("thread.follow", since={"t1": {"seq": 4, "created_at": new}})
     assert [(j["seq"], j["truncated"]) for j in reply["joined"]] == [(5, False)]
     assert texts(await again.quiet()) == ["new 1"]
+
+
+async def test_follow_leaves_out_a_membership_whose_id_no_verb_takes(
+    storage: PostgresStorage,
+) -> None:
+    server = Server(storage)
+    await threads(server, "t1")
+    await unreachable(storage, HELPER)
+    helper = await Peer.open(server, HELPER)
+    reply = await helper.call("thread.follow")
+    assert [j["thread"]["id"] for j in reply["joined"]] == ["t1"]

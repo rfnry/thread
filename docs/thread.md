@@ -1036,7 +1036,7 @@ metadata over 8 KiB or not a JSON object, a query with no word or over 1000 char
 edit that redaction leaves empty, an edit of anything but a message, a retraction of anything but a
 message or a step, an unknown event or signal kind, a malformed frame, a message or edit with no
 content, a NUL character in any text, a scope, thread id, identity id or client id over 256 bytes,
-thread metadata over 8 KiB, a position outside 0 to 2**63 - 1, as a `read`'s `up_to_seq` or a cursor. Sizes count UTF-8 bytes, not escapes. `ConfigurationError` for a
+thread metadata over 8 KiB, a position outside 0 to 2**63 - 1, as a `read`'s `up_to_seq` or a cursor. Sizes count UTF-8 bytes, not escapes. A thread stored with an id over 256 bytes, as an earlier release allowed, is left out of every listing and follow, since no verb takes it. `ConfigurationError` for a
 setup that cannot work: a limit that is not positive, a `system` identity given to `serve` or
 `server.connect`, a `redact` that returns something other than parts, a `ThreadTools` with an empty
 `thread_id`, two tools with the same name in one `Tools`, a `Tool` with no body when it is called, a

@@ -15,6 +15,7 @@ from rfnry_thread.verbs import now
 from .conftest import say
 from .factories import ANA, BRUNO, HELPER, lookalike, message
 from .hubkit import open_session
+from .legacy import unreachable
 from .peer import Peer
 
 
@@ -912,3 +913,21 @@ async def test_an_anchor_without_last_seq_is_refused_naming_the_missing_field(
         InputError, match="^server: invalid thread.list payload: field required: last_seq$"
     ):
         await ana.call("thread.list", before=anchor)
+
+
+async def test_a_listing_leaves_out_a_thread_whose_id_no_verb_takes_and_still_fills_its_page(
+    storage: PostgresStorage,
+) -> None:
+    async def allow(actor: Identity, action: str, thread: Thread) -> bool:
+        return True
+
+    for authorize in (None, allow):
+        server = Server(storage, authorize=authorize)
+        ana = await server.connect(identity=ANA, scope="acme")
+        await ana.create_thread(thread_id="t1")
+        long = await unreachable(storage, ANA)
+        assert [t.id for t in await ana.list_threads(limit=1)] == ["t1"]
+        assert [t.id for t in await server.list_threads("acme", limit=1)] == ["t1"]
+        await ana.close()
+        await storage.delete_thread("acme", long)
+        await storage.delete_thread("acme", "t1")

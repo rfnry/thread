@@ -1,6 +1,8 @@
+import uuid
+from datetime import UTC, datetime
 from typing import Any
 
-from rfnry_thread.models import Identity, Member
+from rfnry_thread.models import Identity, Member, MemberAdded, Thread
 from rfnry_thread.postgres import PostgresStorage
 
 from .factories import AT
@@ -19,3 +21,21 @@ async def enroll(storage: PostgresStorage, thread_id: str, identity: Identity) -
             AT,
             member.model_dump_json(),
         )
+
+
+async def unreachable(storage: PostgresStorage, identity: Identity) -> str:
+    thread_id = "l" * 300
+    created = datetime.now(UTC)
+    await storage.create_thread(
+        "acme",
+        Thread(id=thread_id, scope="acme", created_at=created),
+        MemberAdded(
+            id=uuid.uuid4().hex,
+            thread_id=thread_id,
+            author=identity,
+            created_at=created,
+            client_id=uuid.uuid4().hex,
+            identity=identity,
+        ),
+    )
+    return thread_id
