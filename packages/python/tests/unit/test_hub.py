@@ -1,15 +1,22 @@
 import asyncio
 import json
+import logging
 from typing import Any
 
 import pytest
 from until import until
 
+from rfnry_thread.errors import StorageError
 from rfnry_thread.hub import Hub
 from rfnry_thread.models import (
     Identity,
+    Idle,
+    Left,
     MemberRemoved,
+    Present,
+    Signal,
     StreamDelta,
+    StreamEnd,
     StreamStart,
     Thread,
     Working,
@@ -17,6 +24,7 @@ from rfnry_thread.models import (
 from rfnry_thread.postgres import PostgresStorage
 from rfnry_thread.protocol import Request, encode
 from rfnry_thread.server import Server
+from rfnry_thread.state import EXPIRY
 
 from .factories import ANA, AT, BRUNO, HELPER, added, message, removed
 from .hubkit import kinds, open_session, pushes
@@ -381,6 +389,163 @@ async def test_announce_teaches_another_replica_who_is_here(storage: PostgresSto
     await until(lambda: far.state.present("acme", "t1") == [ANA])
     for stop in stops:
         await stop()
+
+
+async def far(hub: Hub, signal: Signal) -> None:
+    await hub.on_signal("acme", "t1", {"o": "far", **signal.model_dump(mode="json")})
+
+
+async def went_silent(hub: Hub) -> None:
+    signals: list[Signal] = [
+        Present(thread_id="t1", sender=HELPER),
+        Working(thread_id="t1", sender=HELPER),
+        StreamStart(thread_id="t1", sender=HELPER, stream_id="s1", in_reply_to="e1"),
+    ]
+    for signal in signals:
+        await far(hub, signal)
+    now = hub.state._clock()
+    hub.state._clock = lambda: now + EXPIRY + 1
+
+
+def senders(payloads: list[dict[str, Any]]) -> list[tuple[str, str]]:
+    return [(p["kind"], p["sender"]["id"]) for p in payloads]
+
+
+async def test_a_joiner_after_a_replica_went_silent_sees_neither_its_state_nor_its_end(
+    storage: PostgresStorage,
+) -> None:
+    hub, thread = await setup(storage)
+    ana, ana_out = open_session(ANA)
+    await hub.join(ana, thread, None)
+    await went_silent(hub)
+    await pushes(ana, ana_out)
+    bruno, bruno_out = open_session(BRUNO)
+    await hub.join(bruno, thread, None)
+    await hub.sweep()
+    assert senders(await pushes(ana, ana_out)) == [
+        ("stream.end", "helper"),
+        ("idle", "helper"),
+        ("left", "helper"),
+        ("present", "bruno"),
+    ]
+    assert senders(await pushes(bruno, bruno_out)) == [("present", "ana"), ("present", "bruno")]
+
+
+async def test_a_leave_after_a_replica_went_silent_is_one_left(storage: PostgresStorage) -> None:
+    hub, thread = await setup(storage)
+    ana, ana_out = open_session(ANA)
+    helper, _ = open_session(HELPER)
+    await hub.join(ana, thread, None)
+    await hub.join(helper, thread, None)
+    await went_silent(hub)
+    await pushes(ana, ana_out)
+    await hub.leave(helper, "t1")
+    await hub.sweep()
+    assert senders(await pushes(ana, ana_out)) == [
+        ("stream.end", "helper"),
+        ("idle", "helper"),
+        ("left", "helper"),
+    ]
+
+
+async def test_a_replica_heard_from_after_its_sweep_is_announced_again_and_ends_once(
+    storage: PostgresStorage,
+) -> None:
+    hub, thread = await setup(storage)
+    ana, ana_out = open_session(ANA)
+    await hub.join(ana, thread, None)
+    await went_silent(hub)
+    await pushes(ana, ana_out)
+    await hub.sweep()
+    told = [senders(await pushes(ana, ana_out))]
+    late: list[Signal] = [
+        StreamDelta(thread_id="t1", sender=HELPER, stream_id="s1", index=1, text="more"),
+        StreamEnd(thread_id="t1", sender=HELPER, stream_id="s1"),
+        Idle(thread_id="t1", sender=HELPER),
+        Left(thread_id="t1", sender=HELPER),
+    ]
+    starts: list[str | None] = []
+    for signal in late:
+        await far(hub, signal)
+        found = await pushes(ana, ana_out)
+        starts.extend(p.get("in_reply_to") for p in found if p["kind"] == "stream.start")
+        told.append(senders(found))
+    assert starts == ["e1"]
+    assert told == [
+        [("stream.end", "helper"), ("idle", "helper"), ("left", "helper")],
+        [("stream.start", "helper"), ("stream.delta", "helper")],
+        [("stream.end", "helper")],
+        [],
+        [],
+    ]
+
+
+async def test_a_repeat_from_a_silent_replica_ends_its_state_then_announces_it_once(
+    storage: PostgresStorage,
+) -> None:
+    hub, thread = await setup(storage)
+    ana, ana_out = open_session(ANA)
+    await hub.join(ana, thread, None)
+    await went_silent(hub)
+    await pushes(ana, ana_out)
+    entry = {
+        "sender": HELPER.model_dump(mode="json"),
+        "present": True,
+        "working": {"label": None},
+        "streams": [{"stream_id": "s1", "in_reply_to": None}],
+    }
+    await hub.on_signal("acme", "t1", {"o": "far", "kind": "refresh", "entries": [entry]})
+    told = [senders(await pushes(ana, ana_out))]
+    await far(hub, StreamStart(thread_id="t1", sender=HELPER, stream_id="s1"))
+    told.append(senders(await pushes(ana, ana_out)))
+    assert told == [
+        [
+            ("stream.end", "helper"),
+            ("idle", "helper"),
+            ("left", "helper"),
+            ("present", "helper"),
+            ("working", "helper"),
+            ("stream.start", "helper"),
+        ],
+        [],
+    ]
+
+
+async def test_the_ends_a_silent_replica_sends_late_are_told_once(
+    storage: PostgresStorage,
+) -> None:
+    hub, thread = await setup(storage)
+    ana, ana_out = open_session(ANA)
+    await hub.join(ana, thread, None)
+    await went_silent(hub)
+    await pushes(ana, ana_out)
+    told = []
+    for signal in (Idle(thread_id="t1", sender=HELPER), Left(thread_id="t1", sender=HELPER)):
+        await far(hub, signal)
+        told.append(senders(await pushes(ana, ana_out)))
+    await hub.sweep()
+    told.append(senders(await pushes(ana, ana_out)))
+    assert told == [[("stream.end", "helper"), ("idle", "helper"), ("left", "helper")], [], []]
+
+
+async def test_unlinking_stops_at_the_first_failed_publish(
+    storage: PostgresStorage, caplog: pytest.LogCaptureFixture
+) -> None:
+    hub, thread = await setup(storage)
+    for identity in (ANA, HELPER, BRUNO):
+        session, _ = open_session(identity)
+        await hub.join(session, thread, None)
+    attempts: list[dict[str, Any]] = []
+
+    async def closing(scope: str, thread_id: str, payload: dict[str, Any]) -> None:
+        attempts.append(payload)
+        raise StorageError("postgres: storage rejected publish: pool is closing")
+
+    storage.publish = closing  # type: ignore[method-assign]
+    hub.linked = True
+    with caplog.at_level(logging.WARNING, logger="rfnry_thread.hub"):
+        await hub.unlink()
+    assert len(attempts) == 1 and len(caplog.records) == 1 and not hub.linked
 
 
 async def test_a_leave_sent_right_after_a_join_leaves(storage: PostgresStorage) -> None:

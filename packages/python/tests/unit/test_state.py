@@ -79,13 +79,39 @@ def test_a_silent_replica_is_forgotten_and_our_own_entries_are_not() -> None:
     assert cache.present("acme", "t1") == [HELPER]
 
 
+def test_an_expired_slot_ends_once_after_any_read_and_leaves_presence_held_elsewhere() -> None:
+    now = [0.0]
+    cache = state(now)
+    remote: list[Signal] = [
+        Present(thread_id="t1", sender=HELPER),
+        Working(thread_id="t1", sender=HELPER),
+        StreamStart(thread_id="t1", sender=HELPER, stream_id="s2"),
+        StreamStart(thread_id="t1", sender=HELPER, stream_id="s1"),
+        Present(thread_id="t1", sender=ANA),
+    ]
+    for signal in remote:
+        cache.apply("acme", signal, "other")
+    cache.apply("acme", Present(thread_id="t1", sender=ANA), "me")
+    now[0] = EXPIRY + 1
+    assert cache.present("acme", "t1") == [ANA]
+    assert cache.snapshot("acme", "t1") == [Present(thread_id="t1", sender=ANA)]
+    assert cache.expiring() == [("acme", "t1")]
+    assert cache.expire("acme", "t1") == [
+        StreamEnd(thread_id="t1", sender=HELPER, stream_id="s1"),
+        StreamEnd(thread_id="t1", sender=HELPER, stream_id="s2"),
+        Idle(thread_id="t1", sender=HELPER),
+        Left(thread_id="t1", sender=HELPER),
+    ]
+    assert cache.expire("acme", "t1") == [] and cache.expiring() == []
+
+
 def test_a_refresh_keeps_a_mirrored_entry_alive_and_heals_a_missed_end() -> None:
     now = [0.0]
     cache = state(now)
     cache.apply("acme", Working(thread_id="t1", sender=HELPER, label="Reading"), "other")
     cache.apply("acme", StreamStart(thread_id="t1", sender=HELPER, stream_id="s1"), "other")
     now[0] = EXPIRY - 1
-    cache.refresh(
+    told = cache.refresh(
         "acme",
         "t1",
         "other",
@@ -98,13 +124,39 @@ def test_a_refresh_keeps_a_mirrored_entry_alive_and_heals_a_missed_end() -> None
             }
         ],
     )
+    assert told == [
+        Present(thread_id="t1", sender=HELPER),
+        StreamEnd(thread_id="t1", sender=HELPER, stream_id="s1"),
+        Idle(thread_id="t1", sender=HELPER),
+    ]
     now[0] = EXPIRY + 5
     assert [s.kind for s in cache.snapshot("acme", "t1")] == ["present"]
 
 
+def test_a_refresh_older_than_a_slots_last_signal_changes_nothing() -> None:
+    cache = state([0.0])
+    cache.apply("acme", Present(thread_id="t1", sender=HELPER), "other", 1)
+    cache.apply("acme", StreamStart(thread_id="t1", sender=HELPER, stream_id="s1"), "other", 2)
+    cache.apply("acme", StreamEnd(thread_id="t1", sender=HELPER, stream_id="s1"), "other", 4)
+    item = {
+        "sender": HELPER.model_dump(mode="json"),
+        "present": True,
+        "working": None,
+        "streams": [{"stream_id": "s1", "in_reply_to": None}],
+    }
+    assert cache.refresh("acme", "t1", "other", [item], 3) == []
+    cache.apply("acme", Left(thread_id="t1", sender=HELPER), "other", 6)
+    assert cache.refresh("acme", "t1", "other", [item], 5) == []
+    assert cache.snapshot("acme", "t1") == []
+    assert cache.refresh("acme", "t1", "other", [item], 7) == [
+        Present(thread_id="t1", sender=HELPER),
+        StreamStart(thread_id="t1", sender=HELPER, stream_id="s1"),
+    ]
+
+
 def test_a_refresh_teaches_a_late_replica_about_streams_it_never_saw_start() -> None:
     cache = state([0.0])
-    cache.refresh(
+    told = cache.refresh(
         "acme",
         "t1",
         "other",
@@ -120,6 +172,7 @@ def test_a_refresh_teaches_a_late_replica_about_streams_it_never_saw_start() -> 
     snapshot = cache.snapshot("acme", "t1")
     assert [s.kind for s in snapshot] == ["working", "stream.start"]
     assert isinstance(snapshot[1], StreamStart) and snapshot[1].in_reply_to == "e1"
+    assert told == snapshot
 
 
 def test_own_lists_this_replica_entries_for_re_announcement() -> None:

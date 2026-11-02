@@ -170,7 +170,10 @@ Raises `StorageError` when the storage cannot listen.
 async def stop(self) -> None: ...
 ```
 
-Stops listening to the other replicas and gives the listening connection back.
+Sends the other replicas the end of what this server's connections announced — `StreamEnd`, `Idle`
+and `Left` — then stops listening to them, gives the listening connection back, and ends their state
+for this server's connections. Call it before the pool closes: ends it cannot send reach the others
+only when they forget this server, within forty seconds.
 
 ### `Server.create_thread`
 

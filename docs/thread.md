@@ -522,11 +522,21 @@ await server.stop()
 
 An event is stored and announced in one transaction; every replica with a connection in that
 thread reads it by `seq`. Signals are delivered on the sender's replica and mirrored to the others.
-Each replica keeps who is present, working and streaming, and repeats its own every ten seconds; a
-replica that stops repeating — it crashed — is forgotten within thirty. A missed announcement costs
-latency, never an event: resume reads from storage. A replica whose `LISTEN` connection drops takes
-another with jittered backoff, listens again and repeats its own state at once, so the others
-rebuild it. `start()` holds one connection from the pool for `LISTEN`; `stop()` gives it back.
+Each replica keeps who is present, working and streaming, and repeats its own every ten seconds;
+what a repeat changes — a signal another replica missed — is told to that replica's connections. A
+missed announcement costs latency, never an event: resume reads from storage. A replica whose
+`LISTEN` connection drops takes another with jittered backoff, listens again and repeats its own
+state at once, so the others rebuild it. `start()` holds one connection from the pool for `LISTEN`;
+`stop()` gives it back.
+
+A replica that goes away ends, for the others' connections, what its own had announced, as if they
+had dropped: `StreamEnd` for each open stream, `Idle` for the work, and `Left` for each identity no
+connection on any replica still holds in that thread. `stop()` sends these before it unlinks, so the
+others hear them at once, and ends the others' state for its own connections, since it no longer
+follows it. A replica the others stop hearing — it crashed, or the link to it was down — is
+forgotten within thirty seconds, and its ends reach their connections within ten more. When they
+hear from it again, what it still holds is announced again with `Present`, `Working` and
+`StreamStart`, and each end it sends afterwards arrives once.
 
 Notices are not signed: every database role that can connect hears every scope's notices — the live
 traffic of all tenants — and can send them. Give the database only to roles trusted with every

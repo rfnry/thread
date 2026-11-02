@@ -1,4 +1,5 @@
 import asyncio
+import itertools
 import json
 import logging
 import uuid
@@ -95,6 +96,7 @@ class Hub:
         )
         self._local: dict[tuple[str, str, str], int] = {}
         self._watching: list[set[tuple[str, str]]] = []
+        self._sent = itertools.count(1)
 
     def _lock(self, scope: str, thread_id: str) -> asyncio.Lock:
         lock = self._locks.get((scope, thread_id))
@@ -180,6 +182,7 @@ class Hub:
                 return Joined(thread=thread, seq=head), False
             session.joined[thread_id] = replay[0].seq - 1 if replay else head
             session.floors[thread_id] = floor
+            self._expire(scope, thread_id)
             self._rooms.setdefault((scope, thread_id), set()).add(session)
             for event in replay:
                 session.push_event(event, event.model_dump(mode="json"))
@@ -337,25 +340,50 @@ class Hub:
             session.working.add(signal.thread_id)
         elif isinstance(signal, Idle):
             session.working.discard(signal.thread_id)
-        await self._fanout(session.scope, signal, self.origin)
-        await self._mirror(session.scope, signal)
+        async with self._lock(session.scope, signal.thread_id):
+            self._tell(
+                session.scope, signal.thread_id, self._visible(session.scope, signal, self.origin)
+            )
+            n = next(self._sent)
+        await self._mirror(session.scope, signal, n)
 
-    async def _fanout(self, scope: str, signal: Signal, origin: str) -> None:
+    async def _fanout(self, scope: str, signal: Signal, origin: str, n: int) -> None:
         async with self._lock(scope, signal.thread_id):
-            if self._visible(scope, signal, origin):
-                payload = signal.model_dump(mode="json")
-                for session in self._room(scope, signal.thread_id):
-                    session.push_signal(payload)
+            self._tell(scope, signal.thread_id, self._visible(scope, signal, origin, n))
 
-    def _visible(self, scope: str, signal: Signal, origin: str) -> bool:
+    def _tell(self, scope: str, thread_id: str, signals: list[Signal]) -> None:
+        for signal in signals:
+            payload = signal.model_dump(mode="json")
+            for session in self._room(scope, thread_id):
+                session.push_signal(payload)
+
+    def _visible(self, scope: str, signal: Signal, origin: str, n: int = 0) -> list[Signal]:
+        thread_id, sender = signal.thread_id, signal.sender
+        self._expire(scope, thread_id)
         if isinstance(signal, Present):
-            before = self.state.is_present(scope, signal.thread_id, signal.sender.id)
-            self.state.apply(scope, signal, origin)
-            return not before
-        self.state.apply(scope, signal, origin)
-        if isinstance(signal, Left):
-            return not self.state.is_present(scope, signal.thread_id, signal.sender.id)
-        return True
+            before = self.state.is_present(scope, thread_id, sender.id)
+            self.state.apply(scope, signal, origin, n)
+            return [] if before else [signal]
+        held = self.state.holds(scope, signal, origin)
+        self.state.apply(scope, signal, origin, n)
+        if origin != self.origin:
+            if isinstance(signal, Idle | StreamEnd | Left) and not held:
+                return []
+            if isinstance(signal, StreamStart) and held:
+                return []
+            if isinstance(signal, StreamDelta) and not held:
+                return [self.state.started(scope, signal, origin), signal]
+        if isinstance(signal, Left) and self.state.is_present(scope, thread_id, sender.id):
+            return []
+        return [signal]
+
+    def _expire(self, scope: str, thread_id: str, forget: bool = False) -> None:
+        self._tell(scope, thread_id, self.state.expire(scope, thread_id, forget))
+
+    async def sweep(self, forget: bool = False) -> None:
+        for scope, thread_id in self.state.expiring(forget):
+            async with self._lock(scope, thread_id):
+                self._expire(scope, thread_id, forget)
 
     async def _arrive(self, session: Session, thread_id: str) -> None:
         key = (session.scope, thread_id, session.identity.id)
@@ -435,7 +463,7 @@ class Hub:
     async def deleted(self, scope: str, thread_id: str, sender: Identity) -> None:
         signal = ThreadDeleted(thread_id=thread_id, sender=sender)
         await self._deleted_here(scope, signal)
-        await self._mirror(scope, signal)
+        await self._mirror(scope, signal, next(self._sent))
 
     async def _deleted_here(self, scope: str, signal: ThreadDeleted) -> None:
         thread_id = signal.thread_id
@@ -461,20 +489,23 @@ class Hub:
         self.sessions.discard(session)
 
     async def announce(self) -> None:
+        n = next(self._sent)
         for (scope, thread_id), items in self.state.own().items():
             batch: list[dict[str, Any]] = []
             for item in items:
                 if _size({"entries": [*batch, item]}) > NOTIFY_LIMIT and batch:
-                    await self._publish(scope, thread_id, {"kind": "refresh", "entries": batch})
+                    await self._publish(
+                        scope, thread_id, {"kind": "refresh", "n": n, "entries": batch}
+                    )
                     batch = []
                 batch.append(item)
             if batch:
-                await self._publish(scope, thread_id, {"kind": "refresh", "entries": batch})
+                await self._publish(scope, thread_id, {"kind": "refresh", "n": n, "entries": batch})
 
-    async def _mirror(self, scope: str, signal: Signal) -> None:
+    async def _mirror(self, scope: str, signal: Signal, n: int) -> None:
         if not self.linked:
             return
-        payload = signal.model_dump(mode="json")
+        payload = {"n": n, **signal.model_dump(mode="json")}
         if _size(payload) <= NOTIFY_LIMIT:
             await self._publish(scope, signal.thread_id, payload)
             return
@@ -485,7 +516,7 @@ class Hub:
             return
         for start in range(0, len(signal.text), PIECE):
             piece = signal.model_copy(update={"text": signal.text[start : start + PIECE]})
-            await self._publish(scope, signal.thread_id, piece.model_dump(mode="json"))
+            await self._publish(scope, signal.thread_id, {"n": n, **piece.model_dump(mode="json")})
 
     async def marked(self, origin: Session, signal: Marked) -> None:
         self._marked_here(origin.scope, signal, origin)
@@ -501,23 +532,45 @@ class Hub:
             ):
                 session.push_signal(payload)
 
-    async def _publish(self, scope: str, thread_id: str, payload: dict[str, Any]) -> None:
+    async def unlink(self) -> None:
         if not self.linked:
             return
+        self.linked = False
+        n = next(self._sent)
+        for scope, signal in self.state.own_ends():
+            payload = {"n": n, **signal.model_dump(mode="json")}
+            if _size(payload) <= NOTIFY_LIMIT and not await self._notify(
+                scope, signal.thread_id, payload
+            ):
+                return
+
+    async def _publish(self, scope: str, thread_id: str, payload: dict[str, Any]) -> None:
+        if self.linked:
+            await self._notify(scope, thread_id, payload)
+
+    async def _notify(self, scope: str, thread_id: str, payload: dict[str, Any]) -> bool:
         try:
             await self.storage.publish(scope, thread_id, {"o": self.origin, **payload})
         except ThreadException as error:
             logger.warning("hub: mirroring to other replicas failed: %s", error)
+            return False
+        return True
 
     async def on_signal(self, scope: str, thread_id: str, payload: dict[str, Any]) -> None:
         origin = payload.pop("o", None)
         if origin is None or origin == self.origin:
             return
         try:
+            n = int(payload.pop("n", 0))
             kind = payload.get("kind")
             if kind == "refresh":
                 async with self._lock(scope, thread_id):
-                    self.state.refresh(scope, thread_id, str(origin), payload["entries"])
+                    self._expire(scope, thread_id)
+                    self._tell(
+                        scope,
+                        thread_id,
+                        self.state.refresh(scope, thread_id, str(origin), payload["entries"], n),
+                    )
                 return
             if kind == "invited":
                 thread = await self.storage.get_thread(scope, thread_id)
@@ -540,6 +593,6 @@ class Hub:
             if isinstance(signal, ThreadDeleted):
                 await self._deleted_here(scope, signal)
                 return
-            await self._fanout(scope, signal, str(origin))
+            await self._fanout(scope, signal, str(origin), n)
         except Exception as error:
             logger.warning("hub: a notice from replica %s failed: %s", origin, error)

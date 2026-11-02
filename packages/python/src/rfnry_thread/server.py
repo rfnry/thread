@@ -442,14 +442,18 @@ class Server:
                 await self._refresher
             self._refresher = None
         if self._stop is not None:
-            await self._stop()
-            self._stop = None
-        self._hub.linked = False
+            try:
+                await self._hub.unlink()
+            finally:
+                await self._stop()
+                self._stop = None
+                await self._hub.sweep(forget=True)
 
     async def _refresh(self) -> None:
         while True:
             await asyncio.sleep(REFRESH)
             await self._hub.announce()
+            await self._hub.sweep()
 
     async def create_thread(
         self,

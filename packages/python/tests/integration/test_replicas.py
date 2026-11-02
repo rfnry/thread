@@ -1,4 +1,5 @@
 import asyncio
+import contextlib
 from collections.abc import AsyncIterator
 from datetime import UTC, datetime
 from typing import Any
@@ -11,6 +12,7 @@ from unit.factories import ANA, HELPER, added
 from unit.peer import Peer
 from until import until
 
+from rfnry_thread import server as server_module, state
 from rfnry_thread.errors import StorageError
 from rfnry_thread.models import Identity, Message, Part, Text, Thread
 from rfnry_thread.postgres import PostgresStorage
@@ -69,6 +71,236 @@ async def room(near: Server, far: Server) -> tuple[Peer, Peer]:
     await ana.quiet(0.3)
     await helper.quiet(0.3)
     return ana, helper
+
+
+async def arrived(peer: Peer, count: int, within: float) -> list[tuple[str, str]]:
+    async def wait() -> None:
+        while len(peer.pushes) < count:
+            frame = await peer.frame(within)
+            if frame["type"] == "push":
+                peer.pushes.append(frame["payload"])
+
+    with contextlib.suppress(TimeoutError):
+        await asyncio.wait_for(wait(), within)
+    found, peer.pushes = peer.pushes, []
+    return [(p["kind"], p["sender"]["id"]) for p in found]
+
+
+async def busy(ana: Peer, helper: Peer) -> None:
+    await helper.call("signal.send", thread_id="t1", kind="working", label="Checking")
+    await helper.call("signal.send", thread_id="t1", kind="stream.start", stream_id="s1")
+    await helper.notify(
+        "signal.send", thread_id="t1", kind="stream.delta", stream_id="s1", index=0, text="Half"
+    )
+    assert await arrived(ana, 3, 2.0) == [
+        ("working", "helper"),
+        ("stream.start", "helper"),
+        ("stream.delta", "helper"),
+    ]
+
+
+async def crash(server: Server) -> None:
+    assert server._refresher is not None and server._stop is not None
+    server._refresher.cancel()
+    server._hub.linked = False
+    await server._stop()
+    server._stop = None
+
+
+@contextlib.asynccontextmanager
+async def briefly(
+    storage: PostgresStorage, monkeypatch: pytest.MonkeyPatch
+) -> AsyncIterator[tuple[Server, Server]]:
+    monkeypatch.setattr(state, "EXPIRY", 1.0)
+    monkeypatch.setattr(server_module, "REFRESH", 0.2)
+    far_pool = await open_pool()
+    near = Server(storage)
+    far = Server(PostgresStorage(far_pool))
+    await near.start()
+    await far.start()
+    try:
+        yield near, far
+    finally:
+        await near.stop()
+        await far.stop()
+        await asyncio.wait_for(far_pool.close(), 5)
+
+
+async def present(peer: Peer) -> list[str]:
+    identities = (await peer.call("thread.present", thread_id="t1"))["identities"]
+    return sorted(i["id"] for i in identities)
+
+
+async def test_a_replica_that_stops_ends_its_presence_work_and_streams_for_the_others(
+    replicas: tuple[Server, Server],
+) -> None:
+    near, far = replicas
+    ana, helper = await room(near, far)
+    await busy(ana, helper)
+    await far.stop()
+    assert await arrived(ana, 3, 2.0) == [
+        ("stream.end", "helper"),
+        ("idle", "helper"),
+        ("left", "helper"),
+    ]
+    assert await present(ana) == ["ana"]
+    await helper.close()
+    assert await ana.quiet(0.5) == []
+
+
+async def test_a_crashed_replica_ends_its_presence_work_and_streams_for_the_others(
+    storage: PostgresStorage, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    async with briefly(storage, monkeypatch) as (near, far):
+        ana, helper = await room(near, far)
+        await busy(ana, helper)
+        await crash(far)
+        assert await arrived(ana, 3, 5.0) == [
+            ("stream.end", "helper"),
+            ("idle", "helper"),
+            ("left", "helper"),
+        ]
+        assert await present(ana) == ["ana"]
+        assert await ana.quiet(1.0) == []
+
+
+async def test_a_crashed_replica_ends_only_what_is_still_open_and_held_nowhere_else(
+    storage: PostgresStorage, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    async with briefly(storage, monkeypatch) as (near, far):
+        ana, helper = await room(near, far)
+        here = await Peer.open(near, HELPER)
+        await here.call("thread.join", thread_id="t1")
+        await busy(ana, helper)
+        await helper.call("signal.send", thread_id="t1", kind="stream.end", stream_id="s1")
+        assert await arrived(ana, 1, 2.0) == [("stream.end", "helper")]
+        await crash(far)
+        assert await arrived(ana, 1, 5.0) == [("idle", "helper")]
+        assert await present(ana) == ["ana", "helper"]
+        assert await ana.quiet(1.0) == []
+
+
+async def test_a_replica_heard_from_again_is_announced_again_and_ends_once(
+    storage: PostgresStorage, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    async with briefly(storage, monkeypatch) as (near, far):
+        ana, helper = await room(near, far)
+        await busy(ana, helper)
+        assert near._stop is not None
+        await near._stop()
+        assert await arrived(ana, 3, 5.0) == [
+            ("stream.end", "helper"),
+            ("idle", "helper"),
+            ("left", "helper"),
+        ]
+        near._stop = await storage.listen(
+            near._hub.on_event, near._hub.on_signal, near._hub.announce
+        )
+        assert await arrived(ana, 3, 5.0) == [
+            ("present", "helper"),
+            ("working", "helper"),
+            ("stream.start", "helper"),
+        ]
+        assert await present(ana) == ["ana", "helper"]
+        await helper.notify(
+            "signal.send", thread_id="t1", kind="stream.delta", stream_id="s1", index=1, text="!"
+        )
+        await helper.call("signal.send", thread_id="t1", kind="stream.end", stream_id="s1")
+        await helper.call("signal.send", thread_id="t1", kind="idle")
+        await helper.call("thread.leave", thread_id="t1")
+        assert await arrived(ana, 4, 2.0) == [
+            ("stream.delta", "helper"),
+            ("stream.end", "helper"),
+            ("idle", "helper"),
+            ("left", "helper"),
+        ]
+        assert await ana.quiet(1.0) == []
+
+
+async def test_a_stopped_replica_ends_the_others_state_for_its_own_connections(
+    replicas: tuple[Server, Server],
+) -> None:
+    near, far = replicas
+    ana, helper = await room(near, far)
+    await busy(ana, helper)
+    await near.stop()
+    assert await arrived(ana, 3, 2.0) == [
+        ("stream.end", "helper"),
+        ("idle", "helper"),
+        ("left", "helper"),
+    ]
+    assert await present(ana) == ["ana"]
+
+
+async def crossed(far: Server, helper: Peer, **step: Any) -> None:
+    storage = far._hub.storage
+    publish = storage.publish
+    held, release = asyncio.Event(), asyncio.Event()
+
+    async def late(scope: str, thread_id: str, payload: dict[str, Any]) -> None:
+        if payload.get("kind") == "refresh":
+            held.set()
+            await release.wait()
+        await publish(scope, thread_id, payload)
+
+    storage.publish = late  # type: ignore[method-assign]
+    try:
+        announcing = asyncio.get_running_loop().create_task(far._hub.announce())
+        await asyncio.wait_for(held.wait(), 2.0)
+        await helper.call(**step)
+        release.set()
+        await asyncio.wait_for(announcing, 2.0)
+    finally:
+        storage.publish = publish  # type: ignore[method-assign]
+
+
+async def test_a_repeat_taken_before_a_stream_end_does_not_start_the_stream_again(
+    replicas: tuple[Server, Server],
+) -> None:
+    near, far = replicas
+    ana, helper = await room(near, far)
+    await helper.call("signal.send", thread_id="t1", kind="stream.start", stream_id="s1")
+    assert await arrived(ana, 1, 2.0) == [("stream.start", "helper")]
+    await crossed(
+        far, helper, method="signal.send", thread_id="t1", kind="stream.end", stream_id="s1"
+    )
+    assert await arrived(ana, 1, 2.0) == [("stream.end", "helper")]
+    assert await ana.quiet(0.5) == []
+
+
+async def test_a_repeat_taken_before_a_leave_does_not_bring_the_presence_back(
+    replicas: tuple[Server, Server],
+) -> None:
+    near, far = replicas
+    ana, helper = await room(near, far)
+    await crossed(far, helper, method="thread.leave", thread_id="t1")
+    assert await arrived(ana, 1, 2.0) == [("left", "helper")]
+    assert await ana.quiet(0.5) == []
+    await far._hub.announce()
+    assert await ana.quiet(0.5) == []
+    assert await present(ana) == ["ana"]
+
+
+async def test_a_cancelled_stop_still_gives_the_listening_connection_back(
+    pool: Any, storage: PostgresStorage
+) -> None:
+    server = Server(storage)
+    await server.start()
+    ana = await Peer.open(server, ANA)
+    await ana.call("thread.create", thread_id="t1")
+    await ana.call("thread.join", thread_id="t1")
+    publishing = asyncio.Event()
+
+    async def stuck(scope: str, thread_id: str, payload: dict[str, Any]) -> None:
+        publishing.set()
+        await asyncio.sleep(30)
+
+    storage.publish = stuck  # type: ignore[method-assign]
+    with pytest.raises(TimeoutError):
+        await asyncio.wait_for(server.stop(), 0.5)
+    assert publishing.is_set()
+    assert await listeners(pool) == []
+    await ana.close()
 
 
 async def test_events_cross_databases_replicas_in_order_once(
