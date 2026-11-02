@@ -1113,6 +1113,54 @@ async def test_a_push_the_client_cannot_read_is_skipped(server: Server) -> None:
     await bruno.close()
 
 
+async def test_a_push_with_a_name_the_client_does_not_know_is_skipped_and_the_connection_kept() -> (
+    None
+):
+    ours, theirs = pipe()
+    dials = 0
+
+    async def dial() -> Connection:
+        nonlocal dials
+        dials += 1
+        return ours
+
+    async def answer() -> None:
+        await theirs.receive_text()
+        await theirs.send_text(hello_reply())
+
+    helper = asyncio.create_task(answer())
+    client = await Client._open(dial)
+    await helper
+    await theirs.send_text('{"type":"push","name":"from.the.future","payload":{"thread_id":"t1"}}')
+    await theirs.send_text(
+        encode(Push(name="event", payload=message(1, "still here").model_dump(mode="json")))
+    )
+    assert (await take(client, Message, include_own=True)).content == [Text(text="still here")]
+    assert dials == 1 and client.status == "open"
+    await client.close()
+
+
+async def test_a_frame_that_is_not_a_push_and_cannot_be_read_still_loses_the_connection() -> None:
+    ours, theirs = pipe()
+    dials = 0
+
+    async def dial() -> Connection:
+        nonlocal dials
+        dials += 1
+        return ours
+
+    async def answer() -> None:
+        await theirs.receive_text()
+        await theirs.send_text(hello_reply())
+
+    helper = asyncio.create_task(answer())
+    client = await Client._open(dial)
+    await helper
+    await theirs.send_text('{"type":"from.the.future"}')
+    await until(lambda: client.status == "reconnecting" or dials == 2)
+    await client.close()
+
+
 async def test_a_push_whose_media_has_neither_data_nor_url_is_skipped(server: Server) -> None:
     ana = await server.connect(identity=ANA, scope="acme")
     bruno = await server.connect(identity=BRUNO, scope="acme")

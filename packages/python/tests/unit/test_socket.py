@@ -10,7 +10,7 @@ from websockets.asyncio.server import ServerConnection, serve
 from websockets.http11 import Request, Response
 from websockets.typing import Subprotocol
 
-from rfnry_thread import client as client_module, server as server_module, verbs as verbs_module
+from rfnry_thread import client as client_module, server as server_module
 from rfnry_thread.client import Client, Item
 from rfnry_thread.errors import (
     ConfigurationError,
@@ -927,25 +927,28 @@ async def test_a_leave_made_while_the_refollow_is_in_flight_holds(live: Live) ->
     assert [first_text(m) for m in await drain(ana) if isinstance(m, Message)] == []
 
 
-async def test_a_server_from_before_left_still_has_the_client_follow_after_a_drop(
+async def test_a_refused_refollow_is_not_retried_with_the_left_threads_merged_into_since(
     live: Live, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    class Before(server_module._Args):
+    class Refuses(server_module._Args):
         resume: bool = False
         since: dict[str, int] | None = None
         left: None = None
 
-    monkeypatch.setattr(server_module, "_Follow", Before)
-    ana, bruno, ana_identity = await followed_and_left(live)
+    monkeypatch.setattr(server_module, "_Follow", Refuses)
+    ana, _, _ = await followed_and_left(live)
     await ana.leave("t1")
+    sent: list[dict[str, Any]] = []
+    request = ana._request
+
+    async def record(method: str, payload: dict[str, Any]) -> dict[str, Any]:
+        if method == "thread.follow":
+            sent.append(payload)
+        return await request(method, payload)
+
+    ana._request = record  # type: ignore[method-assign]
     await drop_and_reopen(live, ana)
-    await bruno.create_thread(thread_id="t3")
-    await bruno.add_member("t3", ana_identity)
-    await bruno.send("t1", "left")
-    await bruno.send("t3", "added later")
-    items = await drain(ana)
-    assert [first_text(m) for m in items if isinstance(m, Message)] == ["added later"]
-    assert sorted(j.thread.id for j in items if isinstance(j, Joined)) == ["t2", "t3"]
+    assert len(sent) == 1 and "left" in sent[0]
 
 
 async def test_a_left_thread_made_again_while_away_and_the_follower_added_is_delivered(
@@ -1035,30 +1038,18 @@ async def test_a_thread_left_open_away_stays_away_after_a_drop(live: Live, follo
     assert await anas(bruno) == ["present"]
 
 
-async def test_against_a_server_from_before_away_a_thread_stays_present_and_delivered(
+async def test_a_refused_away_rejoin_is_not_retried_without_away(
     live: Live, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    class Before(server_module._Args):
+    class Refuses(server_module._Args):
         thread_id: str
         since: int | None = None
         resume: bool = False
         away: Literal[False] = False
 
-    async def unknown(self: Any, session: Any, thread_id: str) -> None:
-        raise InputError("server: unknown method 'thread.away'")
-
-    monkeypatch.setattr(server_module, "_Join", Before)
-    monkeypatch.setattr(verbs_module.Verbs, "away", unknown)
-    ana = await Client.connect(live.url, headers=ANA_HEADERS)
-    bruno = await live.server.connect(identity=BRUNO, scope="acme")
-    await bruno.create_thread(thread_id="t1")
-    await bruno.add_member("t1", Identity(role="user", id="ana", name="Ana"))
-    await ana.join("t1")
-    with pytest.raises(InputError):
-        await ana.away("t1")
-    assert "t1" in ana._present
-    ana._present.discard("t1")
+    ana, bruno, sent = await away_in_t1(live, False)
+    monkeypatch.setattr(server_module, "_Join", Refuses)
     await drop_and_reopen(live, ana)
+    assert sent == ["thread.join away"]
     await bruno.send("t1", "after the drop")
-    said = [first_text(m) for m in await drain(ana) if isinstance(m, Message)]
-    assert said == ["after the drop"]
+    assert [m for m in await drain(ana) if isinstance(m, Message)] == []

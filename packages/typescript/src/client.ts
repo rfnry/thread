@@ -208,6 +208,17 @@ export class Stream {
 
 let establish: (client: Client) => Promise<void>
 
+function unreadablePush(text: string): boolean {
+  try {
+    const frame: unknown = JSON.parse(text)
+    return (
+      typeof frame === 'object' && frame !== null && (frame as { type?: unknown }).type === 'push'
+    )
+  } catch {
+    return false
+  }
+}
+
 export class Client {
   static {
     establish = (client) => client.establish()
@@ -278,7 +289,7 @@ export class Client {
     this.identity = reply.identity as Identity
     this.scope = String(reply.scope)
     this.socket = socket
-    socket.onmessage = (message) => this.receive(String(message.data))
+    socket.onmessage = (message) => this.receive(String(message.data), socket)
     socket.onclose = () => this.lost(socket)
     for (const wake of this.waiting.splice(0)) wake()
   }
@@ -295,11 +306,12 @@ export class Client {
     }
   }
 
-  private receive(text: string): void {
+  private receive(text: string, socket: WebSocket): void {
     let frame: Frame
     try {
       frame = decode(text)
     } catch {
+      if (!unreadablePush(text)) socket.close(1000, 'client: connection lost')
       return
     }
     if (frame.type === 'response' || frame.type === 'error') {
@@ -470,12 +482,7 @@ export class Client {
     if (this.following) {
       const left = Object.fromEntries(this.left)
       try {
-        try {
-          await this.followFrom(true, Object.fromEntries(this.cursors), left)
-        } catch (error) {
-          if (!(error instanceof InputError) || Object.keys(left).length === 0) throw error
-          await this.followFrom(true, { ...Object.fromEntries(this.cursors), ...left }, {})
-        }
+        await this.followFrom(true, Object.fromEntries(this.cursors), left)
         followed = true
       } catch (error) {
         if (error instanceof TransportError) return
@@ -496,12 +503,7 @@ export class Client {
 
   private async rejoined(threadId: string, cursor: number): Promise<Joined> {
     if (this.held.has(threadId)) return this.joinFrom(threadId, cursor, false, false, true)
-    try {
-      return await this.joinFrom(threadId, cursor, false, true, true)
-    } catch (error) {
-      if (!(error instanceof InputError)) throw error
-      return this.joinFrom(threadId, cursor, false, false, true)
-    }
+    return this.joinFrom(threadId, cursor, false, true, true)
   }
 
   private fail(error: ThreadException): void {

@@ -90,8 +90,27 @@ describe('client', () => {
     ])
   })
 
-  it('keeps a thread present when the server refuses away, and joins plainly when it refuses an away join', async () => {
-    const { client } = await joined()
+  it('skips a push with a name it does not know and keeps the connection', async () => {
+    const { client, items } = await joined()
+    server.current?.deliver({ type: 'push', name: 'from.the.future', payload: { thread_id: 't1' } })
+    server.push('event', message(1, 'still here'))
+    await vi.waitFor(() => expect(items.at(-1)).toMatchObject({ seq: 1 }))
+    expect(server.sockets).toHaveLength(1)
+    await client.close()
+  })
+
+  it('ends the connection on an undecodable frame that is not a push', async () => {
+    const { client, items } = await joined()
+    items.length = 0
+    server.current?.deliver({ type: 'from.the.future' })
+    await vi.waitFor(() => expect(items).toContainEqual({ kind: 'status', status: 'reconnecting' }))
+    await vi.waitFor(() => expect(items).toContainEqual({ kind: 'status', status: 'open' }))
+    expect(server.sockets).toHaveLength(2)
+    await client.close()
+  })
+
+  it('keeps a thread present when the server refuses away, and does not retry a refused away join without it', async () => {
+    const { client, items } = await joined()
     server.handlers.set('thread.away', () => {
       throw { code: 'input', message: "server: unknown method 'thread.away'" }
     })
@@ -110,17 +129,16 @@ describe('client', () => {
         }
       return join?.(payload) ?? {}
     })
+    items.length = 0
     server.drop()
-    await vi.waitFor(() => expect(server.sent('thread.join')).toHaveLength(4))
+    await vi.waitFor(() => expect(items).toContainEqual({ kind: 'status', status: 'open' }))
+    expect(server.sent('thread.join')).toHaveLength(3)
     expect(
       server
         .sent('thread.join')
         .slice(2)
         .map((frame) => frame.payload)
-    ).toEqual([
-      { thread_id: 't1', since: 0, away: true },
-      { thread_id: 't1', since: 0 },
-    ])
+    ).toEqual([{ thread_id: 't1', since: 0, away: true }])
     await client.close()
   })
 
@@ -1170,7 +1188,7 @@ describe('client', () => {
     await client.close()
   })
 
-  it('follows again without the left threads when the server is from before them', async () => {
+  it('does not retry a refused re-follow with the left threads merged into since', async () => {
     server.handlers.set('thread.follow', () => followed('t1', 't2'))
     const client = await connect({ url: 'ws://fake', protocols: ['thread', 'tok'] })
     const items: Item[] = []
@@ -1188,7 +1206,6 @@ describe('client', () => {
     items.length = 0
     server.drop()
     await vi.waitFor(() => expect(items).toContainEqual({ kind: 'status', status: 'open' }))
-    await vi.waitFor(() => expect(server.sent('thread.leave')).toHaveLength(2))
     expect(server.sent('thread.follow').map((frame) => frame.payload)).toEqual([
       { resume: false, since: null },
       {
@@ -1196,10 +1213,7 @@ describe('client', () => {
         since: { t2: 4 },
         left: { t1: { seq: 4, created_at: '2026-01-01T12:00:00Z' } },
       },
-      { resume: true, since: { t2: 4, t1: 4 } },
     ])
-    expect(items.flatMap((item) => ('truncated' in item ? [item.thread.id] : []))).toEqual(['t2'])
-    expect(server.sent('thread.join')).toEqual([])
     await client.close()
   })
 

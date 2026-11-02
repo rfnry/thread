@@ -1,6 +1,7 @@
 import asyncio
 import contextlib
 import itertools
+import json
 import random
 import uuid
 from collections.abc import AsyncIterator, Awaitable, Callable
@@ -73,6 +74,14 @@ BACKOFF = 0.5
 BACKOFF_CAP = 8.0
 RECONNECT = 0.5
 RECONNECT_CAP = 30.0
+
+
+def unreadable_push(text: str) -> bool:
+    try:
+        frame = json.loads(text)
+    except ValueError:
+        return False
+    return isinstance(frame, dict) and frame.get("type") == "push"
 
 
 def _wire(content: Content) -> list[dict[str, Any]]:
@@ -296,7 +305,13 @@ class Client:
     async def _read(self, connection: Connection) -> None:
         try:
             while True:
-                frame = decode(await connection.receive_text())
+                text = await connection.receive_text()
+                try:
+                    frame = decode(text)
+                except InputError:
+                    if not unreadable_push(text):
+                        raise
+                    continue
                 if isinstance(frame, Response | ErrorFrame):
                     future = self._pending.get(frame.id)
                     if future is None or future.done():
@@ -444,12 +459,7 @@ class Client:
         if self._following:
             left = dict(self._left)
             try:
-                try:
-                    await self._follow(True, dict(self._cursors), left)
-                except InputError:
-                    if not left:
-                        raise
-                    await self._follow(True, self._cursors | left, None)
+                await self._follow(True, dict(self._cursors), left)
                 followed = True
             except TransportError:
                 return
@@ -470,10 +480,7 @@ class Client:
     async def _rejoined(self, thread_id: str, cursor: int) -> Joined:
         if thread_id in self._present:
             return await self._join(thread_id, cursor, announce=True)
-        try:
-            return await self._join(thread_id, cursor, away=True, announce=True)
-        except InputError:
-            return await self._join(thread_id, cursor, announce=True)
+        return await self._join(thread_id, cursor, away=True, announce=True)
 
     def _fail(self, error: ThreadException) -> None:
         self._failure = error

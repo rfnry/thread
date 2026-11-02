@@ -455,7 +455,8 @@ A client's `status` says where its connection is: `"open"`; `"reconnecting"` fro
 socket drops until it follows again, if it was following, and every thread it had joined is joined
 again; `"closed"` once it stops, by `close()` or a refused reconnect — an expired session, or a
 hello the server answers with an error such as another protocol version. A push the client cannot
-read is skipped, not fatal. Each change arrives in
+read, one with a name it does not know included, is skipped, not fatal. A client needs a server of its own
+release: a 0.1.5 client needs a 0.1.5 server. Each change arrives in
 `events()` as a `StatusChanged` — `"open"` after the re-follow's and re-joins' `Joined` — the one
 item that names no thread. It is how a person's page says it
 is reconnecting.
