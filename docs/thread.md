@@ -458,7 +458,8 @@ the client with that error, as a refused hello does. Any other refusal, a storag
 cursor, re-joins the rest, and tries it again on the same connection with the same backoff until it
 is taken, and a re-follow refused so joins each thread instead and is tried again the same way.
 Until then nothing of that thread reaches the client, though writes to it still go out; its
-`Joined` arrives once it is joined again.
+`Joined` arrives once it is joined again. While the follow is tried again, a thread you are added
+to arrives as `Invited`, and as `Joined` once the follow is taken.
 A re-follow's or re-join's `Joined`
 also arrives in `events()`, and when it says `truncated`, redraw from the latest page. Each position
 a re-join or re-follow resumes from carries the `created_at` of the thread it was read in, so a
