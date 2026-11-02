@@ -1358,3 +1358,32 @@ async def test_a_join_since_past_where_a_connection_already_is_says_truncated(
     joined = await hub.join(session, thread, 3)
     assert (joined.seq, joined.truncated) == (3, False)
     assert [p for p in await pushes(session, recorder) if "seq" in p] == []
+
+
+@pytest.mark.parametrize("crossing", ["deleted", "removed"])
+async def test_a_follow_answers_no_join_for_a_thread_deleted_or_left_by_its_removal_while_it_ran(
+    storage: PostgresStorage, monkeypatch: pytest.MonkeyPatch, crossing: str
+) -> None:
+    hub, thread = await setup(storage, events=2)
+    second, _ = await storage.create_thread("acme", Thread(id="t2", scope="acme", created_at=AT))
+    await enroll(storage, "t2", BRUNO)
+    await storage.append_event(
+        "acme", message(1, "m1", BRUNO).model_copy(update={"thread_id": "t2"})
+    )
+    session, _ = open_session(BRUNO)
+    session.following = True
+    reached, release = gated(storage, monkeypatch, "list_events")
+    following = asyncio.create_task(hub.follow(session, [(thread, None), (second, 0)], set()))
+    await asyncio.wait_for(reached.wait(), 5)
+    assert "t1" in session.joined
+    if crossing == "deleted":
+        await storage.delete_thread("acme", "t1")
+        await asyncio.wait_for(hub.deleted("acme", "t1", ANA), 5)
+    else:
+        removal = await storage.remove_member("acme", removed("t1", BRUNO, ANA))
+        assert removal is not None
+        await asyncio.wait_for(hub.deliver("acme", removal), 5)
+    assert "t1" not in session.joined
+    release.set()
+    answered = await asyncio.wait_for(following, 5)
+    assert [joined.thread.id for joined in answered] == ["t2"]

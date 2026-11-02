@@ -323,7 +323,7 @@ class Hub:
             except ForbiddenError, NotFoundError:
                 continue
             found.append(joined)
-        return found
+        return [joined for joined in found if joined.thread.id in session.joined]
 
     def _cut(self, session: Session, thread_id: str, after: _Aftermath) -> None:
         if self._part(session, thread_id):
