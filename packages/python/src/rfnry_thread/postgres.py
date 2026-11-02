@@ -690,7 +690,7 @@ class PostgresStorage:
         async with self._guard("mark"), self._pool.acquire() as conn, conn.transaction():
             await conn.execute(
                 "SELECT 1 FROM thread_members "
-                "WHERE scope = $1 AND thread_id = $2 AND identity_id = $3 FOR UPDATE",
+                "WHERE scope = $1 AND thread_id = $2 AND identity_id = $3 FOR NO KEY UPDATE",
                 scope,
                 thread_id,
                 identity_id,

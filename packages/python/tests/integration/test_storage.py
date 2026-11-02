@@ -887,3 +887,24 @@ async def test_deleting_a_scope_does_not_deadlock_with_an_append(
     assert appending.exception() is None
     assert wiping.exception() is None
     assert await storage.verify_absent("acme")
+
+
+async def test_a_mark_in_flight_does_not_hold_back_appends(storage: Storage, pool: Any) -> None:
+    await room(storage, "t1", "acme", ANA, BRUNO)
+    await storage.mark("acme", "t1", "bruno", 0)
+    async with pool.acquire() as holder:
+        tx = holder.transaction()
+        await tx.start()
+        await holder.execute(
+            "UPDATE thread_marks SET seq = seq WHERE scope = 'acme' AND thread_id = 't1' "
+            "AND identity_id = 'bruno'"
+        )
+        marking = asyncio.create_task(storage.mark("acme", "t1", "bruno", 1))
+        await asyncio.sleep(0.3)
+        assert not marking.done()
+        bruno = asyncio.create_task(storage.append_event("acme", say("t1", "c1", author=BRUNO)))
+        ana = asyncio.create_task(storage.append_event("acme", say("t1", "c2", author=ANA)))
+        done, pending = await asyncio.wait({bruno, ana}, timeout=3)
+        await tx.commit()
+    await asyncio.gather(marking, bruno, ana)
+    assert not pending
