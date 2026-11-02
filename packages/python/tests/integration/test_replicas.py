@@ -8,11 +8,11 @@ import asyncpg
 import pytest
 from database import SCHEMA, URL, open_pool
 from unit.conftest import say
-from unit.factories import ANA, HELPER, added
+from unit.factories import ANA, BRUNO, HELPER, added
 from unit.peer import Peer
 from until import until
 
-from rfnry_thread import server as server_module, state
+from rfnry_thread import postgres, server as server_module, state
 from rfnry_thread.errors import StorageError
 from rfnry_thread.models import Identity, Message, Part, Text, Thread
 from rfnry_thread.postgres import PostgresStorage
@@ -194,7 +194,7 @@ async def test_a_replica_heard_from_again_is_announced_again_and_ends_once(
             ("left", "helper"),
         ]
         near._stop = await storage.listen(
-            near._hub.on_event, near._hub.on_signal, near._hub.announce
+            near._hub.on_event, near._hub.on_signal, near._hub.on_resume
         )
         assert await arrived(ana, 3, 5.0) == [
             ("present", "helper"),
@@ -560,6 +560,62 @@ async def test_a_dropped_listener_listens_again_and_resumes(
     assert await listeners(pool) == []
 
 
+async def test_what_a_listener_hears_while_listening_again_is_passed_on_after_on_resume(
+    pool: Any, storage: PostgresStorage, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    await storage.create_thread("acme", Thread(id="t1", scope="acme", created_at=datetime.now(UTC)))
+    await storage.add_member("acme", added("t1", ANA))
+    events_channel, _ = await storage._channels()
+    order: list[str] = []
+    relistening = asyncio.Event()
+    halfway = asyncio.Event()
+    heard = asyncio.Event()
+    attach = asyncpg.connection.Connection.add_listener
+
+    async def held(conn: Any, channel: str, callback: Any) -> None:
+        await attach(conn, channel, callback)
+        if relistening.is_set() and channel == events_channel:
+            halfway.set()
+            await asyncio.wait_for(heard.wait(), 5.0)
+
+    monkeypatch.setattr(asyncpg.connection.Connection, "add_listener", held)
+    monkeypatch.setattr(postgres, "RELISTEN", 0.01)
+
+    def on_event(scope: str, thread_id: str, seq: int) -> Awaitable[None]:
+        order.append(f"event {seq}")
+        return asyncio.sleep(0)
+
+    async def on_signal(scope: str, thread_id: str, payload: dict[str, Any]) -> None:
+        return None
+
+    def on_resume() -> Awaitable[None]:
+        order.append("resume")
+        return asyncio.sleep(0)
+
+    stop = await storage.listen(on_event, on_signal, on_resume)
+    try:
+        relistening.set()
+        await terminate(pool, 1)
+        await asyncio.wait_for(halfway.wait(), 5.0)
+        await storage.append_event(
+            "acme",
+            Message(
+                id="m1",
+                thread_id="t1",
+                author=ANA,
+                created_at=datetime.now(UTC),
+                client_id="c1",
+                content=[Text(text="while listening again")],
+            ),
+        )
+        await asyncio.sleep(0.3)
+        heard.set()
+        await until(lambda: len(order) == 2, timeout=5.0)
+        assert order == ["resume", "event 2"]
+    finally:
+        await stop()
+
+
 async def test_signals_and_events_cross_again_after_the_listeners_drop(
     replicas: tuple[Server, Server], pool: Any
 ) -> None:
@@ -572,6 +628,26 @@ async def test_signals_and_events_cross_again_after_the_listeners_drop(
     await say(ana, "t1", "after")
     messages = [p for p in await helper.quiet(0.5) if p["kind"] == "message"]
     assert [p["content"][0]["text"] for p in messages] == ["during", "after"]
+
+
+async def test_replicas_whose_listeners_come_back_empty_the_rooms_of_a_thread_deleted_unheard(
+    replicas: tuple[Server, Server], pool: Any, storage: PostgresStorage
+) -> None:
+    near, far = replicas
+    ana, helper = await room(near, far)
+    assert await storage.delete_thread("acme", "t1")
+    killed = await terminate(pool, 2)
+    await relistened(pool, killed, 2)
+    assert (await ana.push("thread.deleted", timeout=5.0))["sender"]["id"] == "system"
+    assert (await helper.push("thread.deleted", timeout=5.0))["sender"]["id"] == "system"
+    await far.create_thread("acme", "t1")
+    await far.add_member("acme", "t1", BRUNO)
+    bruno = await Peer.open(far, BRUNO)
+    await bruno.call("thread.join", thread_id="t1")
+    for n in range(4):
+        await say(bruno, "t1", f"new {n}")
+    assert await ana.quiet(0.5) == []
+    assert await helper.quiet(0.5) == []
 
 
 async def test_a_membership_added_on_one_replica_reaches_a_follower_on_another(

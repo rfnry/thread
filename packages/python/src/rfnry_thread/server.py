@@ -443,7 +443,7 @@ class Server:
         if self._stop is not None:
             return
         self._stop = await self._storage.listen(
-            self._hub.on_event, self._hub.on_signal, self._hub.announce
+            self._hub.on_event, self._hub.on_signal, self._hub.on_resume
         )
         self._hub.linked = True
         self._refresher = asyncio.get_running_loop().create_task(self._refresh())
@@ -465,6 +465,7 @@ class Server:
     async def _refresh(self) -> None:
         while True:
             await asyncio.sleep(REFRESH)
+            await self._hub.recheck()
             await self._hub.announce()
             await self._hub.sweep()
 

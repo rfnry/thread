@@ -3,7 +3,7 @@ import contextlib
 import hashlib
 import json
 import random
-from collections.abc import AsyncIterator, Callable, Sequence
+from collections.abc import AsyncIterator, Awaitable, Callable, Sequence
 from contextlib import asynccontextmanager
 from datetime import datetime
 from typing import Any, cast
@@ -797,15 +797,26 @@ class PostgresStorage:
         tasks: set[asyncio.Future[None]] = set()
         lost = asyncio.Event()
         held: list[Any] = [None]
+        waiting: list[list[tuple[str, str]] | None] = [None]
 
-        def receive(_connection: Any, _pid: int, channel: str, text: str) -> None:
-            data = json.loads(text)
-            if channel == events_channel:
-                future = asyncio.ensure_future(on_event(data["s"], data["t"], int(data["q"])))
-            else:
-                future = asyncio.ensure_future(on_signal(data["s"], data["t"], data["p"]))
+        def track(work: Awaitable[None]) -> None:
+            future = asyncio.ensure_future(work)
             tasks.add(future)
             future.add_done_callback(tasks.discard)
+
+        def dispatch(channel: str, text: str) -> None:
+            data = json.loads(text)
+            if channel == events_channel:
+                track(on_event(data["s"], data["t"], int(data["q"])))
+            else:
+                track(on_signal(data["s"], data["t"], data["p"]))
+
+        def receive(_connection: Any, _pid: int, channel: str, text: str) -> None:
+            heard = waiting[0]
+            if heard is None:
+                dispatch(channel, text)
+            else:
+                heard.append((channel, text))
 
         def terminated(_connection: Any) -> None:
             lost.set()
@@ -838,15 +849,22 @@ class PostgresStorage:
                 await lost.wait()
                 lost.clear()
                 await release()
+                waiting[0] = []
                 attempt = 0
                 while held[0] is None:
                     await asyncio.sleep(random.random() * min(RELISTEN_CAP, RELISTEN * 2**attempt))
                     attempt += 1
                     with contextlib.suppress(Exception):
                         await attach()
+                resumed = None
                 if on_resume is not None:
                     with contextlib.suppress(Exception):
-                        await on_resume()
+                        resumed = on_resume()
+                heard, waiting[0] = waiting[0] or [], None
+                for channel, text in heard:
+                    dispatch(channel, text)
+                if resumed is not None:
+                    track(resumed)
 
         async with self._guard("listen"):
             await attach()

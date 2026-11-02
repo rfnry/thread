@@ -161,8 +161,9 @@ async def start(self) -> None: ...
 ```
 
 Links this server to the other replicas on the same storage: it listens for their events and signals
-and repeats its own presence, working and streams every ten seconds. Calling it again does nothing.
-Raises `StorageError` when the storage cannot listen.
+and repeats its own presence, working and streams every ten seconds. When its listener drops, it
+listens again, checks every thread its connections have open against storage before anything more
+reaches them, and repeats its own state. Calling it again does nothing. Raises `StorageError` when the storage cannot listen.
 
 ### `Server.stop`
 
@@ -300,8 +301,9 @@ Removes every thread, member and event of the scope, with search its `thread_tex
 how many rows it removed. Connections still open in the scope, on every replica, are sent
 `ThreadDeleted` for each thread they joined or followed and leave it; a thread made again under the
 same id reaches them as new, with `Invited`, or `Joined` for a follower. A replica whose `LISTEN`
-was down when the notice went out leaves its connections in those rooms until they reconnect.
-Raises `InputError` when the scope is empty.
+was down when the notice went out sends the `ThreadDeleted` when it listens again, and hands a
+thread made again meanwhile to its connections when they follow again. Raises `InputError` when the
+scope is empty.
 
 ### `Server.verify_absent`
 
@@ -1512,7 +1514,8 @@ the `seq` of the member's `MemberAdded` event; `list_events`
 and `get_event` given a `floor` leave out events below it and edits and retractions of them.
 `listen` takes an `OnEvent`, `on_event(scope, thread_id, seq)`, and an `OnSignal`,
 `on_signal(scope, thread_id, payload)`, called for what any server on the storage appends or
-publishes, and an `OnResume`, `on_resume()`, called once a dropped listener is back; it returns a
+publishes, and an `OnResume`, `on_resume()`, called once a dropped listener is back and before
+anything it heard since is passed on; it returns a
 `Stop`, `stop()`, that ends it, and all four are async functions returning `None`. Raises
 `NotFoundError`, from `add_member`, `remove_member`, `append_event` and `list_threads` with a `before` id or a `Thread` without `last_seq`, when the
 scope holds no such thread, and `StorageError`, from `create_thread`, when the thread's scope is not

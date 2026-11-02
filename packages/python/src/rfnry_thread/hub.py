@@ -4,14 +4,16 @@ import json
 import logging
 import uuid
 import weakref
-from collections.abc import Awaitable, Callable, Iterator
-from contextlib import contextmanager
+from collections.abc import AsyncIterator, Awaitable, Callable, Iterator
+from contextlib import asynccontextmanager, contextmanager
 from dataclasses import dataclass, field
+from datetime import datetime
 from typing import Any
 
-from rfnry_thread.errors import ForbiddenError, NotFoundError, ThreadException
+from rfnry_thread.errors import ForbiddenError, NotFoundError, StorageError, ThreadException
 from rfnry_thread.models import (
     SIGNALS,
+    SYSTEM,
     Edit,
     Event,
     Identity,
@@ -34,7 +36,7 @@ from rfnry_thread.models import (
 )
 from rfnry_thread.outbound import Outbound
 from rfnry_thread.protocol import Push
-from rfnry_thread.state import LatestState
+from rfnry_thread.state import LatestState, changes
 from rfnry_thread.storage import Storage
 
 logger = logging.getLogger(__name__)
@@ -51,6 +53,7 @@ class Session:
     id: str = field(default_factory=lambda: uuid.uuid4().hex)
     joined: dict[str, int] = field(default_factory=dict)
     floors: dict[str, int] = field(default_factory=dict)
+    created: dict[str, datetime] = field(default_factory=dict)
     streams: set[tuple[str, str]] = field(default_factory=set)
     working: set[str] = field(default_factory=set)
     present: set[str] = field(default_factory=set)
@@ -102,6 +105,8 @@ class Hub:
         self._local: dict[tuple[str, str, str], int] = {}
         self._watching: list[set[tuple[str, str | None]]] = []
         self._wiping: dict[str, list[asyncio.Event]] = {}
+        self._unchecked: set[tuple[str, str]] = set()
+        self._told: dict[tuple[str, str], list[Signal]] = {}
         self._sent = itertools.count(1)
 
     def _lock(self, scope: str, thread_id: str) -> asyncio.Lock:
@@ -113,6 +118,80 @@ class Hub:
 
     def _room(self, scope: str, thread_id: str) -> list[Session]:
         return list(self._rooms.get((scope, thread_id), ()))
+
+    def _audience(self, scope: str, thread_id: str) -> list[Session]:
+        return [] if (scope, thread_id) in self._unchecked else self._room(scope, thread_id)
+
+    def _doubted(self, scope: str, thread_id: str, created: datetime | None) -> bool:
+        return (scope, thread_id) in self._unchecked or (
+            created is not None
+            and any(s.created.get(thread_id) != created for s in self._room(scope, thread_id))
+        )
+
+    @asynccontextmanager
+    async def _locked(
+        self, scope: str, thread_id: str, created: datetime | None = None
+    ) -> AsyncIterator[None]:
+        parted: list[Session] = []
+        again: list[tuple[Session, MemberAdded]] = []
+        emptied: dict[str, list[dict[str, Any]]] = {}
+        try:
+            async with self._lock(scope, thread_id):
+                if self._doubted(scope, thread_id, created):
+                    await self._settle(scope, thread_id, parted, again, emptied)
+                yield
+        finally:
+            for session in parted:
+                await self._parted(session, thread_id)
+        await self._reentered(scope, thread_id, [a for a in again if a[0] in parted])
+        if emptied:
+            await self._emptied(scope, emptied)
+
+    async def _settle(
+        self,
+        scope: str,
+        thread_id: str,
+        parted: list[Session],
+        again: list[tuple[Session, MemberAdded]],
+        emptied: dict[str, list[dict[str, Any]]],
+    ) -> None:
+        key = (scope, thread_id)
+        room = self._room(scope, thread_id)
+        self._unchecked.discard(key)
+        if not room:
+            return
+        self._touch(scope, thread_id)
+        try:
+            found = await self.storage.list_events(scope, thread_id, limit=1)
+            thread = await self.storage.get_thread(scope, thread_id)
+        except Exception as error:
+            self._unchecked.add(key)
+            self._told.setdefault(key, self.state.snapshot(scope, thread_id, expired=True))
+            logger.warning("hub: checking thread %r against storage failed: %s", thread_id, error)
+            return
+        stale = [s for s in room if thread is None or s.created.get(thread_id) != thread.created_at]
+        gone = ThreadDeleted(thread_id=thread_id, sender=SYSTEM)
+        if len(stale) == len(room):
+            emptied.update(self._wipe(scope, gone))
+            return
+        payload = gone.model_dump(mode="json")
+        for session in stale:
+            session.push_signal(payload)
+            if self._part(session, thread_id):
+                parted.append(session)
+        if found:
+            try:
+                cut = await self._deliver(scope, found[0], again)
+            except Exception as error:
+                logger.warning(
+                    "hub: checking thread %r against storage failed: %s", thread_id, error
+                )
+            else:
+                parted.extend(s for s in cut if self._part(s, thread_id))
+        told = None if key in self._unchecked else self._told.pop(key, None)
+        if told is not None:
+            now = self.state.snapshot(scope, thread_id, expired=True)
+            self._tell(scope, thread_id, changes(thread_id, told, now))
 
     @contextmanager
     def watching(self) -> Iterator[set[tuple[str, str | None]]]:
@@ -144,9 +223,13 @@ class Hub:
         touched: set[tuple[str, str | None]] | None = None,
     ) -> tuple[Joined, bool]:
         scope, thread_id = session.scope, thread.id
-        async with self._lock(scope, thread_id):
+        async with self._locked(scope, thread_id, thread.created_at):
             if session.dropped:
                 return Joined(thread=thread, seq=session.joined.get(thread_id, 0)), False
+            if (scope, thread_id) in self._unchecked:
+                raise StorageError(
+                    f"server: thread {thread_id!r} could not be checked against storage"
+                )
             if thread_id in session.joined:
                 return await self._rewind(session, thread, since if rewind else None), False
             listed = (
@@ -188,6 +271,7 @@ class Hub:
                 return Joined(thread=thread, seq=head), False
             session.joined[thread_id] = replay[0].seq - 1 if replay else head
             session.floors[thread_id] = floor
+            session.created[thread_id] = thread.created_at
             self._expire(scope, thread_id)
             self._rooms.setdefault((scope, thread_id), set()).add(session)
             for event in replay:
@@ -235,6 +319,7 @@ class Hub:
 
     def _part(self, session: Session, thread_id: str) -> bool:
         session.floors.pop(thread_id, None)
+        session.created.pop(thread_id, None)
         if session.joined.pop(thread_id, None) is None:
             return False
         room = self._rooms.get((session.scope, thread_id))
@@ -242,6 +327,8 @@ class Hub:
             room.discard(session)
             if not room:
                 del self._rooms[(session.scope, thread_id)]
+                self._unchecked.discard((session.scope, thread_id))
+                self._told.pop((session.scope, thread_id), None)
         return True
 
     async def leave(self, session: Session, thread_id: str) -> None:
@@ -267,9 +354,9 @@ class Hub:
             session.present.discard(thread_id)
             await self._depart(session, thread_id)
 
-    async def deliver(self, scope: str, event: Event) -> None:
+    async def deliver(self, scope: str, event: Event, created: datetime | None = None) -> None:
         self._touch(scope, event.thread_id)
-        async with self._lock(scope, event.thread_id):
+        async with self._locked(scope, event.thread_id, created):
             again: list[tuple[Session, MemberAdded]] = []
             cut = await self._deliver(scope, event, again)
             parted = [s for s in cut if self._part(s, event.thread_id)]
@@ -282,7 +369,7 @@ class Hub:
     ) -> list[Session]:
         payload = event.model_dump(mode="json")
         cut: list[Session] = []
-        room = self._room(scope, event.thread_id)
+        room = self._audience(scope, event.thread_id)
         target = await self._target(scope, event, room)
         for session in room:
             cursor = session.joined.get(event.thread_id)
@@ -366,12 +453,14 @@ class Hub:
         self._touch(scope, thread_id)
         lock = self._locks.get((scope, thread_id))
         entering = lock is not None and lock.locked()
-        if not entering and not any(
-            s.joined.get(thread_id, seq) < seq for s in self._room(scope, thread_id)
+        if (
+            not entering
+            and (scope, thread_id) not in self._unchecked
+            and not any(s.joined.get(thread_id, seq) < seq for s in self._room(scope, thread_id))
         ):
             return
         try:
-            async with self._lock(scope, thread_id):
+            async with self._locked(scope, thread_id):
                 found = await self.storage.list_events(scope, thread_id, since=seq - 1, limit=1)
                 again: list[tuple[Session, MemberAdded]] = []
                 cut = (
@@ -387,7 +476,7 @@ class Hub:
             logger.warning("hub: a notice for thread %r failed: %s", thread_id, error)
 
     async def signal(self, session: Session, signal: Signal) -> None:
-        async with self._lock(session.scope, signal.thread_id):
+        async with self._locked(session.scope, signal.thread_id):
             if (
                 isinstance(signal, Working | StreamStart | StreamDelta)
                 and signal.thread_id not in session.joined
@@ -412,13 +501,13 @@ class Hub:
         return next(self._sent)
 
     async def _fanout(self, scope: str, signal: Signal, origin: str, n: int) -> None:
-        async with self._lock(scope, signal.thread_id):
+        async with self._locked(scope, signal.thread_id):
             self._tell(scope, signal.thread_id, self._visible(scope, signal, origin, n))
 
     def _tell(self, scope: str, thread_id: str, signals: list[Signal]) -> None:
         for signal in signals:
             payload = signal.model_dump(mode="json")
-            for session in self._room(scope, thread_id):
+            for session in self._audience(scope, thread_id):
                 session.push_signal(payload)
 
     def _visible(self, scope: str, signal: Signal, origin: str, n: int = 0) -> list[Signal]:
@@ -446,12 +535,12 @@ class Hub:
 
     async def sweep(self, forget: bool = False) -> None:
         for scope, thread_id in self.state.expiring(forget):
-            async with self._lock(scope, thread_id):
+            async with self._locked(scope, thread_id):
                 self._expire(scope, thread_id, forget)
 
     async def _arrive(self, session: Session, thread_id: str) -> None:
         present = Present(thread_id=thread_id, sender=session.identity)
-        async with self._lock(session.scope, thread_id):
+        async with self._locked(session.scope, thread_id):
             if thread_id not in session.joined or thread_id in session.present:
                 return
             session.present.add(thread_id)
@@ -492,6 +581,7 @@ class Hub:
     ) -> None:
         for wiping in list(self._wiping.get(scope, ())):
             await wiping.wait()
+        await self._check(scope, thread.id, thread.created_at)
         for session in list(self.sessions):
             if (
                 session.scope != scope
@@ -580,22 +670,49 @@ class Hub:
     async def _deleted_here(
         self, scope: str, signal: ThreadDeleted
     ) -> dict[str, list[dict[str, Any]]]:
+        self._touch(scope, signal.thread_id)
+        async with self._lock(scope, signal.thread_id):
+            return self._wipe(scope, signal)
+
+    def _wipe(self, scope: str, signal: ThreadDeleted) -> dict[str, list[dict[str, Any]]]:
         thread_id = signal.thread_id
-        self._touch(scope, thread_id)
-        async with self._lock(scope, thread_id):
-            items = self.state.delete(scope, thread_id)
-            payload = signal.model_dump(mode="json")
-            for session in self._room(scope, thread_id):
-                session.push_signal(payload)
-                session.joined.pop(thread_id, None)
-                session.floors.pop(thread_id, None)
-                session.present.discard(thread_id)
-                session.working.discard(thread_id)
-                session.streams = {s for s in session.streams if s[0] != thread_id}
-            self._rooms.pop((scope, thread_id), None)
-            for key in [k for k in self._local if k[:2] == (scope, thread_id)]:
-                del self._local[key]
+        items = self.state.delete(scope, thread_id)
+        payload = signal.model_dump(mode="json")
+        for session in self._room(scope, thread_id):
+            session.push_signal(payload)
+            session.joined.pop(thread_id, None)
+            session.floors.pop(thread_id, None)
+            session.created.pop(thread_id, None)
+            session.present.discard(thread_id)
+            session.working.discard(thread_id)
+            session.streams = {s for s in session.streams if s[0] != thread_id}
+        self._rooms.pop((scope, thread_id), None)
+        self._unchecked.discard((scope, thread_id))
+        self._told.pop((scope, thread_id), None)
+        for key in [k for k in self._local if k[:2] == (scope, thread_id)]:
+            del self._local[key]
         return {thread_id: items} if items else {}
+
+    def on_resume(self) -> Awaitable[None]:
+        self._unchecked.update(self._rooms)
+        return self._resumed()
+
+    async def _resumed(self) -> None:
+        await self.recheck()
+        await self.announce()
+
+    async def recheck(self) -> None:
+        for scope, thread_id in sorted(self._unchecked):
+            try:
+                await self._check(scope, thread_id)
+            except Exception as error:
+                logger.warning(
+                    "hub: checking thread %r against storage failed: %s", thread_id, error
+                )
+
+    async def _check(self, scope: str, thread_id: str, created: datetime | None = None) -> None:
+        async with self._locked(scope, thread_id, created):
+            pass
 
     async def _emptied(self, scope: str, emptied: dict[str, list[dict[str, Any]]]) -> None:
         n = next(self._sent)
@@ -611,7 +728,8 @@ class Hub:
     async def announce(self) -> None:
         n = next(self._sent)
         for (scope, thread_id), items in self.state.own().items():
-            await self._repeat(scope, thread_id, n, items)
+            if (scope, thread_id) not in self._unchecked:
+                await self._repeat(scope, thread_id, n, items)
 
     async def _repeat(
         self, scope: str, thread_id: str, n: int, items: list[dict[str, Any]]
@@ -687,7 +805,7 @@ class Hub:
             n = int(payload.pop("n", 0))
             kind = payload.get("kind")
             if kind == "refresh":
-                async with self._lock(scope, thread_id):
+                async with self._locked(scope, thread_id):
                     self._expire(scope, thread_id)
                     self._tell(
                         scope,

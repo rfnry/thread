@@ -527,13 +527,29 @@ An event is stored and announced in one transaction; every replica with a connec
 thread reads it by `seq`. Signals are delivered on the sender's replica and mirrored to the others.
 Each replica keeps who is present, working and streaming, and repeats its own every ten seconds;
 what a repeat changes — a signal another replica missed — is told to that replica's connections. A
-missed event announcement costs latency, never an event: resume reads from storage. A missed
-`thread.deleted` or `scope.deleted` notice is not sent again: that replica's connections stay in the
-deleted threads' rooms, and are not handed a thread made again under the same id, until they
-reconnect. A replica that misses an `invited` notice gives no `Invited`, and a follower no `Joined`,
-until the connection follows again. A replica whose `LISTEN` connection drops takes another with jittered backoff, listens
-again and repeats its own state at once, so the others rebuild it. `start()` holds one connection
-from the pool for `LISTEN`; `stop()` gives it back.
+missed event announcement costs latency, never an event: resume reads from storage.
+
+A replica whose `LISTEN` connection drops takes another with jittered backoff and listens again.
+It may have missed notices meanwhile, so every thread its connections have open is checked against
+storage before anything more reaches them: the first event, signal or write for a thread checks
+it, and the rest are checked one at a time. A connection in a thread that was deleted, or deleted
+and made again under the same id, is sent `ThreadDeleted` and leaves it; the others are sent the
+events they missed, so a member removed meanwhile receives its `MemberRemoved` and leaves. A thread
+whose check fails tells its connections nothing, takes no new one — a join or follow that reaches
+it fails as a storage failure does, and a follower added to it is not handed it until it follows
+again — and its replica repeats nothing of it, until a check succeeds; it is tried again with
+whatever next reaches the thread and every ten seconds, and then its connections are told what
+changed meanwhile: who arrived or left, who started or stopped
+working, which streams started or ended, and the text written since. Then the replica repeats its
+own state, so the others rebuild it. A write, a join or an invitation for a thread made again
+under the same id checks it the same way first, on every replica, even one whose `LISTEN` never
+dropped; otherwise such a replica reads nothing more. A `thread.deleted` or `scope.deleted` notice
+the deleting replica failed to send is not sent again: the others' connections stay in those rooms
+until they reconnect or the thread is checked, and until then the events of a thread made again
+under that id can reach them. A replica that misses an `invited` notice, a thread made again while
+it was not listening among them, gives no `Invited`, and a follower no `Joined`, until the
+connection follows again. `start()` holds one connection from the pool for `LISTEN`; `stop()`
+gives it back.
 
 A replica that goes away ends, for the others' connections, what its own had announced, as if they
 had dropped: `StreamEnd` for each open stream, `Idle` for the work, and `Left` for each identity no
@@ -958,8 +974,9 @@ assert await server.verify_absent("acme")
 Connections still open in the scope, on every replica, are sent `ThreadDeleted` for each thread they
 joined or followed and leave it, and the scope's presence, work and streams are forgotten. A thread
 made again under the same id reaches them as new: `Invited`, or `Joined` for a follower. A replica
-whose `LISTEN` was down when the notice went out leaves its connections in those rooms until they
-reconnect.
+whose `LISTEN` was down when the notice went out does this when it listens again, and gives no
+`Invited`, and a follower no `Joined`, for a thread made again while it was not listening until the
+connection follows again.
 
 ## At a glance
 

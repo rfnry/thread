@@ -179,7 +179,7 @@ class Verbs:
         )
 
     async def _admitted(self, scope: str, thread: Thread, by: Identity, added: MemberAdded) -> None:
-        await self._hub.deliver(scope, added)
+        await self._hub.deliver(scope, added, thread.created_at)
         await self._hub.added(scope, thread, by, added.identity, added.seq)
 
     async def _admit(self, scope: str, thread: Thread, identity: Identity, by: Identity) -> Member:
@@ -248,7 +248,7 @@ class Verbs:
         if result is None:
             raise NotFoundError(f"server: thread {thread_id!r} was not found")
         thread, stored = result
-        await self._hub.deliver(scope, stored)
+        await self._hub.deliver(scope, stored, thread.created_at)
         return thread
 
     async def delete_thread(self, actor: Identity, scope: str, thread_id: str) -> None:
@@ -270,7 +270,7 @@ class Verbs:
         self, actor: Identity, scope: str, thread_id: str, identity_id: str
     ) -> None:
         _sized(identity_id, "identity id")
-        await self.thread(actor, scope, thread_id, "manage")
+        thread = await self.thread(actor, scope, thread_id, "manage")
         event = MemberRemoved(
             id=uuid.uuid4().hex,
             thread_id=thread_id,
@@ -282,7 +282,7 @@ class Verbs:
         stored = await self._storage.remove_member(scope, event)
         if stored is None:
             raise NotFoundError(f"server: {identity_id!r} is not a member of thread {thread_id!r}")
-        await self._hub.deliver(scope, stored)
+        await self._hub.deliver(scope, stored, thread.created_at)
 
     async def list_members(self, actor: Identity, scope: str, thread_id: str) -> list[Member]:
         await self.thread(actor, scope, thread_id, "read")
@@ -497,7 +497,7 @@ class Verbs:
             event = await self._redacted(self._redact, actor, thread, event)
         stored, created = await self._storage.append_event(scope, event)
         if created:
-            await self._hub.deliver(scope, stored)
+            await self._hub.deliver(scope, stored, thread.created_at)
         return stored
 
     async def _redacted(
