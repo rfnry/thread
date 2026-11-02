@@ -44,7 +44,7 @@ from rfnry_thread.protocol import (
 )
 from rfnry_thread.state import REFRESH
 from rfnry_thread.storage import Stop, Storage
-from rfnry_thread.verbs import Authorize, Redact, Verbs, _clean, _sized
+from rfnry_thread.verbs import POSITION_MAX, Authorize, Redact, Verbs, _clean, _sized
 
 logger = logging.getLogger(__name__)
 
@@ -53,7 +53,7 @@ HELLO = 10.0
 ORDERED = frozenset({"thread.join", "thread.leave", "thread.away", "thread.follow"})
 
 
-Seq = Annotated[int, Field(ge=0, le=2**63 - 1)]
+Seq = Annotated[int, Field(ge=0, le=POSITION_MAX)]
 
 
 class _Args(BaseModel):
@@ -70,6 +70,7 @@ class _Anchor(_Args):
     id: str
     created_at: datetime
     last_message_at: datetime | None = None
+    last_seq: Seq
 
 
 class _List(_Args):
@@ -335,6 +336,7 @@ class Server:
                             scope=scope,
                             created_at=listing.before.created_at,
                             last_message_at=listing.before.last_message_at,
+                            last_seq=listing.before.last_seq,
                         ),
                         listing.limit,
                         listing.metadata,

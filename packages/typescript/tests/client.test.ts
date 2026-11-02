@@ -993,20 +993,30 @@ describe('client', () => {
       metadata: {},
       created_at: '2026-01-01T00:00:00Z',
       last_message_at: '2026-01-02T00:00:00Z',
+      last_seq: 4,
+    } as Thread
+    const bare = {
+      id: 't7',
+      scope: 'acme',
+      metadata: {},
+      created_at: '2026-01-01T00:00:00Z',
     } as Thread
     await client.listThreads({ order: 'activity', before: anchor })
     await client.listThreads({ before: 't8' })
+    await client.listThreads({ before: bare })
     expect(server.sent('thread.list').map((frame) => frame.payload)).toEqual([
       {
         before: {
           id: 't9',
           created_at: '2026-01-01T00:00:00Z',
           last_message_at: '2026-01-02T00:00:00Z',
+          last_seq: 4,
         },
         limit: 50,
         order: 'activity',
       },
       { before: 't8', limit: 50 },
+      { before: 't7', limit: 50 },
     ])
     await client.close()
   })

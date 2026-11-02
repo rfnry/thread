@@ -163,6 +163,7 @@ def golden() -> dict[str, Frame]:
                     "id": "t0",
                     "created_at": AT.isoformat().replace("+00:00", "Z"),
                     "last_message_at": AT.isoformat().replace("+00:00", "Z"),
+                    "last_seq": 9,
                 },
                 "limit": 20,
                 "order": "activity",

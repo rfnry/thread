@@ -28,6 +28,7 @@ from rfnry_thread.models import (
     Message,
     Order,
     Part,
+    Read,
     Retract,
     Step,
     StreamDelta,
@@ -50,6 +51,7 @@ LABEL_LIMIT = 1000
 QUERY_LIMIT = 1000
 PAGE_LIMIT = 500
 ID_LIMIT = 256
+POSITION_MAX = 2**63 - 1
 
 
 def now() -> datetime:
@@ -529,6 +531,8 @@ class Verbs:
             raise InputError(
                 f"server: {'a' if isinstance(event, Message) else 'an'} {event.kind} needs content"
             )
+        if isinstance(event, Read) and not 0 <= event.up_to_seq <= POSITION_MAX:
+            raise InputError("server: a position is from 0 to 2**63 - 1")
         if isinstance(event, Message | Edit | Step):
             self._inline(event.output if isinstance(event, Step) else event.content)
         if isinstance(event, Custom) and _bytes(event.payload) > CUSTOM_LIMIT:

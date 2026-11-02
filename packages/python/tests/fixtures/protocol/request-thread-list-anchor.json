@@ -5,7 +5,8 @@
     "before": {
       "created_at": "2026-01-01T12:00:00Z",
       "id": "t0",
-      "last_message_at": "2026-01-01T12:00:00Z"
+      "last_message_at": "2026-01-01T12:00:00Z",
+      "last_seq": 9
     },
     "limit": 20,
     "order": "activity"

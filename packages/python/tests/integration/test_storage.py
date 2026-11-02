@@ -956,3 +956,55 @@ async def test_deleting_a_scope_does_not_deadlock_with_baseline_marks(
     assert wiping.exception() is None
     assert baselining.exception() is None
     assert await storage.verify_absent("acme")
+
+
+async def test_a_thread_without_listing_fields_anchors_a_page_like_its_id(
+    storage: Storage,
+) -> None:
+    for minutes, thread_id in enumerate(["a", "b", "c"]):
+        await storage.create_thread("acme", thread(thread_id, minutes=minutes))
+        await storage.add_member("acme", added(thread_id, ANA))
+    late = say("a", "c1").model_copy(update={"created_at": AT + timedelta(hours=1)})
+    await storage.append_event("acme", late)
+    plain = await storage.get_thread("acme", "a")
+    assert plain is not None and plain.last_seq is None
+    by_id = await storage.list_threads("acme", "ana", before="a", order="activity")
+    by_thread = await storage.list_threads("acme", "ana", before=plain, order="activity")
+    assert [t.id for t in by_id] == ["c", "b"]
+    assert [t.id for t in by_thread] == ["c", "b"]
+
+
+async def test_a_thread_without_listing_fields_still_needs_a_membership_to_anchor(
+    storage: Storage,
+) -> None:
+    await storage.create_thread("acme", thread("ana-only", minutes=0))
+    await storage.add_member("acme", added("ana-only", ANA))
+    await storage.create_thread("acme", thread("bruno-only", minutes=1))
+    await storage.add_member("acme", added("bruno-only", BRUNO))
+    stranger = await storage.get_thread("acme", "bruno-only")
+    assert stranger is not None
+    with pytest.raises(NotFoundError, match="postgres: thread 'bruno-only' was not found"):
+        await storage.list_threads("acme", "ana", before=stranger)
+
+
+async def test_a_retracted_message_is_not_unread_in_a_listing_or_a_mark(storage: Storage) -> None:
+    await room(storage, "t1", "acme", ANA, BRUNO)
+    first, _ = await storage.append_event("acme", say("t1", "c1", author=ANA))
+    assert await storage.mark("acme", "t1", "bruno", first.seq) == (first.seq, 0, True)
+    oops, _ = await storage.append_event("acme", say("t1", "c2", "wrong thread", author=ANA))
+    kept, _ = await storage.append_event("acme", say("t1", "c3", "kept", author=ANA))
+    assert (await storage.list_threads("acme", "bruno"))[0].unread == 2
+    retract = Retract(
+        id="rt", thread_id="t1", author=ANA, created_at=AT, client_id="c4", target=oops.id
+    )
+    await storage.append_event("acme", retract)
+    assert (await storage.list_threads("acme", "bruno"))[0].unread == 1
+    assert await storage.mark("acme", "t1", "bruno", first.seq, back=True) == (first.seq, 1, False)
+    await storage.append_event(
+        "acme",
+        Retract(
+            id="rt2", thread_id="t1", author=ANA, created_at=AT, client_id="c5", target=kept.id
+        ),
+    )
+    assert (await storage.list_threads("acme", "bruno"))[0].unread == 0
+    assert await storage.mark("acme", "t1", "bruno", first.seq, back=True) == (first.seq, 0, False)

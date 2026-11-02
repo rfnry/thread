@@ -219,7 +219,7 @@ async def list_threads(
 ```
 
 Returns every thread of the scope, member or not, newest first, up to `limit`; `metadata` is
-containment compared as JSON, and `before` a thread id or the last `Thread` of the page before, for the next page: a thread carries its own place, so one that moved since is neither repeated nor skipped. `query` keeps the threads
+containment compared as JSON, and `before` a thread id or the last `Thread` of the page before, for the next page: a thread carries its own place, so one that moved since is neither repeated nor skipped; a `Thread` without `last_seq` (from `get_thread` or `create_thread`) is read at its place now, like an id. `query` keeps the threads
 whose metadata strings or messages hold every word of it, each with its `match`, as
 `Client.list_threads` reads them. Raises `InputError` when the scope is empty, `limit` is not
 between 1 and 500 or `query` has no word or is over 1000 characters, `NotFoundError` when `before`
@@ -409,7 +409,7 @@ async def list_threads(
 
 Returns the threads the caller is a member of, newest first, up to `limit`; `before` is the last `Thread` of the
 page before (it carries its place, so a thread that moved since is neither repeated nor skipped) or a
-thread id, read at the thread's place now, one of yours. `order` is an `Order`, which is `Literal["created", "activity"]`: `"activity"`
+thread id, or a `Thread` without `last_seq` (from `get_thread` or `create_thread`), read at the thread's place now, one of yours. `order` is an `Order`, which is `Literal["created", "activity"]`: `"activity"`
 orders them by their latest message. Each carries `last_seq`, `last_message_at`, `marked` and
 `unread`, and with `preview=True` its `last_message`. With an `authorize`, the threads it refuses to
 `read` are skipped and a page still holds up to `limit`. `metadata` keeps the threads whose metadata
@@ -703,8 +703,8 @@ async def read(self, thread_id: str, up_to_seq: int) -> Read: ...
 ```
 
 Records that the caller has read up to `up_to_seq` and returns the stored cursor. Raises
-`NotFoundError` when the scope holds no such thread, `ForbiddenError` when the caller is not a
-member or `authorize` refuses `send`.
+`InputError` when it is outside 0 to 2**63 - 1, `NotFoundError` when the scope holds no such thread,
+`ForbiddenError` when the caller is not a member or `authorize` refuses `send`.
 
 ### `Client.custom`
 
@@ -1146,7 +1146,7 @@ class Marked(BaseModel):
     unread: int
 ```
 
-Your private read position in the thread moved to `seq`, with `unread` messages by others still
+Your private read position in the thread moved to `seq`, with `unread` unretracted messages by others still
 after it (at most 100); sent, only when the mark moved, to the marking identity's other
 connections, never to the one that marked or to anyone else.
 
@@ -1206,7 +1206,7 @@ A conversation: `id` yours or the server's, `scope` its tenant, `metadata` yours
 reads what came before an add (`"all"`, or `"since_added"`: each member from its add). A listed
 thread also carries `last_seq` and `last_message_at` (when its latest message was written); listed
 for a member, `marked` (the member's private read position, `None` without one) and `unread`
-(messages by others after it, at most 100); with `preview`, `last_message` (the latest message not
+(unretracted messages by others after it, at most 100); with `preview`, `last_message` (the latest message not
 retracted among its last five, with its edits); listed for a `query`, `match` (the latest message
 that matched, with its edits, `None` when only the metadata did). Fields without a value are left
 out on the wire.
@@ -1500,7 +1500,7 @@ found carries `match`, the latest such message with its latest edit, `None` when
 held them. `search` returns the latest `limit` messages of one thread at or above `floor` and below
 `before` that hold every word, in `seq` order, each with its latest edit. Both raise `InputError`
 for a query with no word. A page continues below `before`: a thread id, at that thread's place now,
-or a `Thread` a page listed, at the place its own `created_at`, `last_message_at` and `id` give it,
+a `Thread` without `last_seq` (from `get_thread` or `create_thread`), also at that place now, or a `Thread` a page listed, at the place its own `created_at`, `last_message_at` and `id` give it,
 so paging holds when that thread is deleted or moves meanwhile. A member listing gives each thread's
 `last_seq` as it was when read, and `follow` enters a thread whose `history` is `"all"` at it unless
 the server heard the thread change since. `head` returns a thread's last `seq` and the member's
@@ -1512,10 +1512,10 @@ and `get_event` given a `floor` leave out events below it and edits and retracti
 `on_signal(scope, thread_id, payload)`, called for what any server on the storage appends or
 publishes, and an `OnResume`, `on_resume()`, called once a dropped listener is back; it returns a
 `Stop`, `stop()`, that ends it, and all four are async functions returning `None`. Raises
-`NotFoundError`, from `add_member`, `remove_member`, `append_event` and `list_threads` with a `before` id, when the
+`NotFoundError`, from `add_member`, `remove_member`, `append_event` and `list_threads` with a `before` id or a `Thread` without `last_seq`, when the
 scope holds no such thread, and `StorageError`, from `create_thread`, when the thread's scope is not
 `scope`. `mark` stores the identity's private read position in the thread, never lowering it unless
-`back` is true, and returns it with the count of `message` events by others after it, at most 100,
+`back` is true, and returns it with the count of `message` events by others after it that are not retracted, at most 100,
 and whether it moved (a first mark, or a different one); `get_mark` returns it, `None` without one;
 `baseline_marks` stores each thread's last `seq` as the mark of every membership of `identity_id`
 that has none, and returns how many it stored. `mark` raises `NotFoundError` when the identity is
@@ -1808,7 +1808,7 @@ async listThreads(
 
 Returns the threads the caller is a member of, newest first, up to `limit` (50 when left out);
 `before` is the last `Thread` of the page before (it carries its place, so a thread that moved since
-is neither repeated nor skipped) or a thread id, read at the thread's place now. `order: 'activity'` orders them by their latest message.
+is neither repeated nor skipped) or a thread id, or a `Thread` without `last_seq` (from `getThread` or `createThread`), read at the thread's place now. `order: 'activity'` orders them by their latest message.
 Each carries `last_seq`, `last_message_at`, `marked` and `unread`, and with `preview: true` its
 `last_message`. With an `authorize`, the threads it refuses to `read` are skipped and a page still
 holds up to `limit`. `metadata` and `query` find threads as the Python `list_threads` does, each
@@ -2065,8 +2065,8 @@ async read(threadId: string, upToSeq: number): Promise<Read>
 ```
 
 Records that the caller has read up to `upToSeq` and returns the stored cursor. Raises
-`NotFoundError` when the scope holds no such thread, `ForbiddenError` when the caller is not a
-member or `authorize` refuses `send`.
+`InputError` when it is outside 0 to 2**63 - 1, `NotFoundError` when the scope holds no such thread,
+`ForbiddenError` when the caller is not a member or `authorize` refuses `send`.
 
 ### `Client.custom`
 
@@ -2542,7 +2542,7 @@ You were added to `thread`, which you have not joined; `sender` added you.
 type Marked = { kind: 'marked'; thread_id: string; sender: Identity; seq: number; unread: number }
 ```
 
-Your private read position in the thread moved to `seq`, with `unread` messages by others still
+Your private read position in the thread moved to `seq`, with `unread` unretracted messages by others still
 after it (at most 100); sent, only when the mark moved, to the marking identity's other
 connections, never to the one that marked or to anyone else.
 
@@ -2605,7 +2605,7 @@ A conversation: `id` yours or the server's, `scope` its tenant, `metadata` yours
 reads what came before an add (`'all'`, or `'since_added'`: each member from its add). A listed
 thread also carries `last_seq` and `last_message_at` (when its latest message was written); listed
 for a member, `marked` (the member's private read position, omitted without one) and `unread`
-(messages by others after it, at most 100); with `preview`, `last_message` (the latest message not
+(unretracted messages by others after it, at most 100); with `preview`, `last_message` (the latest message not
 retracted among its last five, with its edits); listed for a `query`, `match` (the latest message
 that matched, with its edits, omitted when only the metadata did). Fields without a value are left
 out on the wire.

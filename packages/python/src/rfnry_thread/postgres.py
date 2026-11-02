@@ -208,6 +208,9 @@ class PostgresStorage:
                 "k.seq AS marked, CASE WHEN k.seq IS NULL THEN NULL ELSE (SELECT count(*) FROM "
                 "(SELECT 1 FROM thread_events e WHERE e.scope = t.scope AND e.thread_id = t.id "
                 f"AND e.seq > k.seq AND e.kind = 'message' AND e.author_id <> {who} "
+                "AND NOT EXISTS (SELECT 1 FROM thread_events r WHERE r.scope = e.scope "
+                "AND r.thread_id = e.thread_id AND r.kind = 'retract' "
+                "AND r.body->>'target' = e.id) "
                 f"LIMIT ${len(args)}) u) END AS unread, "
                 f"{floor} AS floor"
             )
@@ -216,6 +219,8 @@ class PostgresStorage:
             args.append(json.dumps(metadata))
             where.append(f"t.metadata @> ${len(args)}::jsonb")
         key = "t.created_at" if order == "created" else "COALESCE(t.last_message_at, t.created_at)"
+        if isinstance(before, Thread) and before.last_seq is None:
+            before = before.id
         async with self._guard("list_threads"), self._pool.acquire() as conn:
             if isinstance(before, str):
                 row = await conn.fetchrow(
@@ -706,7 +711,9 @@ class PostgresStorage:
                 "END, at = EXCLUDED.at RETURNING seq) "
                 "SELECT s.seq, (SELECT count(*) FROM (SELECT 1 FROM thread_events e "
                 "WHERE e.scope = $1 AND e.thread_id = $2 AND e.seq > s.seq AND e.kind = 'message' "
-                "AND e.author_id <> $3 LIMIT $5) u) AS unread, "
+                "AND e.author_id <> $3 AND NOT EXISTS (SELECT 1 FROM thread_events r "
+                "WHERE r.scope = e.scope AND r.thread_id = e.thread_id AND r.kind = 'retract' "
+                "AND r.body->>'target' = e.id) LIMIT $5) u) AS unread, "
                 "s.seq IS DISTINCT FROM (SELECT seq FROM old) AS moved FROM stored s",
                 scope,
                 thread_id,

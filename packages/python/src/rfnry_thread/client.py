@@ -638,8 +638,13 @@ class Client:
     ) -> list[Thread]:
         payload: dict[str, Any] = {"before": before, "limit": limit}
         if isinstance(before, Thread):
-            stamps = before.model_dump(mode="json", include={"created_at", "last_message_at"})
-            payload["before"] = {"id": before.id, "last_message_at": None, **stamps}
+            if before.last_seq is None:
+                payload["before"] = before.id
+            else:
+                stamps = before.model_dump(
+                    mode="json", include={"created_at", "last_message_at", "last_seq"}
+                )
+                payload["before"] = {"id": before.id, "last_message_at": None, **stamps}
         if order != "created":
             payload["order"] = order
         if preview:

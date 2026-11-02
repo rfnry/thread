@@ -871,3 +871,33 @@ async def test_a_system_actor_that_is_not_a_member_cannot_mark_whatever_the_seq(
             NotFoundError, match="^server: 'system' is not a member of thread 't1'$"
         ):
             await server._verbs.mark(session, "t1", seq)
+
+
+@pytest.mark.parametrize("position", [2**63, 2**70, -1])
+async def test_a_read_past_the_bounds_of_a_position_is_refused_and_stores_nothing(
+    server: Server, position: int
+) -> None:
+    ana = await room(server, ANA)
+    with pytest.raises(InputError, match="^server: a position is from 0 to 2\\*\\*63 - 1$"):
+        await ana.call(
+            "event.send", thread_id="t1", kind="read", client_id="d1", up_to_seq=position
+        )
+    events = await ana.call("thread.history", thread_id="t1", kinds=["read"])
+    assert events["events"] == []
+
+
+async def test_a_read_at_the_largest_position_is_stored(server: Server) -> None:
+    ana = await room(server, ANA)
+    sent = await ana.call(
+        "event.send", thread_id="t1", kind="read", client_id="d1", up_to_seq=2**63 - 1
+    )
+    assert sent["event"]["up_to_seq"] == 2**63 - 1
+
+
+async def test_an_anchor_object_without_last_seq_is_refused(server: Server) -> None:
+    ana = await room(server, ANA)
+    anchor = {"id": "t1", "created_at": "2026-01-01T00:00:00Z", "last_message_at": None}
+    with pytest.raises(InputError, match="^server: invalid thread.list payload"):
+        await ana.call("thread.list", before=anchor, limit=50)
+    listed = await ana.call("thread.list", before={**anchor, "last_seq": 0}, limit=50)
+    assert listed["threads"] == []

@@ -641,11 +641,14 @@ export class Client {
     const payload: Payload = {
       before:
         typeof before === 'object'
-          ? {
-              id: before.id,
-              created_at: before.created_at,
-              last_message_at: before.last_message_at ?? null,
-            }
+          ? before.last_seq === undefined
+            ? before.id
+            : {
+                id: before.id,
+                created_at: before.created_at,
+                last_message_at: before.last_message_at ?? null,
+                last_seq: before.last_seq,
+              }
           : (before ?? null),
       limit: options.limit ?? 50,
     }

@@ -1050,6 +1050,17 @@ async def test_an_anchor_without_activity_pages_from_its_creation(server: Server
     assert [t.id for t in rest] == ["a"]
 
 
+async def test_a_thread_read_by_id_anchors_a_page_like_its_id(server: Server) -> None:
+    ana = await server.connect(identity=ANA, scope="acme")
+    for thread_id in "abc":
+        await ana.create_thread(thread_id=thread_id)
+    await ana.send("a", "late")
+    plain = await ana.get_thread("a")
+    assert plain.last_seq is None
+    rest = await ana.list_threads(order="activity", before=plain)
+    assert [t.id for t in rest] == ["c", "b"]
+
+
 async def test_an_anchor_id_is_checked_like_any_other_id(server: Server) -> None:
     ana = await server.connect(identity=ANA, scope="acme")
     anchor = Thread(id="x" * 257, scope="acme", created_at=AT)
