@@ -908,3 +908,51 @@ async def test_a_mark_in_flight_does_not_hold_back_appends(storage: Storage, poo
         await tx.commit()
     await asyncio.gather(marking, bruno, ana)
     assert not pending
+
+
+async def test_deleting_a_scope_does_not_deadlock_with_a_mark(storage: Storage, pool: Any) -> None:
+    await room(storage, "t1", "acme", ANA, BRUNO)
+    await storage.mark("acme", "t1", "bruno", 0)
+    async with pool.acquire() as holder:
+        tx = holder.transaction()
+        await tx.start()
+        await holder.execute(
+            "SELECT 1 FROM thread_members WHERE scope = 'acme' AND thread_id = 't1' "
+            "AND identity_id = 'bruno' FOR NO KEY UPDATE"
+        )
+        marking = asyncio.create_task(storage.mark("acme", "t1", "bruno", 1))
+        await asyncio.sleep(0.3)
+        wiping = asyncio.create_task(storage.delete_scope("acme"))
+        await asyncio.sleep(0.3)
+        await tx.commit()
+    done, pending = await asyncio.wait({marking, wiping}, timeout=10)
+    assert not pending
+    assert wiping.exception() is None
+    assert isinstance(marking.exception(), (type(None), NotFoundError))
+    assert await storage.verify_absent("acme")
+
+
+async def test_deleting_a_scope_does_not_deadlock_with_baseline_marks(
+    storage: Storage, pool: Any
+) -> None:
+    await room(storage, "t1", "acme", ANA, BRUNO)
+    await room(storage, "t2", "acme", ANA, BRUNO)
+    await storage.mark("acme", "t1", "ana", 0)
+    await storage.mark("acme", "t2", "ana", 0)
+    async with pool.acquire() as holder:
+        tx = holder.transaction()
+        await tx.start()
+        await holder.execute(
+            "SELECT 1 FROM thread_members WHERE scope = 'acme' AND thread_id = 't2' "
+            "AND identity_id = 'ana' FOR UPDATE"
+        )
+        baselining = asyncio.create_task(storage.baseline_marks("acme", "ana"))
+        await asyncio.sleep(0.3)
+        wiping = asyncio.create_task(storage.delete_scope("acme"))
+        await asyncio.sleep(0.3)
+        await tx.commit()
+    done, pending = await asyncio.wait({baselining, wiping}, timeout=10)
+    assert not pending
+    assert wiping.exception() is None
+    assert baselining.exception() is None
+    assert await storage.verify_absent("acme")

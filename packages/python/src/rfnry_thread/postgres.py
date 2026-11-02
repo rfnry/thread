@@ -737,7 +737,7 @@ class PostgresStorage:
                 "INSERT INTO thread_marks (scope, thread_id, identity_id, seq, at) "
                 "SELECT m.scope, m.thread_id, m.identity_id, t.last_seq, now() "
                 "FROM thread_members m JOIN thread_threads t ON t.scope = m.scope AND t.id = m.thread_id "
-                "WHERE m.scope = $1 AND m.identity_id = $2 FOR KEY SHARE OF m "
+                "WHERE m.scope = $1 AND m.identity_id = $2 ORDER BY m.thread_id FOR KEY SHARE OF m "
                 "ON CONFLICT (scope, thread_id, identity_id) DO NOTHING",
                 scope,
                 identity_id,
@@ -749,6 +749,11 @@ class PostgresStorage:
             removed = 0
             await conn.execute(
                 "SELECT 1 FROM thread_threads WHERE scope = $1 ORDER BY id FOR UPDATE", scope
+            )
+            await conn.execute(
+                "SELECT 1 FROM thread_members WHERE scope = $1 "
+                "ORDER BY thread_id, identity_id FOR UPDATE",
+                scope,
             )
             texts = await conn.fetchrow(_TEXTS_TABLE)
             for table in (
