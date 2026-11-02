@@ -920,3 +920,69 @@ async def test_a_removed_member_gets_nothing_after_the_removal_even_when_deliver
     release.set()
     await asyncio.gather(joining, first, second)
     assert [p["kind"] for p in await pushes(session, recorder)] == ["member_removed"]
+
+
+async def test_a_member_added_is_stored_and_served_though_one_connection_fails_to_enter(
+    storage: PostgresStorage,
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    server = Server(storage)
+    ana = await Peer.open(server, ANA)
+    first, second = await Peer.open(server, HELPER), await Peer.open(server, HELPER)
+    await first.call("thread.follow")
+    await second.call("thread.follow")
+    await ana.call("thread.create", thread_id="t1")
+    head = storage.head
+    armed = [True]
+
+    async def flaky(scope: str, thread_id: str, identity_id: str) -> Any:
+        if identity_id == HELPER.id and armed:
+            armed.pop()
+            raise StorageError("postgres: storage rejected head: connection reset")
+        return await head(scope, thread_id, identity_id)
+
+    monkeypatch.setattr(storage, "head", flaky)
+    with caplog.at_level(logging.WARNING, logger="rfnry_thread.hub"):
+        reply = await ana.call(
+            "member.add", thread_id="t1", identity=HELPER.model_dump(mode="json")
+        )
+    assert reply["member"]["identity"]["id"] == HELPER.id
+    await first.quiet()
+    await second.quiet()
+    assert len(first.joined) + len(second.joined) == 1
+    (record,) = [r for r in caplog.records if r.name == "rfnry_thread.hub"]
+    assert record.getMessage().startswith("hub: ")
+    assert any(s.id in record.getMessage() for s in server._hub.sessions)
+
+
+async def test_an_event_is_stored_and_served_though_one_connection_fails_to_catch_up(
+    storage: PostgresStorage,
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    server = Server(storage)
+    ana = await Peer.open(server, ANA)
+    await ana.call("thread.create", thread_id="t1")
+    await ana.call("member.add", thread_id="t1", identity=HELPER.model_dump(mode="json"))
+    first, second = await Peer.open(server, HELPER), await Peer.open(server, HELPER)
+    await first.call("thread.join", thread_id="t1")
+    await second.call("thread.join", thread_id="t1")
+    behind = next(s for s in server._hub.sessions if s.identity.id == HELPER.id)
+    behind.joined["t1"] -= 1
+    listing = storage.list_events
+    armed = [True]
+
+    async def flaky(*args: Any, **kwargs: Any) -> Any:
+        if armed and kwargs.get("since") == behind.joined["t1"]:
+            armed.pop()
+            raise StorageError("postgres: storage rejected list_events: connection reset")
+        return await listing(*args, **kwargs)
+
+    monkeypatch.setattr(storage, "list_events", flaky)
+    with caplog.at_level(logging.WARNING, logger="rfnry_thread.hub"):
+        stored = await say(ana, "t1", "hello")
+    assert stored["seq"] > 0 and not armed
+    served = [[p["kind"] for p in await peer.quiet()].count("message") for peer in (first, second)]
+    assert sorted(served) == [0, 1]
+    assert [r for r in caplog.records if r.name == "rfnry_thread.hub"]

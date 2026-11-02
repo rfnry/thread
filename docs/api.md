@@ -248,8 +248,9 @@ async def add_member(self, scope: str, thread_id: str, identity: IdentityLike) -
 
 Adds `identity` to the thread, writes `MemberAdded` authored by the system, sends `Invited` to their
 connections and returns the membership; someone already a member gets theirs back and nothing is
-written. Raises `InputError` when the scope is empty or the identity does not fit or is `system`,
-`NotFoundError` when the scope holds no such thread.
+written. A connection that fails to take delivery is logged and skipped; the write stands. Raises
+`InputError` when the scope is empty or the identity does not fit or is `system`, `NotFoundError`
+when the scope holds no such thread.
 
 ### `Server.remove_member`
 
@@ -582,7 +583,8 @@ async def add_member(self, thread_id: str, identity: IdentityLike) -> Member: ..
 ```
 
 Adds `identity` to the thread, writes `MemberAdded`, sends `Invited` to their connections and
-returns the membership; someone already a member gets theirs back and nothing is written. Raises
+returns the membership; someone already a member gets theirs back and nothing is written. A
+connection that fails to take delivery is logged and skipped; the write stands. Raises
 `InputError` when the identity does not fit or is `system`, `NotFoundError` when the scope holds no
 such thread, `ForbiddenError` when the caller is not a member or `authorize` refuses `manage`.
 

@@ -862,3 +862,23 @@ async def test_a_removal_delivered_inside_a_gap_cuts_the_removed_connection(
     assert [p["kind"] for p in await bruno.quiet() if "seq" in p] == ["member_removed"]
     await say(ana, "t1", "after the removal")
     assert await bruno.quiet() == []
+
+
+async def test_a_failed_follow_leaves_the_connection_to_be_invited(
+    server: Server, storage: PostgresStorage, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    helper = await Peer.open(server, HELPER)
+    listing = storage.list_threads
+    armed = [True]
+
+    async def flaky(*args: Any, **kwargs: Any) -> Any:
+        if armed.pop() if armed else False:
+            raise StorageError("postgres: simulated")
+        return await listing(*args, **kwargs)
+
+    monkeypatch.setattr(storage, "list_threads", flaky)
+    with pytest.raises(StorageError):
+        await helper.call("thread.follow")
+    await threads(server, "t1")
+    assert [p["kind"] for p in await helper.quiet()] == ["invited"]
+    assert helper.joined == []

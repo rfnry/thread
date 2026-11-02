@@ -281,14 +281,24 @@ class Hub:
                 continue
             floor = session.floors.get(event.thread_id, 0)
             if event.seq > cursor + 1:
-                missing = await self.storage.list_events(
-                    scope,
-                    event.thread_id,
-                    since=cursor,
-                    before=event.seq,
-                    limit=event.seq - cursor - 1,
-                    floor=floor,
-                )
+                try:
+                    missing = await self.storage.list_events(
+                        scope,
+                        event.thread_id,
+                        since=cursor,
+                        before=event.seq,
+                        limit=event.seq - cursor - 1,
+                        floor=floor,
+                    )
+                except Exception as error:
+                    logger.warning(
+                        "hub: catching connection %s of %r up in thread %r failed: %s",
+                        session.id,
+                        session.identity.id,
+                        event.thread_id,
+                        error,
+                    )
+                    continue
                 removed = next((e for e in missing if _removes(e, session)), None)
                 for earlier in missing:
                     session.push_event(earlier, earlier.model_dump(mode="json"))
@@ -452,6 +462,15 @@ class Hub:
                         session, thread, None if seq is None else seq - 1
                     )
                 except ForbiddenError, NotFoundError:
+                    continue
+                except Exception as error:
+                    logger.warning(
+                        "hub: entering connection %s of %r into thread %r failed: %s",
+                        session.id,
+                        identity_id,
+                        thread.id,
+                        error,
+                    )
                     continue
                 if entered:
                     session.push_joined(joined)

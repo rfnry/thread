@@ -405,21 +405,25 @@ class Verbs:
         if left is not None and any(seq < 0 for seq, _ in left.values()):
             raise InputError("server: left cannot be negative")
         actor, scope = session.identity, session.scope
-        session.following = True
-        if resume and since is None:
-            await self._storage.baseline_marks(scope, actor.id)
-        start, gone = since or {}, left or {}
-        with self._hub.watching() as touched:
-            threads = [
-                t
-                for t in await self._memberships(actor, scope)
-                if t.id not in gone or await self._back(scope, actor.id, t, *gone[t.id])
-            ]
-            return await self._hub.follow(
-                session,
-                [(t, start.get(t.id, t.marked if resume else None)) for t in threads],
-                touched,
-            )
+        previous, session.following = session.following, True
+        try:
+            if resume and since is None:
+                await self._storage.baseline_marks(scope, actor.id)
+            start, gone = since or {}, left or {}
+            with self._hub.watching() as touched:
+                threads = [
+                    t
+                    for t in await self._memberships(actor, scope)
+                    if t.id not in gone or await self._back(scope, actor.id, t, *gone[t.id])
+                ]
+                return await self._hub.follow(
+                    session,
+                    [(t, start.get(t.id, t.marked if resume else None)) for t in threads],
+                    touched,
+                )
+        except BaseException:
+            session.following = previous
+            raise
 
     async def _back(
         self, scope: str, identity_id: str, thread: Thread, seq: int, made: datetime | None
