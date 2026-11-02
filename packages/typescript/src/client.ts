@@ -550,7 +550,7 @@ export class Client {
 
   async listThreads(
     options: {
-      before?: string
+      before?: string | Thread
       limit?: number
       order?: 'created' | 'activity'
       preview?: boolean
@@ -558,7 +558,18 @@ export class Client {
       query?: string
     } = {}
   ): Promise<Thread[]> {
-    const payload: Payload = { before: options.before ?? null, limit: options.limit ?? 50 }
+    const before = options.before
+    const payload: Payload = {
+      before:
+        typeof before === 'object'
+          ? {
+              id: before.id,
+              created_at: before.created_at,
+              last_message_at: before.last_message_at ?? null,
+            }
+          : (before ?? null),
+      limit: options.limit ?? 50,
+    }
     if (options.order !== undefined && options.order !== 'created') payload.order = options.order
     if (options.preview) payload.preview = true
     if (options.metadata !== undefined) payload.metadata = options.metadata

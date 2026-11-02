@@ -1,0 +1,14 @@
+{
+  "id": "7",
+  "method": "thread.list",
+  "payload": {
+    "before": {
+      "created_at": "2026-01-01T12:00:00Z",
+      "id": "t0",
+      "last_message_at": "2026-01-01T12:00:00Z"
+    },
+    "limit": 20,
+    "order": "activity"
+  },
+  "type": "request"
+}

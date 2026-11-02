@@ -207,7 +207,7 @@ async def list_threads(
     scope: str,
     *,
     metadata: dict[str, Any] | None = None,
-    before: str | None = None,
+    before: str | Thread | None = None,
     limit: int = 50,
     order: Order = "created",
     preview: bool = False,
@@ -216,7 +216,7 @@ async def list_threads(
 ```
 
 Returns every thread of the scope, member or not, newest first, up to `limit`; `metadata` is
-containment compared as JSON, and `before` a thread id for the next page. `query` keeps the threads
+containment compared as JSON, and `before` a thread id or the last `Thread` of the page before, for the next page: a thread carries its own place, so one that moved since is neither repeated nor skipped. `query` keeps the threads
 whose metadata strings or messages hold every word of it, each with its `match`, as
 `Client.list_threads` reads them. Raises `InputError` when the scope is empty, `limit` is not
 between 1 and 500 or `query` has no word or is over 1000 characters, `NotFoundError` when `before`
@@ -390,7 +390,7 @@ when the caller is not a member or `authorize` refuses `read`.
 ```python
 async def list_threads(
     self,
-    before: str | None = None,
+    before: str | Thread | None = None,
     limit: int = 50,
     order: Order = "created",
     preview: bool = False,
@@ -399,8 +399,9 @@ async def list_threads(
 ) -> list[Thread]: ...
 ```
 
-Returns the threads the caller is a member of, newest first, up to `limit`; `before` is a thread id,
-for the next page. `order` is an `Order`, which is `Literal["created", "activity"]`: `"activity"`
+Returns the threads the caller is a member of, newest first, up to `limit`; `before` is the last `Thread` of the
+page before (it carries its place, so a thread that moved since is neither repeated nor skipped) or a
+thread id, read at the thread's place now, one of yours. `order` is an `Order`, which is `Literal["created", "activity"]`: `"activity"`
 orders them by their latest message. Each carries `last_seq`, `last_message_at`, `marked` and
 `unread`, and with `preview=True` its `last_message`. With an `authorize`, the threads it refuses to
 `read` are skipped and a page still holds up to `limit`. `metadata` keeps the threads whose metadata
@@ -1786,7 +1787,7 @@ when the caller is not a member or `authorize` refuses `read`.
 ```ts
 async listThreads(
   options: {
-    before?: string
+    before?: string | Thread
     limit?: number
     order?: 'created' | 'activity'
     preview?: boolean
@@ -1797,7 +1798,8 @@ async listThreads(
 ```
 
 Returns the threads the caller is a member of, newest first, up to `limit` (50 when left out);
-`before` is a thread id, for the next page. `order: 'activity'` orders them by their latest message.
+`before` is the last `Thread` of the page before (it carries its place, so a thread that moved since
+is neither repeated nor skipped) or a thread id, read at the thread's place now. `order: 'activity'` orders them by their latest message.
 Each carries `last_seq`, `last_message_at`, `marked` and `unread`, and with `preview: true` its
 `last_message`. With an `authorize`, the threads it refuses to `read` are skipped and a page still
 holds up to `limit`. `metadata` and `query` find threads as the Python `list_threads` does, each

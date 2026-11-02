@@ -44,7 +44,7 @@ from rfnry_thread.protocol import ErrorFrame, Failure, Push, Response, encode
 from rfnry_thread.resolve import resolve
 from rfnry_thread.server import Server
 
-from .factories import ANA, BRUNO, HELPER, Lookalike, lookalike
+from .factories import ANA, AT, BRUNO, HELPER, Lookalike, lookalike
 from .legacy import enroll
 
 
@@ -728,6 +728,39 @@ async def test_history_reads_forward_and_the_inbox_lists_by_activity(server: Ser
     assert [t.id for t in listed] == ["t1", "t2"]
     assert listed[0].last_message is not None
     assert listed[0].last_message.content == [Text(text="two")]
+
+
+async def test_a_page_after_the_last_thread_neither_repeats_nor_skips(server: Server) -> None:
+    ana = await server.connect(identity=ANA, scope="acme")
+    for thread_id in "abcdef":
+        await ana.create_thread(thread_id=thread_id)
+        await ana.send(thread_id, f"hi {thread_id}")
+    page = await ana.list_threads(order="activity", limit=3)
+    assert [t.id for t in page] == ["f", "e", "d"]
+    await ana.send("d", "new activity on the anchor")
+    rest = await ana.list_threads(order="activity", before=page[-1], limit=3)
+    assert [t.id for t in rest] == ["c", "b", "a"]
+
+
+async def test_an_anchor_without_activity_pages_from_its_creation(server: Server) -> None:
+    ana = await server.connect(identity=ANA, scope="acme")
+    for thread_id in "abc":
+        await ana.create_thread(thread_id=thread_id)
+    page = await ana.list_threads(order="activity", limit=2)
+    assert [t.id for t in page] == ["c", "b"]
+    assert page[-1].last_message_at is None
+    await ana.send("b", "now it has activity")
+    rest = await ana.list_threads(order="activity", before=page[-1])
+    assert [t.id for t in rest] == ["a"]
+
+
+async def test_an_anchor_id_is_checked_like_any_other_id(server: Server) -> None:
+    ana = await server.connect(identity=ANA, scope="acme")
+    anchor = Thread(id="x" * 257, scope="acme", created_at=AT)
+    with pytest.raises(InputError, match="server: a thread id is at most 256 bytes"):
+        await ana.list_threads(before=anchor)
+    with pytest.raises(InputError, match="server: text cannot hold a NUL character"):
+        await ana.list_threads(before=anchor.model_copy(update={"id": "a\x00b"}))
 
 
 async def test_a_follow_replay_for_a_thread_without_a_cursor_arrives_once_before_its_joined(

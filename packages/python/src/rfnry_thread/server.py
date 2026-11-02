@@ -60,8 +60,14 @@ class _Create(_Args):
     history: History = "all"
 
 
+class _Anchor(_Args):
+    id: str
+    created_at: datetime
+    last_message_at: datetime | None = None
+
+
 class _List(_Args):
-    before: str | None = None
+    before: str | _Anchor | None = None
     limit: int = 50
     order: Order = "created"
     preview: bool = False
@@ -307,7 +313,14 @@ class Server:
                     for t in await verbs.list_threads(
                         actor,
                         scope,
-                        listing.before,
+                        listing.before
+                        if not isinstance(listing.before, _Anchor)
+                        else Thread(
+                            id=listing.before.id,
+                            scope=scope,
+                            created_at=listing.before.created_at,
+                            last_message_at=listing.before.last_message_at,
+                        ),
                         listing.limit,
                         listing.metadata,
                         listing.order,
@@ -451,7 +464,7 @@ class Server:
         scope: str,
         *,
         metadata: dict[str, Any] | None = None,
-        before: str | None = None,
+        before: str | Thread | None = None,
         limit: int = 50,
         order: Order = "created",
         preview: bool = False,

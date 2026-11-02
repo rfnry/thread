@@ -2,7 +2,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { type Client, connect } from '../src/client.js'
 import { ConfigurationError, ForbiddenError, InputError, TransportError } from '../src/errors.js'
 import { timing } from '../src/timing.js'
-import type { Item } from '../src/types.js'
+import type { Item, Thread } from '../src/types.js'
 import { FakeServer, helper, message } from './fakes.js'
 
 const saved = { ...timing }
@@ -660,6 +660,32 @@ describe('client', () => {
       order: 'activity',
       preview: true,
     })
+    await client.close()
+  })
+
+  it('anchors a page on the thread it ended on', async () => {
+    const client = await connect({ url: 'ws://fake', protocols: ['thread', 'tok'] })
+    const anchor = {
+      id: 't9',
+      scope: 'acme',
+      metadata: {},
+      created_at: '2026-01-01T00:00:00Z',
+      last_message_at: '2026-01-02T00:00:00Z',
+    } as Thread
+    await client.listThreads({ order: 'activity', before: anchor })
+    await client.listThreads({ before: 't8' })
+    expect(server.sent('thread.list').map((frame) => frame.payload)).toEqual([
+      {
+        before: {
+          id: 't9',
+          created_at: '2026-01-01T00:00:00Z',
+          last_message_at: '2026-01-02T00:00:00Z',
+        },
+        limit: 50,
+        order: 'activity',
+      },
+      { before: 't8', limit: 50 },
+    ])
     await client.close()
   })
 

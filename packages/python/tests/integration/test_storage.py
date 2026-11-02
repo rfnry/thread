@@ -76,6 +76,18 @@ async def test_threads_are_listed_for_a_member_newest_first_in_pages(storage: St
     assert await storage.list_threads("acme", "bruno") == []
 
 
+async def test_a_member_cannot_anchor_on_a_thread_it_is_not_in(storage: Storage) -> None:
+    await storage.create_thread("acme", thread("ana-only", minutes=0))
+    await storage.add_member("acme", added("ana-only", ANA))
+    await storage.create_thread("acme", thread("bruno-only", minutes=1))
+    await storage.add_member("acme", added("bruno-only", BRUNO))
+    with pytest.raises(NotFoundError, match="postgres: thread 'bruno-only' was not found"):
+        await storage.list_threads("acme", "ana", before="bruno-only")
+    assert [t.id for t in await storage.list_threads("acme", None, before="bruno-only")] == [
+        "ana-only"
+    ]
+
+
 async def test_threads_are_listed_by_metadata_for_anyone_or_for_a_member(
     storage: Storage,
 ) -> None:

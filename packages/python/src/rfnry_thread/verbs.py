@@ -200,7 +200,7 @@ class Verbs:
         self,
         actor: Identity,
         scope: str,
-        before: str | None,
+        before: str | Thread | None,
         limit: int,
         metadata: dict[str, Any] | None = None,
         order: Order = "created",
@@ -208,7 +208,8 @@ class Verbs:
         query: str | None = None,
     ) -> list[Thread]:
         limit = _limit(limit)
-        _clean(before if isinstance(before, str) else None)
+        if before is not None:
+            _sized(before if isinstance(before, str) else before.id, "thread id")
         _clean(metadata)
         if query is not None:
             _query(query)

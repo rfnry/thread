@@ -217,10 +217,13 @@ class PostgresStorage:
         async with self._guard("list_threads"), self._pool.acquire() as conn:
             if isinstance(before, str):
                 row = await conn.fetchrow(
-                    "SELECT id, created_at, last_message_at FROM thread_threads "
-                    "WHERE scope = $1 AND id = $2",
+                    "SELECT t.id, t.created_at, t.last_message_at FROM thread_threads t "
+                    "WHERE t.scope = $1 AND t.id = $2 AND ($3::text IS NULL OR EXISTS "
+                    "(SELECT 1 FROM thread_members m WHERE m.scope = t.scope "
+                    "AND m.thread_id = t.id AND m.identity_id = $3))",
                     scope,
                     before,
+                    member_id,
                 )
                 if row is None:
                     raise NotFoundError(f"postgres: thread {before!r} was not found")

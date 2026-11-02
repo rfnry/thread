@@ -549,7 +549,7 @@ class Client:
 
     async def list_threads(
         self,
-        before: str | None = None,
+        before: str | Thread | None = None,
         limit: int = 50,
         order: Order = "created",
         preview: bool = False,
@@ -557,6 +557,9 @@ class Client:
         query: str | None = None,
     ) -> list[Thread]:
         payload: dict[str, Any] = {"before": before, "limit": limit}
+        if isinstance(before, Thread):
+            stamps = before.model_dump(mode="json", include={"created_at", "last_message_at"})
+            payload["before"] = {"id": before.id, "last_message_at": None, **stamps}
         if order != "created":
             payload["order"] = order
         if preview:

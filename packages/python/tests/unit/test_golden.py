@@ -155,6 +155,19 @@ def golden() -> dict[str, Frame]:
                 ]
             },
         ),
+        "request-thread-list-anchor": Request(
+            id="7",
+            method="thread.list",
+            payload={
+                "before": {
+                    "id": "t0",
+                    "created_at": AT.isoformat().replace("+00:00", "Z"),
+                    "last_message_at": AT.isoformat().replace("+00:00", "Z"),
+                },
+                "limit": 20,
+                "order": "activity",
+            },
+        ),
         "request-thread-list-query": Request(
             id="7",
             method="thread.list",
