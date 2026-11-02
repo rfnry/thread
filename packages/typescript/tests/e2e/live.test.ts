@@ -3,6 +3,7 @@ import { connect, ForbiddenError, InputError, resolve } from '../../src/index.js
 import type { Item } from '../../src/types.js'
 
 const url = process.env.THREAD_URL ?? ''
+if (!url) throw new Error('e2e: the live tier needs THREAD_URL, the server the Python tier starts')
 const helper = { role: 'assistant' as const, id: 'bot-helper', name: 'Helper' }
 
 async function until(check: () => boolean, ms = 5000): Promise<void> {
@@ -13,7 +14,7 @@ async function until(check: () => boolean, ms = 5000): Promise<void> {
   }
 }
 
-describe.skipIf(!url)('a live server', () => {
+describe('a live server', () => {
   it('carries a turn with a step, a stream and its message, in order', async () => {
     const client = await connect({ url, protocols: async () => ['thread', 'ana'] })
     const items: Item[] = []
