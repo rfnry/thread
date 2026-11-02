@@ -1,17 +1,19 @@
 import asyncio
 import json
+from typing import Any
 
 import pytest
+from database import open_pool
 
 from rfnry_thread import server as server_module
 from rfnry_thread.errors import ConfigurationError, InputError, StorageError
-from rfnry_thread.models import SYSTEM
+from rfnry_thread.models import SYSTEM, Message, Text
 from rfnry_thread.pipe import pipe
 from rfnry_thread.postgres import PostgresStorage
 from rfnry_thread.protocol import CLOSE_PROTOCOL, Hello, encode
 from rfnry_thread.server import Server
 
-from .factories import ANA, lookalike
+from .factories import ANA, BRUNO, lookalike
 from .peer import Peer
 
 
@@ -154,3 +156,38 @@ async def test_a_storage_failure_reaches_the_client_without_the_databases_text(
     with pytest.raises(StorageError, match="^server: storage failed$"):
         await client.list_threads()
     assert "secret DETAIL" in caplog.text
+
+
+class Plain(asyncio.SelectorEventLoop):
+    def create_task(self, coro: Any, *, name: str | None = None, context: Any = None) -> Any:  # type: ignore[override]
+        return super().create_task(coro, name=name, context=context)
+
+
+def test_a_committed_write_fans_out_on_a_loop_whose_create_task_takes_nothing_more() -> None:
+    async def main() -> list[str]:
+        pool = await open_pool()
+        try:
+            async with pool.acquire() as conn:
+                await conn.execute("DELETE FROM thread_threads")
+            server = Server(PostgresStorage(pool))
+            ana = await server.connect(identity=ANA, scope="acme")
+            bruno = await server.connect(identity=BRUNO, scope="acme")
+            await ana.create_thread(thread_id="t1")
+            await ana.add_member("t1", BRUNO)
+            await bruno.join("t1")
+            await ana.send("t1", "hello")
+
+            async def heard() -> list[str]:
+                async for item in bruno.events():
+                    if isinstance(item, Message):
+                        return [part.text for part in item.content if isinstance(part, Text)]
+                return []
+
+            found = await asyncio.wait_for(heard(), 5)
+            await ana.close()
+            await bruno.close()
+            return found
+        finally:
+            await asyncio.wait_for(pool.close(), 5)
+
+    assert asyncio.run(asyncio.wait_for(main(), 20), loop_factory=Plain) == ["hello"]

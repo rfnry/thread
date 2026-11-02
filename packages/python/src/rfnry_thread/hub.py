@@ -118,7 +118,7 @@ class Hub:
         self._shielded: set[asyncio.Future[None]] = set()
 
     async def shielded(self, work: Coroutine[Any, Any, None]) -> None:
-        task = asyncio.ensure_future(work)
+        task = asyncio.Task(work, loop=asyncio.get_running_loop(), eager_start=True)
         self._shielded.add(task)
         task.add_done_callback(self._shielded.discard)
         await asyncio.shield(task)
