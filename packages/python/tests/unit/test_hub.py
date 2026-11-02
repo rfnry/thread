@@ -394,3 +394,74 @@ async def test_a_leave_sent_right_after_a_join_leaves(storage: PostgresStorage) 
     assert "ana" not in [i["id"] for i in present["identities"]]
     await ana.end.close(1000, "")
     await bruno.end.close(1000, "")
+
+
+async def test_a_leave_during_a_gap_fill_stays_left(storage: PostgresStorage) -> None:
+    hub, thread = await setup(storage, events=2)
+    session, recorder = open_session(HELPER)
+    await hub.join(session, thread, None)
+    await pushes(session, recorder)
+    for n in (3, 4):
+        await storage.append_event("acme", message(n, f"m{n}"))
+    fourth = (await storage.list_events("acme", "t1", since=3))[0]
+    reading = asyncio.Event()
+    release = asyncio.Event()
+    read = storage.list_events
+
+    async def paused(*args: Any, **kwargs: Any) -> Any:
+        reading.set()
+        await release.wait()
+        return await read(*args, **kwargs)
+
+    storage.list_events = paused  # type: ignore[method-assign]
+    delivering = asyncio.create_task(hub.deliver("acme", fourth))
+    await reading.wait()
+    storage.list_events = read  # type: ignore[method-assign]
+    leaving = asyncio.create_task(hub.leave(session, "t1"))
+    await asyncio.sleep(0)
+    assert not leaving.done()
+    release.set()
+    await asyncio.gather(delivering, leaving)
+    assert "t1" not in session.joined
+    assert session not in hub._rooms.get(("acme", "t1"), set())
+    await hub.join(session, thread, None)
+    await pushes(session, recorder)
+    await storage.append_event("acme", message(5, "m5", BRUNO))
+    await hub.deliver("acme", (await storage.list_events("acme", "t1", since=4))[0])
+    assert [p["seq"] for p in await pushes(session, recorder)] == [5]
+
+
+async def test_a_removed_member_gets_nothing_after_the_removal_even_when_deliveries_queue(
+    storage: PostgresStorage,
+) -> None:
+    hub, thread = await setup(storage, events=2)
+    session, recorder = open_session(ANA)
+    other, _ = open_session(HELPER)
+    await hub.join(session, thread, None)
+    await pushes(session, recorder)
+    removal, _ = await storage.append_event(
+        "acme",
+        MemberRemoved(
+            id="r", thread_id="t1", author=BRUNO, created_at=AT, client_id="r", identity=ANA
+        ),
+    )
+    after, _ = await storage.append_event("acme", message(4, "after", BRUNO))
+    reading = asyncio.Event()
+    release = asyncio.Event()
+    head = storage.head
+
+    async def paused(*args: Any, **kwargs: Any) -> Any:
+        reading.set()
+        await release.wait()
+        return await head(*args, **kwargs)
+
+    storage.head = paused  # type: ignore[method-assign]
+    joining = asyncio.create_task(hub.join(other, thread, None))
+    await reading.wait()
+    storage.head = head  # type: ignore[method-assign]
+    first = asyncio.create_task(hub.deliver("acme", removal))
+    second = asyncio.create_task(hub.deliver("acme", after))
+    await asyncio.sleep(0)
+    release.set()
+    await asyncio.gather(joining, first, second)
+    assert [p["kind"] for p in await pushes(session, recorder)] == ["member_removed"]

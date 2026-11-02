@@ -203,7 +203,7 @@ class Hub:
             limit=self.replay_limit,
             floor=floor,
         )
-        if session.dropped or session.joined.get(thread.id) != cursor:
+        if session.dropped:
             return Joined(thread=thread, seq=cursor)
         for event in replay:
             session.outbound.put(Push(name="event", payload=event.model_dump(mode="json")))
@@ -224,15 +224,24 @@ class Hub:
             found.append(joined)
         return found
 
-    async def leave(self, session: Session, thread_id: str) -> None:
+    def _part(self, session: Session, thread_id: str) -> bool:
         session.floors.pop(thread_id, None)
         if session.joined.pop(thread_id, None) is None:
-            return
+            return False
         room = self._rooms.get((session.scope, thread_id))
         if room is not None:
             room.discard(session)
             if not room:
                 del self._rooms[(session.scope, thread_id)]
+        return True
+
+    async def leave(self, session: Session, thread_id: str) -> None:
+        async with self._lock(session.scope, thread_id):
+            parted = self._part(session, thread_id)
+        if parted:
+            await self._parted(session, thread_id)
+
+    async def _parted(self, session: Session, thread_id: str) -> None:
         for stream_id in sorted(s for t, s in session.streams if t == thread_id):
             await self.signal(
                 session,
@@ -253,8 +262,9 @@ class Hub:
         self._touch(scope, event.thread_id)
         async with self._lock(scope, event.thread_id):
             cut = await self._deliver(scope, event)
-        for session in cut:
-            await self.leave(session, event.thread_id)
+            parted = [s for s in cut if self._part(s, event.thread_id)]
+        for session in parted:
+            await self._parted(session, event.thread_id)
 
     async def _deliver(self, scope: str, event: Event) -> list[Session]:
         payload = event.model_dump(mode="json")
@@ -311,8 +321,9 @@ class Hub:
             async with self._lock(scope, thread_id):
                 found = await self.storage.list_events(scope, thread_id, since=seq - 1, limit=1)
                 cut = await self._deliver(scope, found[0]) if found and found[0].seq == seq else []
-            for session in cut:
-                await self.leave(session, thread_id)
+                parted = [s for s in cut if self._part(s, thread_id)]
+            for session in parted:
+                await self._parted(session, thread_id)
         except ThreadException as error:
             logger.warning("hub: a notice for thread %r failed: %s", thread_id, error)
 
