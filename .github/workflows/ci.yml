@@ -1,0 +1,18 @@
+name: ci
+
+on:
+  pull_request:
+    types: [opened, synchronize, reopened, ready_for_review]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  ci:
+    if: ${{ github.event_name == 'workflow_dispatch' || !github.event.pull_request.draft }}
+    uses: rfnry/tools/.github/workflows/gate.yml@33942a1bc0971c9a94f21cb089c19ccbcf9d386c

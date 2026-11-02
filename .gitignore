@@ -9,7 +9,6 @@ dist/
 node_modules/
 examples/**/uv.lock
 examples/**/.work/
-docs/plans/
 docs/superpowers/
 .superpowers/
 .worktrees

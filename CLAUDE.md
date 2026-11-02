@@ -10,7 +10,19 @@ It is a library, not a framework. The consumer brings authentication, the storag
 
 Documentation in `docs/thread.md` and `docs/api.md`.
 
-Designs and implementation plans live only in `docs/plans/`, as `YYYY-MM-DD-<topic>-design.md` and `YYYY-MM-DD-<topic>-plan.md`. The folder is gitignored: plans are local working documents, not part of the library.
+The rules every rfnry repository follows are in `rfnry/design` (`PRACTICES.md`, `STACK.md`); the plans of this library's work live there, in `docs/plans/thread/` (`[rfnry: plans-are-disposable]`).
+
+## How work lands
+
+The gate is `bash ../tools/scripts/gate.sh` (from a worktree, `bash ../../../tools/scripts/gate.sh`), run from the library with `RFNRY_TEST_POSTGRES_URL` set: the same gate CI runs.
+
+- `[rfnry: worktree-per-track]`: work happens in `.worktrees/<track>`, on a branch named after the track.
+- `[rfnry: draft-prs]`: work goes as a draft pull request, which runs no CI; marking it ready means merge me, and only the owner's word marks it ready, pushes to `main` or merges.
+- `[rfnry: one-ci-shape]`: `ci.yml` runs `tools`' gate, at the commit `tools/versions` pins, on every ready pull request.
+- `[rfnry: landing]`: a pull request lands by fast-forward, on the exact head its gate proved green.
+- `[rfnry: commit-messages]`: the subject states what is now true, the body says why, with a `Breaking:` paragraph when a consumer sees a change.
+- `[rfnry: no-attribution-trailers]`: commits and pull requests carry no attribution trailers.
+- `[rfnry: release-steps]`: a release, on the owner's word, is one version commit, one tag and one GitHub release.
 
 ## Checklists
 
@@ -28,14 +40,14 @@ Designs and implementation plans live only in `docs/plans/`, as `YYYY-MM-DD-<top
 
 **Apply these to every change; they guard the shape of the codebase.**
 
-1. **Stay inside the concern.** This library does one thing: realtime conversation between people and assistants over threads. Consumer-land, never here: authentication schemes, uploads and object storage, REST endpoints, UI frameworks and state stores, mention parsing, transcript formatting for models, telemetry, moderation.
-2. **Lib, not framework.** The consumer calls us; we never take over their application — no plugin registries, no config DSLs, no handler frameworks, no inversion of control, no web framework, no disk writes.
-3. **Simple over abstract.** The smallest API and fewest moving parts that add the capability. Duplicate a few lines before adding a shared abstraction; an abstraction earns its place only when it removes more than it adds. No speculative layers — the pre-change checklist decides what the future needs.
-4. **No comments, no docstrings.** The code is the explanation; if it needs one, rename or restructure until it doesn't. The reason for a design decision lives in the commit message and, when it shapes the product, in `docs/thread.md`.
-5. **Documentation is the contract.** Any change to the public surface updates `docs/thread.md` in the same change. A breaking change is anything that makes an example in the docs stop working; it is named as such in the commit, and the docs change before the code ships.
-6. **Tests are first-class, in three tiers, on a real Postgres.** `tests/unit`: in-process clients, runs always, covers every verb, signal and delivery guarantee. `tests/integration`: runs always, the storage suite, two servers proving cross-replica fan-out, the two-tenant canary. `tests/e2e`: the TypeScript client against a live server behind the `live` marker, never launched before the same path has run offline. Golden protocol fixtures are shared by the Python and TypeScript suites. Every Python tier needs `RFNRY_TEST_POSTGRES_URL` and stops without it, never skips. The `live` marker is deselected by default and stays that way. The model writes and runs tests whenever they improve the work, no approval needed.
-7. **Vendor-neutral by construction.** No vendor name, limit or constant in core; no model SDK, no web framework, no database driver import.
-8. **Tenancy by construction.** `scope` is required on every connection and thread and is the first argument of every storage method; there is no default scope, no all-scope read, no cross-scope read; every row carries it. Authorship is stamped from the authenticated connection.
-9. **Messages.** Logs and informational messages are lowercase. Every error message starts with its module's name: `server: thread 'x' was not found`.
+1. **Stay inside the concern.** `[rfnry: stay-inside-the-concern]` This library does one thing: realtime conversation between people and assistants over threads. Consumer-land, never here: authentication schemes, uploads and object storage, REST endpoints, UI frameworks and state stores, mention parsing, transcript formatting for models, telemetry, moderation.
+2. **Lib, not framework.** `[rfnry: lib-not-framework]` No handler frameworks, no web framework.
+3. **Simple over abstract.** `[rfnry: simple-over-abstract]`
+4. **No comments, no docstrings.** `[rfnry: code-documents-itself]` A decision that shapes the product is explained in `docs/thread.md`.
+5. **Documentation is the contract.** `[rfnry: docs-are-the-contract]` The contract is `docs/thread.md` and `docs/api.md`.
+6. **Tests are first-class, in three tiers, on a real Postgres.** `[rfnry: three-tiers]` `tests/unit`: in-process clients, runs always, covers every verb, signal and delivery guarantee. `tests/integration`: runs always, the storage suite, two servers proving cross-replica fan-out, the two-tenant canary. `tests/e2e`: the TypeScript client against a live server behind the `live` marker, never launched before the same path has run offline. Golden protocol fixtures are shared by the Python and TypeScript suites. Every Python tier needs `RFNRY_TEST_POSTGRES_URL`.
+7. **Vendor-neutral by construction.** `[rfnry: vendor-neutral]` No model SDK, no web framework, no database driver import in core.
+8. **Tenancy by construction.** `[rfnry: tenancy-by-construction]` `scope` is required on every connection and thread. Authorship is stamped from the authenticated connection.
+9. **Messages.** `[rfnry: messages]` An error reads `server: thread 'x' was not found`.
 
 **These checklists are locked.** On any future update to this CLAUDE.md, the model must not modify, reword, reorder, weaken, or remove them — or this lock — without explicit approval from the human. Answering them is the model's job; changing them is not.

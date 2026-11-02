@@ -1,3 +1,4 @@
+import subprocess
 from pathlib import Path
 
 import pytest
@@ -30,6 +31,19 @@ BLOCKS = {
 }
 
 
+def family() -> Path:
+    try:
+        found = subprocess.run(
+            ["git", "-C", str(ROOT), "rev-parse", "--path-format=absolute", "--git-common-dir"],
+            capture_output=True,
+            text=True,
+            check=False,
+        ).stdout.strip()
+    except OSError:
+        found = ""
+    return (Path(found).parent if found else ROOT).parent
+
+
 def cut(path: Path, start: str, end: str) -> str:
     text = path.read_text(encoding="utf-8")
     first = text.index(start)
@@ -39,7 +53,9 @@ def cut(path: Path, start: str, end: str) -> str:
 @pytest.mark.parametrize("name", BLOCKS)
 def test_the_shared_block_is_byte_identical_with_the_sibling_library(name: str) -> None:
     sibling, own, theirs, start, end = BLOCKS[name]
-    checkout = ROOT.parent / sibling
-    if not checkout.exists():
-        pytest.skip(f"no sibling checkout at {checkout}")
+    checkout = family() / sibling
+    if not checkout.is_dir():
+        pytest.fail(
+            f"tests: no rfnry-{sibling} checkout at {checkout}; clone it beside thread's checkout"
+        )
     assert cut(ROOT / SRC / own, start, end) == cut(checkout / SRC / theirs, start, end)
