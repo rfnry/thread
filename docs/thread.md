@@ -454,7 +454,10 @@ before anything new. A re-join refused because the thread is gone or no longer y
 longer follows until you call `follow()` again; any other refusal, a storage failure on the server
 among them, is a failed attempt: the client closes that connection and redials with the same backoff.
 A re-follow's or re-join's `Joined`
-also arrives in `events()`, and when it says `truncated`, redraw from the latest page. A reconnect
+also arrives in `events()`, and when it says `truncated`, redraw from the latest page. Each position
+a re-join or re-follow resumes from carries the `created_at` of the thread it was read in, so a
+thread deleted and made again under the same id while the client was away arrives from its start
+(from your add in a `since_added` thread), at most the replay limit of it, with `truncated=True`. A reconnect
 your endpoint refuses (HTTP 401 or 403 on the upgrade, or 1008 before the hello is answered), or
 whose `headers` function raises `ForbiddenError`, stops the client, and `events()` raises that
 error; an error from `headers` that is not the library's is a failed attempt, retried with backoff

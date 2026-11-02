@@ -494,9 +494,10 @@ class Client:
         self._lost(connection)
 
     async def _rejoined(self, thread_id: str, cursor: int) -> Joined:
-        if thread_id in self._present:
-            return await self._join(thread_id, cursor, announce=True)
-        return await self._join(thread_id, cursor, away=True, announce=True)
+        away = thread_id not in self._present
+        return await self._join(
+            thread_id, cursor, away=away, announce=True, made=self._made.get(thread_id)
+        )
 
     def _fail(self, error: ThreadException) -> None:
         self._failure = error
@@ -594,6 +595,7 @@ class Client:
         resume: bool = False,
         away: bool = False,
         announce: bool = False,
+        made: datetime | None = None,
     ) -> Joined:
         held = self._cursors.get(thread_id)
         hold = (
@@ -619,6 +621,8 @@ class Client:
             payload["resume"] = True
         if away:
             payload["away"] = True
+        if made is not None:
+            payload["created_at"] = made
         if hold is not None:
             self._holds.append(hold)
         try:
@@ -717,14 +721,12 @@ class Client:
     async def _follow(
         self, resume: bool, since: dict[str, int] | None, left: dict[str, int] | None
     ) -> list[Joined]:
-        payload: dict[str, Any] = {"resume": resume, "since": since}
+        payload: dict[str, Any] = {
+            "resume": resume,
+            "since": None if since is None else self._positions(since),
+        }
         if left:
-            payload["left"] = {
-                thread_id: {"seq": seq, "created_at": self._made[thread_id]}
-                if thread_id in self._made
-                else {"seq": seq}
-                for thread_id, seq in left.items()
-            }
+            payload["left"] = self._positions(left)
         holds = {
             thread_id: _Hold(
                 thread_id, sent, base=self._trusted(thread_id), made=self._made.get(thread_id)
@@ -751,6 +753,14 @@ class Client:
         for thread_id in raced:
             await self._request("thread.leave", {"thread_id": thread_id})
         return found
+
+    def _positions(self, seqs: dict[str, int]) -> dict[str, dict[str, Any]]:
+        return {
+            thread_id: {"seq": seq, "created_at": self._made[thread_id]}
+            if thread_id in self._made
+            else {"seq": seq}
+            for thread_id, seq in seqs.items()
+        }
 
     async def mark(self, thread_id: str, seq: int, back: bool = False) -> int:
         payload: dict[str, Any] = {"thread_id": thread_id, "seq": seq}

@@ -1240,7 +1240,8 @@ class Joined(BaseModel):
 ```
 
 What a join returns: the thread, its last `seq` when the join happened, and whether the replay was
-cut short, or `since` was past that `seq`.
+cut short, `since` was past that `seq`, or the thread was made again since the position a re-join
+or re-follow resumed from.
 
 ### `StatusChanged`
 
@@ -2639,7 +2640,8 @@ type Joined = { thread: Thread; seq: number; truncated: boolean }
 ```
 
 What a join returns, and what a listener receives after a re-join: the thread, its last `seq` when
-the join happened, and whether the replay was cut short, or `since` was past that `seq`.
+the join happened, and whether the replay was cut short, `since` was past that `seq`, or the thread
+was made again since the position a re-join or re-follow resumed from.
 
 ### `Status`
 

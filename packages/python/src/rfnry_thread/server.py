@@ -92,19 +92,24 @@ class _Update(_Ref):
 
 class _Join(_Ref):
     since: Seq | None = None
+    created_at: datetime | None = None
     resume: bool = False
     away: bool = False
 
 
-class _Gone(_Args):
+class _Position(_Args):
     seq: Seq
     created_at: datetime | None = None
 
 
 class _Follow(_Args):
     resume: bool = False
-    since: dict[str, Seq] | None = None
-    left: dict[str, _Gone] | None = None
+    since: dict[str, _Position] | None = None
+    left: dict[str, _Position] | None = None
+
+
+def _positions(found: dict[str, _Position] | None) -> dict[str, tuple[int, datetime | None]] | None:
+    return None if found is None else {t: (p.seq, p.created_at) for t, p in found.items()}
 
 
 class _History(_Ref):
@@ -361,16 +366,15 @@ class Server:
         if method == "thread.join":
             join = _args(_Join, method, payload)
             return _dump(
-                await verbs.join(session, join.thread_id, join.since, join.resume, join.away)
+                await verbs.join(
+                    session, join.thread_id, join.since, join.resume, join.away, join.created_at
+                )
             )
         if method == "thread.follow":
             follow = _args(_Follow, method, payload)
-            left = (
-                None
-                if follow.left is None
-                else {t: (g.seq, g.created_at) for t, g in follow.left.items()}
+            joined = await verbs.follow(
+                session, follow.resume, _positions(follow.since), _positions(follow.left)
             )
-            joined = await verbs.follow(session, follow.resume, follow.since, left)
             return {"joined": [_dump(j) for j in joined]}
         if method == "thread.leave":
             await verbs.leave(session, _args(_Ref, method, payload).thread_id)

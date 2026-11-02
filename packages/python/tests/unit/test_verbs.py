@@ -831,7 +831,7 @@ async def test_a_seq_beyond_64_bits_is_refused_as_input(server: Server) -> None:
         with pytest.raises(InputError, match=f"^server: invalid {method} payload"):
             await ana.call(method, **payload)
     with pytest.raises(InputError, match="^server: invalid thread.follow payload"):
-        await ana.call("thread.follow", since={"t1": big})
+        await ana.call("thread.follow", since={"t1": {"seq": big}})
     with pytest.raises(InputError, match="^server: invalid thread.follow payload"):
         await ana.call("thread.follow", left={"t1": {"seq": big}})
 

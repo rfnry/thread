@@ -228,21 +228,33 @@ def golden() -> dict[str, Frame]:
             id="6", method="thread.join", payload={"thread_id": "t1", "since": None, "resume": True}
         ),
         "request-thread-join-away": Request(
-            id="7", method="thread.join", payload={"thread_id": "t1", "since": 12, "away": True}
+            id="7",
+            method="thread.join",
+            payload={
+                "thread_id": "t1",
+                "since": 12,
+                "away": True,
+                "created_at": "2026-01-01T12:00:00Z",
+            },
         ),
         "request-thread-away": Request(id="9", method="thread.away", payload={"thread_id": "t1"}),
         "response-thread-join": Response(
             id="1", payload=Joined(thread=thread, seq=12, truncated=True).model_dump(mode="json")
         ),
         "request-thread-follow": Request(
-            id="4", method="thread.follow", payload={"resume": True, "since": {"t1": 9}}
+            id="4",
+            method="thread.follow",
+            payload={
+                "resume": True,
+                "since": {"t1": {"seq": 9, "created_at": "2026-01-01T12:00:00Z"}},
+            },
         ),
         "request-thread-follow-left": Request(
             id="4",
             method="thread.follow",
             payload={
                 "resume": True,
-                "since": {"t1": 9},
+                "since": {"t1": {"seq": 9, "created_at": "2026-01-01T12:00:00Z"}},
                 "left": {"t2": {"seq": 4, "created_at": "2026-01-01T12:00:00Z"}},
             },
         ),

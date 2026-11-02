@@ -3,6 +3,7 @@
   "method": "thread.join",
   "payload": {
     "away": true,
+    "created_at": "2026-01-01T12:00:00Z",
     "since": 12,
     "thread_id": "t1"
   },

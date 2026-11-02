@@ -635,7 +635,7 @@ async def test_a_rejoin_reads_the_cursor_a_live_event_moved_during_the_rejoin_be
     assert said == [(landed[0], "live during the re-joins")]
 
 
-async def test_a_rejoin_past_the_head_announces_the_join_then_the_events_that_race_it(
+async def test_a_rejoin_into_a_thread_made_again_announces_the_join_then_its_events_and_the_raced_one(
     live: Live,
 ) -> None:
     ana, bruno = await room(live)
@@ -647,11 +647,11 @@ async def test_a_rejoin_past_the_head_announces_the_join_then_the_events_that_ra
     await drop_and_reopen(live, ana)
     await bruno.send("t1", "after")
     items = [i for i in await drain(ana, include_own=False) if isinstance(i, Joined | Message)]
-    assert [type(i).__name__ for i in items] == ["Joined", "Message", "Message"]
-    assert said([i for i in items if isinstance(i, Message)]) == ["raced", "after"]
+    assert [type(i).__name__ for i in items] == ["Joined", "Message", "Message", "Message"]
+    assert said([i for i in items if isinstance(i, Message)]) == ["first", "raced", "after"]
 
 
-async def test_a_refollow_past_the_head_announces_the_join_then_the_events_that_race_it(
+async def test_a_refollow_into_threads_made_again_announces_each_join_then_its_events_and_the_raced_one(
     live: Live,
 ) -> None:
     ana_identity = Identity(role="user", id="ana", name="Ana")
@@ -677,11 +677,12 @@ async def test_a_refollow_past_the_head_announces_the_join_then_the_events_that_
     live.server._hub._enter = slow  # type: ignore[method-assign,assignment]
     await drop_and_reopen(live, ana)
     items = [i for i in await drain(ana, include_own=False) if isinstance(i, Joined | Message)]
-    assert sorted(type(i).__name__ for i in items) == ["Joined", "Joined", "Message"]
-    at = next(n for n, i in enumerate(items) if isinstance(i, Message))
-    before = items[at - 1]
-    assert isinstance(before, Joined) and before.thread.id == "t1"
-    assert said([items[at]]) == ["raced"]
+    for thread_id, texts in (("t1", ["first", "raced"]), ("t2", ["first"])):
+        mine = [
+            i for i in items if (i.thread.id if isinstance(i, Joined) else i.thread_id) == thread_id
+        ]
+        assert isinstance(mine[0], Joined) and mine[0].truncated
+        assert said(mine[1:]) == texts
 
 
 async def test_a_follow_that_fails_leaves_the_client_not_following(live: Live) -> None:

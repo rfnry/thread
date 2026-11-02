@@ -800,7 +800,9 @@ async def test_a_rewind_does_not_emit_again_a_copy_of_an_event_emitted_before_a_
     assert heard[-1] == "after"
 
 
-async def test_a_follow_past_the_head_keeps_the_event_that_races_its_answer(server: Server) -> None:
+async def test_a_follow_into_threads_made_again_keeps_the_event_that_races_its_answer(
+    server: Server,
+) -> None:
     ana = await server.connect(identity=ANA, scope="acme")
     for thread_id in ("t1", "t2"):
         await ana.create_thread(thread_id=thread_id)
@@ -822,7 +824,13 @@ async def test_a_follow_past_the_head_keeps_the_event_that_races_its_answer(serv
     found = await asyncio.wait_for(page._follow(True, {"t1": 40, "t2": 40}, None), 2)
     assert [joined.truncated for joined in found] == [True, True]
     await ana.send("t1", "after")
-    assert said(await drain(page)) == ["raced", "after"]
+    items = await drain(page)
+    assert said([i for i in items if isinstance(i, Message) and i.thread_id == "t1"]) == [
+        "first",
+        "raced",
+        "after",
+    ]
+    assert said([i for i in items if isinstance(i, Message) and i.thread_id == "t2"]) == ["first"]
 
 
 async def test_overlapping_joins_since_a_followed_thread_each_replay_their_own_window(
@@ -1549,3 +1557,53 @@ async def test_a_refollow_refused_as_wrong_input_joins_each_thread_and_no_longer
     assert not armed and not ana._following and "t1" in ana._cursors
     sent = await bruno.send("t1", "after the reconnect")
     assert (await take(ana, Message)).id == sent.id
+
+
+async def remade_while_away(server: Server, follow: bool) -> tuple[Client, list[Item], list[int]]:
+    ana = await server.connect(identity=ANA, scope="acme")
+    bruno = await server.connect(identity=BRUNO, scope="acme")
+    await bruno.create_thread(thread_id="t1")
+    await bruno.add_member("t1", ANA)
+    if follow:
+        await ana.follow()
+    else:
+        await ana.join("t1")
+    for n in range(3):
+        await bruno.send("t1", f"old {n}")
+    await until(lambda: ana._cursors.get("t1") == 5)
+    await drain(ana)
+    released = asyncio.Event()
+    dial = ana._dial
+
+    async def held() -> Connection:
+        await released.wait()
+        return await dial()
+
+    ana._dial = held
+    connection = ana._connection
+    assert connection is not None
+    await connection.close()
+    await until(lambda: ana.status == "reconnecting")
+    await server.delete_thread("acme", "t1")
+    await bruno.create_thread(thread_id="t1")
+    await bruno.add_member("t1", ANA)
+    for n in range(4):
+        await bruno.send("t1", f"new {n}")
+    released.set()
+    await until(lambda: ana.status == "open")
+    log = [e.seq for e in await bruno.history("t1")]
+    return ana, await drain(ana), log
+
+
+@pytest.mark.parametrize("follow", [False, True])
+async def test_a_thread_made_again_while_the_client_was_away_is_resumed_whole_and_truncated(
+    server: Server, follow: bool
+) -> None:
+    ana, items, log = await remade_while_away(server, follow)
+    joined = [i for i in items if isinstance(i, Joined)]
+    assert [(j.seq, j.truncated) for j in joined] == [(6, True)]
+    assert (
+        [i.seq for i in items if isinstance(i, MemberAdded | Message)] == log == [1, 2, 3, 4, 5, 6]
+    )
+    assert said(items) == ["new 0", "new 1", "new 2", "new 3"]
+    assert ana._cursors["t1"] == 6

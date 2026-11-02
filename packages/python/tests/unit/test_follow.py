@@ -214,7 +214,7 @@ async def test_a_thread_written_between_the_listing_and_the_enter_is_entered_at_
 
     monkeypatch.setattr(storage, "list_threads", listed)
     helper = await Peer.open(server, HELPER)
-    reply = await helper.call("thread.follow", since={"t1": 0, "t2": 0})
+    reply = await helper.call("thread.follow", since={"t1": {"seq": 0}, "t2": {"seq": 0}})
     assert sorted((j["thread"]["id"], j["seq"]) for j in reply["joined"]) == [
         ("t1", 3),
         ("t2", 4),
@@ -308,7 +308,7 @@ async def test_follow_refuses_a_negative_since(server: Server) -> None:
         InputError,
         match="^server: invalid thread.follow payload: input should be greater than or equal to 0$",
     ):
-        await helper.call("thread.follow", since={"t1": -1})
+        await helper.call("thread.follow", since={"t1": {"seq": -1}})
 
 
 async def test_a_follower_is_not_handed_a_thread_authorize_refuses_when_added_later(
@@ -381,7 +381,7 @@ async def test_a_follow_with_a_since_map_leaves_a_membership_without_a_mark_unma
     await server.create_thread("acme", "t1")
     await enroll(storage, "t1", HELPER)
     helper = await Peer.open(server, HELPER)
-    await helper.call("thread.follow", resume=True, since={"t1": 0})
+    await helper.call("thread.follow", resume=True, since={"t1": {"seq": 0}})
     assert await storage.get_mark("acme", "t1", "helper") is None
 
 
@@ -527,7 +527,7 @@ async def test_a_membership_with_no_mark_resumes_from_now_and_is_given_one(
 async def test_a_since_map_naming_a_foreign_thread_is_ignored(server: Server) -> None:
     await threads(server, "t1")
     helper = await Peer.open(server, HELPER)
-    reply = await helper.call("thread.follow", resume=True, since={"elsewhere": 0})
+    reply = await helper.call("thread.follow", resume=True, since={"elsewhere": {"seq": 0}})
     assert [j["thread"]["id"] for j in reply["joined"]] == ["t1"]
 
 
@@ -882,3 +882,47 @@ async def test_a_failed_follow_leaves_the_connection_to_be_invited(
     await threads(server, "t1")
     assert [p["kind"] for p in await helper.quiet()] == ["invited"]
     assert helper.joined == []
+
+
+async def remade(server: Server) -> tuple[Peer, str, str]:
+    ana = await threads(server, "t1")
+    for n in range(3):
+        await say(ana, "t1", f"old {n}")
+    old = await created_at(ana, "t1")
+    await ana.call("thread.delete", thread_id="t1")
+    await ana.call("thread.create", thread_id="t1", history="since_added")
+    await say(ana, "t1", "before the add")
+    await ana.call("member.add", thread_id="t1", identity=who(HELPER))
+    for n in range(2):
+        await say(ana, "t1", f"new {n}")
+    return ana, old, await created_at(ana, "t1")
+
+
+async def test_a_join_since_a_position_in_the_thread_before_it_was_made_again_replays_it_from_the_add(
+    server: Server,
+) -> None:
+    _, old, new = await remade(server)
+    helper = await Peer.open(server, HELPER)
+    joined = await helper.call("thread.join", thread_id="t1", since=5, created_at=old)
+    assert (joined["seq"], joined["truncated"]) == (5, True)
+    pushes = await helper.quiet()
+    assert [p["kind"] for p in pushes if "seq" in p] == ["member_added", "message", "message"]
+    assert texts(pushes) == ["new 0", "new 1"]
+    again = await Peer.open(server, HELPER)
+    joined = await again.call("thread.join", thread_id="t1", since=4, created_at=new)
+    assert (joined["seq"], joined["truncated"]) == (5, False)
+    assert texts(await again.quiet()) == ["new 1"]
+
+
+async def test_a_follow_since_a_position_in_the_thread_before_it_was_made_again_replays_it_from_the_add(
+    server: Server,
+) -> None:
+    _, old, new = await remade(server)
+    helper = await Peer.open(server, HELPER)
+    reply = await helper.call("thread.follow", since={"t1": {"seq": 5, "created_at": old}})
+    assert [(j["seq"], j["truncated"]) for j in reply["joined"]] == [(5, True)]
+    assert texts(await helper.quiet()) == ["new 0", "new 1"]
+    again = await Peer.open(server, HELPER)
+    reply = await again.call("thread.follow", since={"t1": {"seq": 4, "created_at": new}})
+    assert [(j["seq"], j["truncated"]) for j in reply["joined"]] == [(5, False)]
+    assert texts(await again.quiet()) == ["new 1"]

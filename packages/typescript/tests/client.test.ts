@@ -117,7 +117,11 @@ describe('client', () => {
     await expect(client.away('t1')).rejects.toBeInstanceOf(InputError)
     server.drop()
     await vi.waitFor(() => expect(server.sent('thread.join')).toHaveLength(2))
-    expect(server.sent('thread.join')[1]?.payload).toEqual({ thread_id: 't1', since: 0 })
+    expect(server.sent('thread.join')[1]?.payload).toEqual({
+      thread_id: 't1',
+      since: 0,
+      created_at: '2026-01-01T12:00:00Z',
+    })
     server.handlers.delete('thread.away')
     await client.away('t1')
     const join = server.handlers.get('thread.join')
@@ -142,7 +146,16 @@ describe('client', () => {
           .slice(2)
           .map((frame) => JSON.stringify(frame.payload))
       )
-    ).toEqual(new Set([JSON.stringify({ thread_id: 't1', since: 0, away: true })]))
+    ).toEqual(
+      new Set([
+        JSON.stringify({
+          thread_id: 't1',
+          since: 0,
+          away: true,
+          created_at: '2026-01-01T12:00:00Z',
+        }),
+      ])
+    )
     await client.close()
   })
 
@@ -155,12 +168,17 @@ describe('client', () => {
       thread_id: 't1',
       since: 0,
       away: true,
+      created_at: '2026-01-01T12:00:00Z',
     })
     await client.join('t1')
     expect(server.sent('thread.join')[2]?.payload).toEqual({ thread_id: 't1', since: null })
     server.drop()
     await vi.waitFor(() => expect(server.sent('thread.join')).toHaveLength(4))
-    expect(server.sent('thread.join')[3]?.payload).toEqual({ thread_id: 't1', since: 0 })
+    expect(server.sent('thread.join')[3]?.payload).toEqual({
+      thread_id: 't1',
+      since: 0,
+      created_at: '2026-01-01T12:00:00Z',
+    })
     await client.close()
   })
 
@@ -951,7 +969,7 @@ describe('client', () => {
     await vi.waitFor(() => expect(server.sent('thread.follow')).toHaveLength(2))
     expect(server.sent('thread.follow').map((frame) => frame.payload)).toEqual([
       { resume: true, since: null },
-      { resume: true, since: { t1: 5 } },
+      { resume: true, since: { t1: { seq: 5, created_at: '2026-01-01T12:00:00Z' } } },
     ])
     expect(server.sent('thread.join')).toEqual([])
     await client.close()
@@ -1017,6 +1035,7 @@ describe('client', () => {
       thread_id: 't1',
       since: 4,
       away: true,
+      created_at: '2026-01-01T12:00:00Z',
     })
     await vi.waitFor(() => expect(client.status).toBe('open'))
     expect((client as unknown as { following: boolean }).following).toBe(false)
@@ -1046,7 +1065,10 @@ describe('client', () => {
     await vi.waitFor(() => expect(server.sent('thread.follow')).toHaveLength(3))
     await vi.waitFor(() => expect(client.status).toBe('open'))
     expect(server.sent('thread.join')).toEqual([])
-    expect(server.sent('thread.follow').at(-1)?.payload).toEqual({ resume: true, since: { t1: 4 } })
+    expect(server.sent('thread.follow').at(-1)?.payload).toEqual({
+      resume: true,
+      since: { t1: { seq: 4, created_at: '2026-01-01T12:00:00Z' } },
+    })
     await client.close()
   })
 
@@ -1245,7 +1267,10 @@ describe('client', () => {
     await vi.waitFor(() => expect(items.some((item) => 'seq' in item && item.seq === 8)).toBe(true))
     server.drop()
     await vi.waitFor(() => expect(items).toContainEqual({ kind: 'status', status: 'open' }))
-    expect(server.sent('thread.follow').at(-1)?.payload).toEqual({ resume: true, since: { t1: 8 } })
+    expect(server.sent('thread.follow').at(-1)?.payload).toEqual({
+      resume: true,
+      since: { t1: { seq: 8, created_at: '2026-01-01T12:00:00Z' } },
+    })
     server.push('event', message(3, 'new'))
     await vi.waitFor(() => expect(items.at(-1)).toMatchObject({ seq: 3 }))
     await client.close()
@@ -1276,7 +1301,7 @@ describe('client', () => {
     ])
     expect(server.sent('thread.follow').at(-1)?.payload).toEqual({
       resume: true,
-      since: { t2: 4 },
+      since: { t2: { seq: 4, created_at: '2026-01-01T12:00:00Z' } },
       left: { t1: { seq: 4, created_at: '2026-01-01T12:00:00Z' } },
     })
     expect(items.flatMap((item) => ('truncated' in item ? [item.thread.id] : []))).toEqual(['t2'])
@@ -1356,7 +1381,7 @@ describe('client', () => {
       { resume: false, since: null },
       {
         resume: true,
-        since: { t2: 4 },
+        since: { t2: { seq: 4, created_at: '2026-01-01T12:00:00Z' } },
         left: { t1: { seq: 4, created_at: '2026-01-01T12:00:00Z' } },
       },
     ])
@@ -1379,7 +1404,10 @@ describe('client', () => {
     expect(items.filter((item) => 'truncated' in item)).toHaveLength(2)
     server.drop()
     await vi.waitFor(() => expect(server.sent('thread.follow')).toHaveLength(3))
-    expect(server.sent('thread.follow').at(-1)?.payload).toEqual({ resume: true, since: { t1: 4 } })
+    expect(server.sent('thread.follow').at(-1)?.payload).toEqual({
+      resume: true,
+      since: { t1: { seq: 4, created_at: '2026-01-01T12:00:00Z' } },
+    })
     await client.close()
   })
 
@@ -1713,7 +1741,10 @@ describe('client', () => {
     server.drop()
     await vi.waitFor(() => expect(items).toContainEqual({ kind: 'status', status: 'open' }))
     expect(server.sent('thread.leave')).toHaveLength(1)
-    expect(server.sent('thread.follow').at(-1)?.payload).toEqual({ resume: true, since: { t1: 6 } })
+    expect(server.sent('thread.follow').at(-1)?.payload).toEqual({
+      resume: true,
+      since: { t1: { seq: 6, created_at: '2026-01-01T12:00:00Z' } },
+    })
     server.push('event', message(7, 'still delivered'))
     await vi.waitFor(() => expect(items.at(-1)).toMatchObject({ seq: 7 }))
     await client.close()

@@ -529,8 +529,8 @@ export class Client {
   }
 
   private async rejoined(threadId: string, cursor: number): Promise<Joined> {
-    if (this.held.has(threadId)) return this.joinFrom(threadId, cursor, false, false, true)
-    return this.joinFrom(threadId, cursor, false, true, true)
+    const away = !this.held.has(threadId)
+    return this.joinFrom(threadId, cursor, false, away, true, this.made.get(threadId))
   }
 
   private fail(error: ThreadException): void {
@@ -595,7 +595,8 @@ export class Client {
     since: number | null,
     resume = false,
     away = false,
-    announce = false
+    announce = false,
+    made?: string
   ): Promise<Joined> {
     const held = this.cursors.get(threadId)
     const hold: Hold | undefined =
@@ -620,6 +621,7 @@ export class Client {
     const payload: Payload = { thread_id: threadId, since }
     if (resume) payload.resume = true
     if (away) payload.away = true
+    if (made !== undefined) payload.created_at = made
     if (hold) this.holds.push(hold)
     try {
       let joined: Joined
@@ -738,14 +740,11 @@ export class Client {
     since: Record<string, number> | null,
     left: Record<string, number>
   ): Promise<Joined[]> {
-    const payload: Record<string, unknown> = { resume, since }
-    if (Object.keys(left).length > 0)
-      payload.left = Object.fromEntries(
-        Object.entries(left).map(([id, seq]) => {
-          const created = this.made.get(id)
-          return [id, created === undefined ? { seq } : { seq, created_at: created }]
-        })
-      )
+    const payload: Record<string, unknown> = {
+      resume,
+      since: since === null ? null : this.positions(since),
+    }
+    if (Object.keys(left).length > 0) payload.left = this.positions(left)
     const holds = new Map<string, Hold>(
       Object.entries(since ?? {}).map(([id, sent]) => [
         id,
@@ -782,6 +781,15 @@ export class Client {
     }
     for (const id of raced) await this.request('thread.leave', { thread_id: id })
     return found
+  }
+
+  private positions(seqs: Record<string, number>): Record<string, Payload> {
+    return Object.fromEntries(
+      Object.entries(seqs).map(([id, seq]) => {
+        const created = this.made.get(id)
+        return [id, created === undefined ? { seq } : { seq, created_at: created }]
+      })
+    )
   }
 
   async mark(threadId: string, seq: number, options: { back?: boolean } = {}): Promise<number> {

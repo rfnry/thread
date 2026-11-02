@@ -703,7 +703,7 @@ async def test_a_thread_another_replica_wrote_between_a_listing_and_its_enter_is
 
     monkeypatch.setattr(storage, "list_threads", listed)
     helper = await Peer.open(near, HELPER)
-    reply = await helper.call("thread.follow", since={"t1": 0})
+    reply = await helper.call("thread.follow", since={"t1": {"seq": 0}})
     assert [j["seq"] for j in reply["joined"]] == [3]
     pushed = [p["content"][0]["text"] for p in await helper.quiet() if p["kind"] == "message"]
     assert pushed == ["from far"]
@@ -740,7 +740,7 @@ async def test_a_removal_after_a_follow_listing_cuts_the_follower_when_its_notic
 
         monkeypatch.setattr(storage, "list_threads", listed)
         helper = await Peer.open(near, HELPER)
-        await helper.call("thread.follow", since={"t1": 0})
+        await helper.call("thread.follow", since={"t1": {"seq": 0}})
         kinds = [p["kind"] for p in await helper.quiet(0.6) if "seq" in p]
         assert kinds[-1] == "member_removed"
         await say(ana, "t1", "said after helper was removed")
@@ -775,7 +775,7 @@ async def test_a_notice_landing_while_a_follower_enters_is_delivered_at_once(
 
         monkeypatch.setattr(storage, "list_events", replaying)
         helper = await Peer.open(near, HELPER)
-        await helper.call("thread.follow", since={"t1": 0})
+        await helper.call("thread.follow", since={"t1": {"seq": 0}})
         pushed = [
             p["content"][0]["text"] for p in await helper.quiet(0.6) if p["kind"] == "message"
         ]

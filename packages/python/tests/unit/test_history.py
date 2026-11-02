@@ -79,7 +79,7 @@ async def test_a_join_a_follow_and_a_rewind_replay_from_the_add(server: Server) 
     await joiner.call("thread.join", thread_id="t1", since=0)
     assert kinds(await joiner.quiet()) == ["member_added", "after"]
     follower = await Peer.open(server, HELPER)
-    await follower.call("thread.follow", since={"t1": 0})
+    await follower.call("thread.follow", since={"t1": {"seq": 0}})
     assert kinds(await follower.quiet()) == ["member_added", "after"]
     resumer = await Peer.open(server, HELPER)
     await resumer.call("thread.follow", resume=True)

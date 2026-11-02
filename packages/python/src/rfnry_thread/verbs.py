@@ -97,6 +97,10 @@ def _limit(limit: int) -> int:
     return limit
 
 
+def _remade(made: datetime | None, thread: Thread) -> bool:
+    return made is not None and made != thread.created_at
+
+
 def _query(query: str) -> str:
     if not query.split():
         raise InputError("server: a query needs at least one word")
@@ -378,6 +382,7 @@ class Verbs:
         since: int | None,
         resume: bool = False,
         away: bool = False,
+        made: datetime | None = None,
     ) -> Joined:
         if since is not None and resume:
             raise InputError("server: a join takes since or resume, not both")
@@ -385,6 +390,9 @@ class Verbs:
             raise InputError("server: since cannot be negative")
         actor, scope = session.identity, session.scope
         thread = await self.thread(actor, scope, thread_id, "read")
+        if since is not None and _remade(made, thread):
+            joined = await self._hub.join(session, thread, 0, away)
+            return joined.model_copy(update={"truncated": True})
         if resume:
             since = await self._storage.get_mark(scope, thread_id, actor.id)
             if since is None:
@@ -399,10 +407,10 @@ class Verbs:
         self,
         session: Session,
         resume: bool,
-        since: dict[str, int] | None,
+        since: dict[str, tuple[int, datetime | None]] | None,
         left: dict[str, tuple[int, datetime | None]] | None,
     ) -> list[Joined]:
-        if since is not None and any(seq < 0 for seq in since.values()):
+        if since is not None and any(seq < 0 for seq, _ in since.values()):
             raise InputError("server: since cannot be negative")
         if left is not None and any(seq < 0 for seq, _ in left.values()):
             raise InputError("server: left cannot be negative")
@@ -412,17 +420,28 @@ class Verbs:
             if resume and since is None:
                 await self._storage.baseline_marks(scope, actor.id)
             start, gone = since or {}, left or {}
+
+            def position(thread: Thread) -> int | None:
+                if thread.id in remade:
+                    return 0
+                if thread.id in start:
+                    return start[thread.id][0]
+                return thread.marked if resume else None
+
             with self._hub.watching() as touched:
                 threads = [
                     t
                     for t in await self._memberships(actor, scope)
                     if t.id not in gone or await self._back(scope, actor.id, t, *gone[t.id])
                 ]
-                return await self._hub.follow(
-                    session,
-                    [(t, start.get(t.id, t.marked if resume else None)) for t in threads],
-                    touched,
+                remade = {t.id for t in threads if t.id in start and _remade(start[t.id][1], t)}
+                found = await self._hub.follow(
+                    session, [(t, position(t)) for t in threads], touched
                 )
+            return [
+                j.model_copy(update={"truncated": True}) if j.thread.id in remade else j
+                for j in found
+            ]
         except BaseException:
             session.following = previous
             raise
@@ -431,7 +450,7 @@ class Verbs:
         self, scope: str, identity_id: str, thread: Thread, seq: int, made: datetime | None
     ) -> bool:
         return (
-            (made is not None and made != thread.created_at)
+            _remade(made, thread)
             or (thread.last_seq or 0) < seq
             or await self._added_since(scope, thread.id, identity_id, seq)
         )
