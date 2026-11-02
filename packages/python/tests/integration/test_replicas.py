@@ -1,6 +1,6 @@
 import asyncio
 import contextlib
-from collections.abc import AsyncIterator
+from collections.abc import AsyncIterator, Awaitable, Callable
 from datetime import UTC, datetime
 from typing import Any
 
@@ -279,6 +279,106 @@ async def test_a_repeat_taken_before_a_leave_does_not_bring_the_presence_back(
     await far._hub.announce()
     assert await ana.quiet(0.5) == []
     assert await present(ana) == ["ana"]
+
+
+async def test_deleting_a_scope_empties_its_rooms_on_the_other_replica(
+    replicas: tuple[Server, Server],
+) -> None:
+    near, far = replicas
+    ana, helper = await room(near, far)
+    elsewhere = await Peer.open(far, HELPER, scope="other")
+    await elsewhere.call("thread.create", thread_id="t1")
+    await elsewhere.call("thread.join", thread_id="t1")
+    await helper.call("signal.send", thread_id="t1", kind="working", label="Checking")
+    assert await arrived(ana, 1, 2.0) == [("working", "helper")]
+    await helper.quiet(0.3)
+    await elsewhere.quiet(0.3)
+    await near.delete_scope("acme")
+    assert await arrived(ana, 1, 2.0) == [("thread.deleted", "system")]
+    assert await arrived(helper, 1, 2.0) == [("thread.deleted", "system")]
+    for server in (near, far):
+        assert server._hub.state.present("acme", "t1") == []
+        assert [key for key in server._hub._rooms if key[0] == "acme"] == []
+    await near.create_thread("acme", "t1")
+    await near.add_member("acme", "t1", HELPER)
+    assert (await helper.push("invited", timeout=2.0))["thread"]["id"] == "t1"
+    await helper.call("thread.join", thread_id="t1")
+    assert await present(helper) == ["helper"]
+    assert await elsewhere.quiet(0.3) == []
+    assert far._hub.state.present("other", "t1") == [HELPER]
+
+
+async def first_repeat_held(far: Server, step: Callable[[list[str]], Awaitable[None]]) -> None:
+    storage = far._hub.storage
+    publish = storage.publish
+    held, release = asyncio.Event(), asyncio.Event()
+    sent: list[str] = []
+
+    async def late(scope: str, thread_id: str, payload: dict[str, Any]) -> None:
+        if payload.get("kind") == "refresh" and not held.is_set():
+            held.set()
+            await release.wait()
+        await publish(scope, thread_id, payload)
+        sent.append(str(payload.get("kind")))
+
+    storage.publish = late  # type: ignore[method-assign]
+    try:
+        announcing = asyncio.get_running_loop().create_task(far._hub.announce())
+        await asyncio.wait_for(held.wait(), 2.0)
+        await step(sent)
+        release.set()
+        await asyncio.wait_for(announcing, 2.0)
+    finally:
+        storage.publish = publish  # type: ignore[method-assign]
+
+
+async def heard_since(near: Server, far: Server) -> None:
+    elsewhere = await Peer.open(far, HELPER, scope="other")
+    await elsewhere.call("thread.create", thread_id="t1")
+    await elsewhere.call("thread.join", thread_id="t1")
+    await until(lambda: near._hub.state.present("other", "t1") == [HELPER])
+
+
+async def made_again(near: Server, ana: Peer) -> list[str]:
+    await near.create_thread("acme", "t1")
+    await near.add_member("acme", "t1", ANA)
+    await ana.call("thread.join", thread_id="t1")
+    return await present(ana)
+
+
+async def test_a_repeat_taken_before_a_scope_was_deleted_does_not_bring_its_state_back(
+    replicas: tuple[Server, Server],
+) -> None:
+    near, far = replicas
+    ana, helper = await room(near, far)
+
+    async def wipe(sent: list[str]) -> None:
+        await near.delete_scope("acme")
+        assert await arrived(helper, 1, 2.0) == [("thread.deleted", "system")]
+        await until(lambda: sent == ["refresh"])
+
+    await first_repeat_held(far, wipe)
+    await heard_since(near, far)
+    assert near._hub.state.present("acme", "t1") == []
+    assert await made_again(near, ana) == ["ana"]
+
+
+async def test_a_repeat_taken_before_a_leave_does_not_bring_the_presence_back_after_a_wipe(
+    replicas: tuple[Server, Server],
+) -> None:
+    near, far = replicas
+    ana, helper = await room(near, far)
+
+    async def leave_then_wipe(sent: list[str]) -> None:
+        await helper.call("thread.leave", thread_id="t1")
+        assert await arrived(ana, 1, 2.0) == [("left", "helper")]
+        await near.delete_scope("acme")
+        assert await arrived(ana, 1, 2.0) == [("thread.deleted", "system")]
+
+    await first_repeat_held(far, leave_then_wipe)
+    await heard_since(near, far)
+    assert near._hub.state.present("acme", "t1") == []
+    assert await made_again(near, ana) == ["ana"]
 
 
 async def test_a_cancelled_stop_still_gives_the_listening_connection_back(

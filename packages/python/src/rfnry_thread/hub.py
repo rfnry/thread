@@ -95,7 +95,8 @@ class Hub:
             weakref.WeakValueDictionary()
         )
         self._local: dict[tuple[str, str, str], int] = {}
-        self._watching: list[set[tuple[str, str]]] = []
+        self._watching: list[set[tuple[str, str | None]]] = []
+        self._wiping: dict[str, list[asyncio.Event]] = {}
         self._sent = itertools.count(1)
 
     def _lock(self, scope: str, thread_id: str) -> asyncio.Lock:
@@ -109,15 +110,15 @@ class Hub:
         return list(self._rooms.get((scope, thread_id), ()))
 
     @contextmanager
-    def watching(self) -> Iterator[set[tuple[str, str]]]:
-        touched: set[tuple[str, str]] = set()
+    def watching(self) -> Iterator[set[tuple[str, str | None]]]:
+        touched: set[tuple[str, str | None]] = set()
         self._watching.append(touched)
         try:
             yield touched
         finally:
             self._watching = [watch for watch in self._watching if watch is not touched]
 
-    def _touch(self, scope: str, thread_id: str) -> None:
+    def _touch(self, scope: str, thread_id: str | None) -> None:
         for touched in self._watching:
             touched.add((scope, thread_id))
 
@@ -125,8 +126,7 @@ class Hub:
         self, session: Session, thread: Thread, since: int | None, away: bool = False
     ) -> Joined:
         joined, _ = await self._enter(session, thread, since)
-        if not away and thread.id not in session.present and not session.dropped:
-            session.present.add(thread.id)
+        if not away and not session.dropped:
             await self._arrive(session, thread.id)
         return joined
 
@@ -136,7 +136,7 @@ class Hub:
         thread: Thread,
         since: int | None,
         rewind: bool = True,
-        touched: set[tuple[str, str]] | None = None,
+        touched: set[tuple[str, str | None]] | None = None,
     ) -> tuple[Joined, bool]:
         scope, thread_id = session.scope, thread.id
         async with self._lock(scope, thread_id):
@@ -147,6 +147,7 @@ class Hub:
             listed = (
                 touched is not None
                 and (scope, thread_id) not in touched
+                and (scope, None) not in touched
                 and thread.history == "all"
                 and thread.last_seq is not None
             )
@@ -216,7 +217,7 @@ class Hub:
         self,
         session: Session,
         threads: list[tuple[Thread, int | None]],
-        touched: set[tuple[str, str]],
+        touched: set[tuple[str, str | None]],
     ) -> list[Joined]:
         found: list[Joined] = []
         for thread, since in threads:
@@ -331,6 +332,16 @@ class Hub:
             logger.warning("hub: a notice for thread %r failed: %s", thread_id, error)
 
     async def signal(self, session: Session, signal: Signal) -> None:
+        async with self._lock(session.scope, signal.thread_id):
+            if (
+                isinstance(signal, Working | StreamStart | StreamDelta)
+                and signal.thread_id not in session.joined
+            ):
+                return
+            n = self._said(session, signal)
+        await self._mirror(session.scope, signal, n)
+
+    def _said(self, session: Session, signal: Signal) -> int:
         key = (signal.thread_id, getattr(signal, "stream_id", ""))
         if isinstance(signal, StreamStart):
             session.streams.add(key)
@@ -340,12 +351,10 @@ class Hub:
             session.working.add(signal.thread_id)
         elif isinstance(signal, Idle):
             session.working.discard(signal.thread_id)
-        async with self._lock(session.scope, signal.thread_id):
-            self._tell(
-                session.scope, signal.thread_id, self._visible(session.scope, signal, self.origin)
-            )
-            n = next(self._sent)
-        await self._mirror(session.scope, signal, n)
+        self._tell(
+            session.scope, signal.thread_id, self._visible(session.scope, signal, self.origin)
+        )
+        return next(self._sent)
 
     async def _fanout(self, scope: str, signal: Signal, origin: str, n: int) -> None:
         async with self._lock(scope, signal.thread_id):
@@ -386,10 +395,17 @@ class Hub:
                 self._expire(scope, thread_id, forget)
 
     async def _arrive(self, session: Session, thread_id: str) -> None:
-        key = (session.scope, thread_id, session.identity.id)
-        self._local[key] = self._local.get(key, 0) + 1
-        if self._local[key] == 1:
-            await self.signal(session, Present(thread_id=thread_id, sender=session.identity))
+        present = Present(thread_id=thread_id, sender=session.identity)
+        async with self._lock(session.scope, thread_id):
+            if thread_id not in session.joined or thread_id in session.present:
+                return
+            session.present.add(thread_id)
+            key = (session.scope, thread_id, session.identity.id)
+            self._local[key] = self._local.get(key, 0) + 1
+            if self._local[key] > 1:
+                return
+            n = self._said(session, present)
+        await self._mirror(session.scope, present, n)
 
     async def _depart(self, session: Session, thread_id: str) -> None:
         key = (session.scope, thread_id, session.identity.id)
@@ -419,6 +435,8 @@ class Hub:
     async def _added_here(
         self, scope: str, thread: Thread, sender: Identity, identity_id: str, seq: int | None
     ) -> None:
+        for wiping in list(self._wiping.get(scope, ())):
+            await wiping.wait()
         for session in list(self.sessions):
             if (
                 session.scope != scope
@@ -462,14 +480,46 @@ class Hub:
 
     async def deleted(self, scope: str, thread_id: str, sender: Identity) -> None:
         signal = ThreadDeleted(thread_id=thread_id, sender=sender)
-        await self._deleted_here(scope, signal)
+        emptied = await self._deleted_here(scope, signal)
         await self._mirror(scope, signal, next(self._sent))
+        await self._emptied(scope, emptied)
 
-    async def _deleted_here(self, scope: str, signal: ThreadDeleted) -> None:
+    async def scope_deleted(self, scope: str, sender: Identity) -> None:
+        emptied = await self._scope_deleted_here(scope, sender)
+        await self._publish(
+            scope, "", {"kind": "scope.deleted", "sender": sender.model_dump(mode="json")}
+        )
+        await self._emptied(scope, emptied)
+
+    async def _scope_deleted_here(
+        self, scope: str, sender: Identity
+    ) -> dict[str, list[dict[str, Any]]]:
+        done = asyncio.Event()
+        self._wiping.setdefault(scope, []).append(done)
+        try:
+            self._touch(scope, None)
+            held = {t for s, t in [*self._rooms, *self._locks.keys()] if s == scope}
+            emptied: dict[str, list[dict[str, Any]]] = {}
+            for thread_id in sorted(held.union(self.state.threads(scope))):
+                emptied.update(
+                    await self._deleted_here(
+                        scope, ThreadDeleted(thread_id=thread_id, sender=sender)
+                    )
+                )
+            return emptied
+        finally:
+            done.set()
+            self._wiping[scope].remove(done)
+            if not self._wiping[scope]:
+                del self._wiping[scope]
+
+    async def _deleted_here(
+        self, scope: str, signal: ThreadDeleted
+    ) -> dict[str, list[dict[str, Any]]]:
         thread_id = signal.thread_id
         self._touch(scope, thread_id)
         async with self._lock(scope, thread_id):
-            self.state.apply(scope, signal, self.origin)
+            items = self.state.delete(scope, thread_id)
             payload = signal.model_dump(mode="json")
             for session in self._room(scope, thread_id):
                 session.push_signal(payload)
@@ -481,6 +531,12 @@ class Hub:
             self._rooms.pop((scope, thread_id), None)
             for key in [k for k in self._local if k[:2] == (scope, thread_id)]:
                 del self._local[key]
+        return {thread_id: items} if items else {}
+
+    async def _emptied(self, scope: str, emptied: dict[str, list[dict[str, Any]]]) -> None:
+        n = next(self._sent)
+        for thread_id, items in emptied.items():
+            await self._repeat(scope, thread_id, n, items)
 
     async def drop(self, session: Session) -> None:
         session.dropped = True
@@ -491,16 +547,19 @@ class Hub:
     async def announce(self) -> None:
         n = next(self._sent)
         for (scope, thread_id), items in self.state.own().items():
-            batch: list[dict[str, Any]] = []
-            for item in items:
-                if _size({"entries": [*batch, item]}) > NOTIFY_LIMIT and batch:
-                    await self._publish(
-                        scope, thread_id, {"kind": "refresh", "n": n, "entries": batch}
-                    )
-                    batch = []
-                batch.append(item)
-            if batch:
+            await self._repeat(scope, thread_id, n, items)
+
+    async def _repeat(
+        self, scope: str, thread_id: str, n: int, items: list[dict[str, Any]]
+    ) -> None:
+        batch: list[dict[str, Any]] = []
+        for item in items:
+            if _size({"entries": [*batch, item]}) > NOTIFY_LIMIT and batch:
                 await self._publish(scope, thread_id, {"kind": "refresh", "n": n, "entries": batch})
+                batch = []
+            batch.append(item)
+        if batch:
+            await self._publish(scope, thread_id, {"kind": "refresh", "n": n, "entries": batch})
 
     async def _mirror(self, scope: str, signal: Signal, n: int) -> None:
         if not self.linked:
@@ -589,9 +648,13 @@ class Hub:
             if kind == "marked":
                 self._marked_here(scope, Marked.model_validate(payload))
                 return
+            if kind == "scope.deleted":
+                sender = Identity.model_validate(payload["sender"])
+                await self._emptied(scope, await self._scope_deleted_here(scope, sender))
+                return
             signal = SIGNALS.validate_python(payload)
             if isinstance(signal, ThreadDeleted):
-                await self._deleted_here(scope, signal)
+                await self._emptied(scope, await self._deleted_here(scope, signal))
                 return
             await self._fanout(scope, signal, str(origin), n)
         except Exception as error:

@@ -512,7 +512,10 @@ class Server:
         await self._verbs.delete_thread(SYSTEM, _scope(scope), thread_id)
 
     async def delete_scope(self, scope: str) -> int:
-        return await self._storage.delete_scope(_scope(scope))
+        scope = _scope(scope)
+        removed = await self._storage.delete_scope(scope)
+        await self._hub.scope_deleted(scope, SYSTEM)
+        return removed
 
     async def verify_absent(self, scope: str) -> bool:
         return await self._storage.verify_absent(_scope(scope))

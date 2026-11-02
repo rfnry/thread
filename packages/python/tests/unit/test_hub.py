@@ -6,9 +6,10 @@ from typing import Any
 import pytest
 from until import until
 
-from rfnry_thread.errors import StorageError
+from rfnry_thread.errors import ForbiddenError, StorageError
 from rfnry_thread.hub import Hub
 from rfnry_thread.models import (
+    SYSTEM,
     Identity,
     Idle,
     Left,
@@ -26,6 +27,7 @@ from rfnry_thread.protocol import Request, encode
 from rfnry_thread.server import Server
 from rfnry_thread.state import EXPIRY
 
+from .conftest import say
 from .factories import ANA, AT, BRUNO, HELPER, added, message, removed
 from .hubkit import kinds, open_session, pushes
 from .legacy import enroll
@@ -309,6 +311,194 @@ async def test_deletion_tells_the_room_and_empties_it(storage: PostgresStorage) 
     await hub.deleted("acme", "t1", ANA)
     assert kinds(await pushes(ana, recorder)) == ["thread.deleted"]
     assert ana.joined == {} and hub.state.snapshot("acme", "t1") == []
+
+
+async def test_deleting_a_scope_tells_each_joined_connection_and_empties_its_rooms(
+    storage: PostgresStorage,
+) -> None:
+    server = Server(storage)
+    ana = await Peer.open(server, ANA)
+    bruno = await Peer.open(server, BRUNO)
+    for thread_id in ("t1", "t2"):
+        await ana.call("thread.create", thread_id=thread_id)
+        await ana.call("member.add", thread_id=thread_id, identity=BRUNO.model_dump(mode="json"))
+        await ana.call("thread.join", thread_id=thread_id)
+    await bruno.call("thread.join", thread_id="t1")
+    await bruno.call("signal.send", thread_id="t1", kind="working", label="Reading")
+    await bruno.call("signal.send", thread_id="t1", kind="stream.start", stream_id="s1")
+    await say(bruno, "t1", "before")
+    elsewhere = await Peer.open(server, ANA, scope="other")
+    await elsewhere.call("thread.create", thread_id="t1")
+    await elsewhere.call("thread.join", thread_id="t1")
+    for peer in (ana, bruno, elsewhere):
+        await peer.quiet()
+    await server.delete_scope("acme")
+    told = sorted((p["kind"], p["thread_id"], p["sender"]["id"]) for p in await ana.quiet())
+    assert told == [("thread.deleted", "t1", "system"), ("thread.deleted", "t2", "system")]
+    assert [(p["kind"], p["thread_id"]) for p in await bruno.quiet()] == [("thread.deleted", "t1")]
+    assert await elsewhere.quiet() == []
+    hub = server._hub
+    assert [key for key in hub._rooms if key[0] == "acme"] == []
+    left = [
+        (s.joined, s.floors, s.present, s.working, s.streams)
+        for s in hub.sessions
+        if s.scope == "acme"
+    ]
+    assert left == [({}, {}, set(), set(), set())] * 2
+    assert hub.state.snapshot("acme", "t1") == [] and hub.state.own().keys() == {("other", "t1")}
+    with pytest.raises(ForbiddenError, match="^server: signals need a join"):
+        await bruno.call("signal.send", thread_id="t1", kind="idle")
+    await say(elsewhere, "t1", "still here")
+    assert [p["kind"] for p in await elsewhere.quiet()] == ["message"]
+    assert hub.state.present("other", "t1") == [ANA]
+
+
+async def test_a_thread_made_again_after_its_scope_was_deleted_is_handed_over_as_new(
+    storage: PostgresStorage,
+) -> None:
+    server = Server(storage)
+    ana = await Peer.open(server, ANA)
+    bruno = await Peer.open(server, BRUNO)
+    helper = await Peer.open(server, HELPER)
+    await ana.call("thread.create", thread_id="t1")
+    for identity in (BRUNO, HELPER):
+        await ana.call("member.add", thread_id="t1", identity=identity.model_dump(mode="json"))
+    await ana.call("thread.join", thread_id="t1")
+    await bruno.call("thread.join", thread_id="t1")
+    await helper.call("thread.follow")
+    for n in range(5):
+        await say(helper, "t1", f"old {n}")
+    for peer in (ana, bruno, helper):
+        await peer.quiet()
+    helper.joined.clear()
+    await server.delete_scope("acme")
+    for peer in (ana, bruno, helper):
+        assert kinds(await peer.quiet()) == ["thread.deleted"]
+    await server.create_thread("acme", "t1")
+    await server.add_member("acme", "t1", ANA)
+    await server.add_member("acme", "t1", HELPER)
+    assert (await ana.push("invited", timeout=2.0))["thread"]["id"] == "t1"
+    await helper.quiet()
+    assert [j["thread"]["id"] for j in helper.joined] == ["t1"]
+    await ana.call("thread.join", thread_id="t1")
+    for n in range(3):
+        await say(helper, "t1", f"new {n}")
+    for peer in (ana, helper):
+        said = [p["content"][0]["text"] for p in await peer.quiet() if p["kind"] == "message"]
+        assert said == ["new 0", "new 1", "new 2"]
+    assert await bruno.quiet() == []
+    assert (await ana.call("thread.present", thread_id="t1"))["identities"] == [
+        ANA.model_dump(mode="json")
+    ]
+
+
+async def test_an_invitation_crossing_the_deletion_of_its_scope_is_handed_over_after_it(
+    storage: PostgresStorage, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    hub, thread = await setup(storage)
+    first, _ = await storage.create_thread("acme", Thread(id="t0", scope="acme", created_at=AT))
+    await enroll(storage, "t0", BRUNO)
+    ana, ana_recorder = open_session(ANA)
+    helper, helper_recorder = open_session(HELPER)
+    helper.following = True
+    for session in (ana, helper):
+        hub.sessions.add(session)
+        await hub.join(session, thread, None)
+    await pushes(ana, ana_recorder)
+    await pushes(helper, helper_recorder)
+    head, is_member = storage.head, storage.is_member
+    reading: list[str] = []
+    checked: list[str] = []
+    release = asyncio.Event()
+
+    async def held(scope: str, thread_id: str, identity_id: str) -> tuple[int, int] | None:
+        found = await head(scope, thread_id, identity_id)
+        if thread_id == "t0":
+            reading.append(thread_id)
+            await release.wait()
+        return found
+
+    async def member(scope: str, thread_id: str, identity_id: str) -> bool:
+        found = await is_member(scope, thread_id, identity_id)
+        checked.append(identity_id)
+        return found
+
+    monkeypatch.setattr(storage, "head", held)
+    monkeypatch.setattr(storage, "is_member", member)
+    bruno, _ = open_session(BRUNO)
+    joining = asyncio.create_task(hub.join(bruno, first, None))
+    await until(lambda: reading == ["t0"])
+    await storage.delete_scope("acme")
+    wipe = {"o": "near", "kind": "scope.deleted", "sender": SYSTEM.model_dump(mode="json")}
+    deleting = asyncio.create_task(hub.on_signal("acme", "", wipe))
+    await asyncio.sleep(0)
+    await storage.create_thread("acme", Thread(id="t1", scope="acme", created_at=AT))
+    inviting = []
+    for identity in (ANA, HELPER):
+        _, event = await storage.add_member("acme", added("t1", identity))
+        assert event is not None
+        invited = {
+            "o": "near",
+            "kind": "invited",
+            "thread_id": "t1",
+            "sender": SYSTEM.model_dump(mode="json"),
+            "to": identity.id,
+            "seq": event.seq,
+        }
+        inviting.append(asyncio.create_task(hub.on_signal("acme", "t1", invited)))
+    await until(lambda: sorted(checked) == ["ana", "helper"])
+    assert not deleting.done()
+    release.set()
+    await asyncio.wait_for(asyncio.gather(joining, deleting, *inviting), 2.0)
+    for session in (ana, helper):
+        await session.outbound.drain()
+    told = [(f["name"], f["payload"].get("kind")) for f in ana_recorder.frames]
+    assert told == [("signal", "thread.deleted"), ("signal", "invited")]
+    told = [(f["name"], f["payload"].get("kind")) for f in helper_recorder.frames]
+    assert told == [("signal", "thread.deleted"), ("event", "member_added"), ("joined", None)]
+    assert ana.joined == {} and list(helper.joined) == ["t1"]
+
+
+async def test_joins_and_a_signal_crossing_the_deletion_of_their_scope_leave_nothing_behind(
+    storage: PostgresStorage, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    hub, thread = await setup(storage)
+    other, _ = await storage.create_thread("acme", Thread(id="t2", scope="acme", created_at=AT))
+    await enroll(storage, "t2", HELPER)
+    ana, ana_recorder = open_session(ANA)
+    await hub.join(ana, thread, None)
+    await pushes(ana, ana_recorder)
+    head = storage.head
+    reading: list[str] = []
+    release = asyncio.Event()
+
+    async def held(scope: str, thread_id: str, identity_id: str) -> tuple[int, int] | None:
+        found = await head(scope, thread_id, identity_id)
+        reading.append(thread_id)
+        await release.wait()
+        return found
+
+    monkeypatch.setattr(storage, "head", held)
+    bruno, bruno_recorder = open_session(BRUNO)
+    helper, helper_recorder = open_session(HELPER)
+    joining = [
+        asyncio.create_task(hub.join(bruno, thread, None)),
+        asyncio.create_task(hub.join(helper, other, None)),
+    ]
+    await until(lambda: len(reading) == 2)
+    await storage.delete_scope("acme")
+    deleting = asyncio.create_task(hub.scope_deleted("acme", SYSTEM))
+    await asyncio.sleep(0)
+    working = asyncio.create_task(hub.signal(ana, Working(thread_id="t1", sender=ANA)))
+    await asyncio.sleep(0)
+    release.set()
+    await asyncio.wait_for(asyncio.gather(*joining, deleting, working), 2.0)
+    assert hub.state.own() == {} and hub._local == {} and hub._rooms == {}
+    assert kinds(await pushes(ana, ana_recorder)) == ["thread.deleted"]
+    assert kinds(await pushes(bruno, bruno_recorder)) == ["present", "thread.deleted"]
+    assert kinds(await pushes(helper, helper_recorder)) == ["present", "thread.deleted"]
+    for session in (ana, bruno, helper):
+        assert (session.joined, session.present, session.working) == ({}, set(), set())
 
 
 async def test_linked_hubs_mirror_signals_and_drop_their_own(storage: PostgresStorage) -> None:

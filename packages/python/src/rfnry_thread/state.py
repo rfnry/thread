@@ -13,7 +13,6 @@ from rfnry_thread.models import (
     StreamDelta,
     StreamEnd,
     StreamStart,
-    ThreadDeleted,
     Working,
 )
 
@@ -59,9 +58,6 @@ class LatestState:
 
     def apply(self, scope: str, signal: Signal, origin: str, n: int = 0) -> None:
         key = (scope, signal.thread_id)
-        if isinstance(signal, ThreadDeleted):
-            self._threads.pop(key, None)
-            return
         if not isinstance(
             signal, Present | Left | Working | Idle | StreamStart | StreamDelta | StreamEnd
         ):
@@ -96,6 +92,30 @@ class LatestState:
         else:
             entry.streams.pop(signal.stream_id, None)
         self._store(key, slot, entry)
+
+    def delete(self, scope: str, thread_id: str) -> list[dict[str, Any]]:
+        entries = self._threads.pop((scope, thread_id), {})
+        now = self._clock()
+        kept = {
+            slot: _Entry(sender=entry.sender, seen=now, n=entry.n)
+            for slot, entry in entries.items()
+            if slot[0] != self.origin
+        }
+        if kept:
+            self._threads[(scope, thread_id)] = kept
+        return [
+            {
+                "sender": entry.sender.model_dump(mode="json"),
+                "present": False,
+                "working": None,
+                "streams": [],
+            }
+            for slot, entry in entries.items()
+            if slot[0] == self.origin
+        ]
+
+    def threads(self, scope: str) -> list[str]:
+        return [thread_id for held, thread_id in self._threads if held == scope]
 
     def _store(self, key: tuple[str, str], slot: tuple[str, str], entry: _Entry) -> None:
         entries = self._threads.setdefault(key, {})

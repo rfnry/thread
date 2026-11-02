@@ -296,7 +296,11 @@ async def delete_scope(self, scope: str) -> int: ...
 ```
 
 Removes every thread, member and event of the scope, with search its `thread_texts`, and returns
-how many rows it removed. Raises `InputError` when the scope is empty.
+how many rows it removed. Connections still open in the scope, on every replica, are sent
+`ThreadDeleted` for each thread they joined or followed and leave it; a thread made again under the
+same id reaches them as new, with `Invited`, or `Joined` for a follower. A replica whose `LISTEN`
+was down when the notice went out leaves its connections in those rooms until they reconnect.
+Raises `InputError` when the scope is empty.
 
 ### `Server.verify_absent`
 

@@ -6,7 +6,6 @@ from rfnry_thread.models import (
     StreamDelta,
     StreamEnd,
     StreamStart,
-    ThreadDeleted,
     Working,
 )
 from rfnry_thread.state import EXPIRY, LatestState
@@ -194,8 +193,17 @@ def test_own_lists_this_replica_entries_for_re_announcement() -> None:
     }
 
 
-def test_a_deleted_thread_is_forgotten() -> None:
-    cache = state([0.0])
+def test_a_deleted_thread_is_forgotten_and_an_older_repeat_cannot_bring_it_back() -> None:
+    now = [0.0]
+    cache = state(now)
     cache.apply("acme", Present(thread_id="t1", sender=ANA), "me")
-    cache.apply("acme", ThreadDeleted(thread_id="t1", sender=ANA), "me")
+    cache.apply("acme", Present(thread_id="t1", sender=HELPER), "far", 5)
+    assert cache.delete("acme", "t1") == [
+        {"sender": ANA.model_dump(mode="json"), "present": False, "working": None, "streams": []}
+    ]
     assert cache.snapshot("acme", "t1") == [] and cache.own() == {}
+    repeat = [{"sender": HELPER.model_dump(mode="json"), "present": True, "working": None}]
+    assert cache.refresh("acme", "t1", "far", repeat, 4) == []
+    assert cache.present("acme", "t1") == []
+    now[0] = EXPIRY + 1
+    assert cache.expire("acme", "t1") == [] and cache.threads("acme") == []

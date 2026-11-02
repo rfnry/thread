@@ -278,6 +278,30 @@ async def test_a_followed_thread_that_is_deleted_ends_with_one_notice(server: Se
     assert [p["kind"] for p in await helper.quiet()] == ["thread.deleted"]
 
 
+async def test_a_follow_crossing_the_deletion_of_its_scope_follows_nothing_it_deleted(
+    storage: PostgresStorage, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    server = Server(storage)
+    await threads(server, "t1", "t2")
+    original = storage.list_threads
+    wiped: list[int] = []
+
+    async def listing(*args: Any) -> list[Thread]:
+        page = await original(*args)
+        if not wiped:
+            wiped.append(await server.delete_scope("acme"))
+        return page
+
+    monkeypatch.setattr(storage, "list_threads", listing)
+    helper = await Peer.open(server, HELPER)
+    reply = await helper.call("thread.follow")
+    assert wiped[0] > 0 and reply["joined"] == []
+    await server.create_thread("acme", "t1")
+    await server.add_member("acme", "t1", HELPER)
+    await helper.quiet()
+    assert [j["thread"]["id"] for j in helper.joined] == ["t1"]
+
+
 async def test_follow_refuses_a_negative_since(server: Server) -> None:
     helper = await Peer.open(server, HELPER)
     with pytest.raises(

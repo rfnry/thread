@@ -524,10 +524,12 @@ An event is stored and announced in one transaction; every replica with a connec
 thread reads it by `seq`. Signals are delivered on the sender's replica and mirrored to the others.
 Each replica keeps who is present, working and streaming, and repeats its own every ten seconds;
 what a repeat changes — a signal another replica missed — is told to that replica's connections. A
-missed announcement costs latency, never an event: resume reads from storage. A replica whose
-`LISTEN` connection drops takes another with jittered backoff, listens again and repeats its own
-state at once, so the others rebuild it. `start()` holds one connection from the pool for `LISTEN`;
-`stop()` gives it back.
+missed event announcement costs latency, never an event: resume reads from storage. A missed
+`thread.deleted` or `scope.deleted` notice is not sent again: that replica's connections stay in the
+deleted threads' rooms, and are not handed a thread made again under the same id, until they
+reconnect. A replica whose `LISTEN` connection drops takes another with jittered backoff, listens
+again and repeats its own state at once, so the others rebuild it. `start()` holds one connection
+from the pool for `LISTEN`; `stop()` gives it back.
 
 A replica that goes away ends, for the others' connections, what its own had announced, as if they
 had dropped: `StreamEnd` for each open stream, `Idle` for the work, and `Left` for each identity no
@@ -541,7 +543,7 @@ hear from it again, what it still holds is announced again with `Present`, `Work
 Notices are not signed: every database role that can connect hears every scope's notices — the live
 traffic of all tenants — and can send them. Give the database only to roles trusted with every
 tenant. The server checks what it can: an `invited` notice is acted on only for a current member;
-`thread.deleted` notices are not checked.
+`thread.deleted` and `scope.deleted` notices are not checked.
 
 #### One handler per thread
 
@@ -947,6 +949,11 @@ assert await server.verify_absent("acme")
 ```
 
 `delete_scope` returns how many rows it removed; `verify_absent` counts every table independently.
+Connections still open in the scope, on every replica, are sent `ThreadDeleted` for each thread they
+joined or followed and leave it, and the scope's presence, work and streams are forgotten. A thread
+made again under the same id reaches them as new: `Invited`, or `Joined` for a follower. A replica
+whose `LISTEN` was down when the notice went out leaves its connections in those rooms until they
+reconnect.
 
 ## At a glance
 
