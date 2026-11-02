@@ -334,7 +334,7 @@ describe('client', () => {
         id: payload.thread_id,
         scope: 'acme',
         metadata: {},
-        created_at: '2026-01-01T12:00:00Z',
+        created_at: '2026-02-01T00:00:00Z',
       },
       seq: 2,
       truncated: true,
@@ -345,6 +345,295 @@ describe('client', () => {
     await vi.waitFor(() => expect(items.at(-1)).toMatchObject({ seq: 3 }))
     expect(server.sent('thread.join').map((frame) => frame.payload.since)).toEqual([0, 8])
   })
+
+  it('keeps the events that race the answer of a re-join of a thread made again', async () => {
+    server.seq = 40
+    const client = await connect({ url: 'ws://fake' })
+    const items: Item[] = []
+    client.subscribe((item) => items.push(item), { includeOwn: true })
+    await client.join('t1')
+    server.handlers.set('thread.join', (payload) => {
+      server.push('event', message(4, 'raced'))
+      return {
+        thread: {
+          id: payload.thread_id,
+          scope: 'acme',
+          metadata: {},
+          created_at: '2026-02-01T00:00:00Z',
+        },
+        seq: 3,
+        truncated: true,
+      }
+    })
+    server.drop()
+    await vi.waitFor(() => expect(items.filter((item) => 'truncated' in item)).toHaveLength(1))
+    await vi.waitFor(() => expect(client.status).toBe('open'))
+    server.push('event', message(5, 'after'))
+    await vi.waitFor(() => expect(items.at(-1)).toMatchObject({ seq: 5 }))
+    expect(
+      items.map((item) => ('truncated' in item ? 'joined' : 'seq' in item ? item.seq : item.kind))
+    ).toEqual(['status', 'joined', 4, 'status', 5])
+  })
+
+  it('keeps the events that race the answer of a re-follow of a thread made again', async () => {
+    const answer = (seq: number) => ({
+      joined: [
+        {
+          thread: {
+            id: 't1',
+            scope: 'acme',
+            metadata: {},
+            created_at: seq === 3 ? '2026-02-01T00:00:00Z' : '2026-01-01T12:00:00Z',
+          },
+          seq,
+          truncated: seq === 3,
+        },
+      ],
+    })
+    server.handlers.set('thread.follow', () => answer(40))
+    const client = await connect({ url: 'ws://fake' })
+    const items: Item[] = []
+    client.subscribe((item) => items.push(item), { includeOwn: true })
+    await client.follow({ resume: true })
+    server.handlers.set('thread.follow', () => {
+      server.push('event', message(4, 'raced'))
+      return answer(3)
+    })
+    server.drop()
+    await vi.waitFor(() => expect(items.filter((item) => 'truncated' in item)).toHaveLength(2))
+    await vi.waitFor(() => expect(client.status).toBe('open'))
+    server.push('event', message(5, 'after'))
+    await vi.waitFor(() => expect(items.at(-1)).toMatchObject({ seq: 5 }))
+    expect(
+      items.map((item) => ('truncated' in item ? 'joined' : 'seq' in item ? item.seq : item.kind))
+    ).toEqual(['joined', 'status', 'joined', 4, 'status', 5])
+  })
+
+  it('emits the events around the sent position after the join, in seq order', async () => {
+    server.seq = 5
+    const client = await connect({ url: 'ws://fake' })
+    const items: Item[] = []
+    client.subscribe((item) => items.push(item), { includeOwn: true })
+    await client.join('t1')
+    server.handlers.set('thread.join', (payload) => {
+      for (const seq of [4, 5, 6]) server.push('event', message(seq, `m${seq}`))
+      return {
+        thread: {
+          id: payload.thread_id,
+          scope: 'acme',
+          metadata: {},
+          created_at: '2026-02-01T00:00:00Z',
+        },
+        seq: 3,
+        truncated: true,
+      }
+    })
+    server.drop()
+    await vi.waitFor(() => expect(items.filter((item) => 'truncated' in item)).toHaveLength(1))
+    await vi.waitFor(() => expect(client.status).toBe('open'))
+    expect(
+      items.map((item) =>
+        'truncated' in item
+          ? 'joined'
+          : 'seq' in item
+            ? item.seq
+            : 'status' in item
+              ? item.status
+              : null
+      )
+    ).toEqual(['reconnecting', 'joined', 4, 5, 6, 'open'])
+    server.push('event', message(7, 'after'))
+    await vi.waitFor(() => expect(items.at(-1)).toMatchObject({ seq: 7 }))
+  })
+
+  it('gives each overlapping join its own hold', async () => {
+    const client = await connect({ url: 'ws://fake' })
+    const items: Item[] = []
+    client.subscribe((item) => items.push(item), { includeOwn: true })
+    let open!: () => void
+    const gate = new Promise<void>((resolve) => {
+      open = resolve
+    })
+    const thread = (id: string) => ({
+      id,
+      scope: 'acme',
+      metadata: {},
+      created_at: '2026-02-01T00:00:00Z',
+    })
+    server.handlers.set('thread.join', async (payload) => {
+      if (payload.since === 40) {
+        server.push('event', message(4, 'raced'))
+        await gate
+        return { thread: thread(payload.thread_id), seq: 3, truncated: true }
+      }
+      return { thread: thread(payload.thread_id), seq: 3, truncated: false }
+    })
+    const past = client.join('t1', { since: 40 })
+    await vi.waitFor(() => expect(server.sent('thread.join')).toHaveLength(1))
+    await new Promise((resolve) => setTimeout(resolve, 5))
+    await client.join('t1')
+    open()
+    await past
+    server.push('event', message(5, 'after'))
+    await vi.waitFor(() => expect(items.at(-1)).toMatchObject({ seq: 5 }))
+    expect(items.map((item) => ('seq' in item ? item.seq : null))).toEqual([4, 5])
+  })
+
+  it('emits each event once when two overlapping joins past the head each hold it', async () => {
+    const client = await connect({ url: 'ws://fake' })
+    const items: Item[] = []
+    client.subscribe((item) => items.push(item), { includeOwn: true })
+    let open!: () => void
+    const gate = new Promise<void>((resolve) => {
+      open = resolve
+    })
+    let calls = 0
+    server.handlers.set('thread.join', async (payload) => {
+      calls += 1
+      if (calls === 1) {
+        server.push('event', message(4, 'raced'))
+        await gate
+      }
+      return {
+        thread: {
+          id: payload.thread_id,
+          scope: 'acme',
+          metadata: {},
+          created_at: '2026-02-01T00:00:00Z',
+        },
+        seq: 3,
+        truncated: true,
+      }
+    })
+    const first = client.join('t1', { since: 40 })
+    const second = client.join('t1', { since: 40 })
+    await second
+    open()
+    await first
+    server.push('event', message(5, 'after'))
+    await vi.waitFor(() => expect(items.at(-1)).toMatchObject({ seq: 5 }))
+    expect(items.map((item) => ('seq' in item ? item.seq : null))).toEqual([4, 5])
+  })
+
+  it('keeps the raced event of a past-the-head join when a plain join left the cursor stale', async () => {
+    server.seq = 40
+    const client = await connect({ url: 'ws://fake' })
+    const items: Item[] = []
+    client.subscribe((item) => items.push(item), { includeOwn: true })
+    await client.join('t1')
+    const thread = (id: string) => ({
+      id,
+      scope: 'acme',
+      metadata: {},
+      created_at: '2026-02-01T00:00:00Z',
+    })
+    server.handlers.set('thread.join', async (payload) => {
+      if (payload.since === null) {
+        server.push('event', message(4, 'raced'))
+        return { thread: thread(payload.thread_id), seq: 3, truncated: false }
+      }
+      return { thread: thread(payload.thread_id), seq: 4, truncated: false }
+    })
+    const plain = client.join('t1')
+    const past = client.join('t1', { since: 40 })
+    await plain
+    await past
+    server.push('event', message(5, 'after'))
+    await vi.waitFor(() => expect(items.at(-1)).toMatchObject({ seq: 5 }))
+    expect(items.map((item) => ('seq' in item ? item.seq : null))).toEqual([4, 5])
+  })
+
+  it('does not emit again a copy that a rewind replays of an event emitted before a hold registered', async () => {
+    server.seq = 10
+    const client = await connect({ url: 'ws://fake' })
+    const items: Item[] = []
+    client.subscribe((item) => items.push(item), { includeOwn: true })
+    await client.join('t1')
+    let open!: () => void
+    const gate = new Promise<void>((resolve) => {
+      open = resolve
+    })
+    const thread = (id: string) => ({
+      id,
+      scope: 'acme',
+      metadata: {},
+      created_at: '2026-01-01T12:00:00Z',
+    })
+    server.handlers.set('thread.join', async (payload) => {
+      if (payload.since === 2) {
+        await gate
+        for (let seq = 3; seq <= 11; seq += 1) server.push('event', message(seq, 'replay'))
+      }
+      return { thread: thread(payload.thread_id), seq: 11, truncated: false }
+    })
+    const rewind = client.join('t1', { since: 2 })
+    await vi.waitFor(() => expect(server.sent('thread.join')).toHaveLength(2))
+    server.push('event', message(11, 'live'))
+    await vi.waitFor(() => expect(items).toHaveLength(1))
+    const past = client.join('t1', { since: 40 })
+    await vi.waitFor(() => expect(server.sent('thread.join')).toHaveLength(3))
+    open()
+    await rewind
+    await past
+    server.push('event', message(12, 'after'))
+    await vi.waitFor(() => expect(items.at(-1)).toMatchObject({ seq: 12 }))
+    expect(items.map((item) => ('seq' in item ? item.seq : null))).toEqual([
+      11, 3, 4, 5, 6, 7, 8, 9, 10, 12,
+    ])
+  })
+
+  it('leaves no hold behind when the answer cannot be read', async () => {
+    server.seq = 40
+    const client = await connect({ url: 'ws://fake' })
+    const items: Item[] = []
+    client.subscribe((item) => items.push(item), { includeOwn: true })
+    await client.join('t1')
+    server.handlers.set('thread.join', () => ({}))
+    await expect(client.join('t1', { since: 40 })).rejects.toThrow()
+    server.push('event', message(4, 'old'))
+    server.push('event', message(41, 'live'))
+    await vi.waitFor(() => expect(items.at(-1)).toMatchObject({ seq: 41 }))
+  })
+
+  it.each([
+    ['a fresh thread', false],
+    ['a thread joined and left', true],
+  ])(
+    'trusts no cursor the first of two overlapping joins past the head guessed, on %s',
+    async (_, left) => {
+      server.seq = 3
+      const client = await connect({ url: 'ws://fake' })
+      const items: Item[] = []
+      client.subscribe((item) => items.push(item), { includeOwn: true })
+      if (left) {
+        await client.join('t1')
+        await client.leave('t1')
+      }
+      let calls = 0
+      server.handlers.set('thread.join', (payload) => {
+        calls += 1
+        if (calls === 1) server.push('event', message(4, 'raced'))
+        return {
+          thread: {
+            id: payload.thread_id,
+            scope: 'acme',
+            metadata: {},
+            created_at: '2026-01-01T12:00:00Z',
+          },
+          seq: calls === 1 ? 3 : 4,
+          truncated: calls === 1,
+        }
+      })
+      const first = client.join('t1', { since: 40 })
+      const second = client.join('t1', { since: 40 })
+      await first
+      await second
+      server.push('event', message(5, 'after'))
+      server.push('event', message(6, 'later'))
+      await vi.waitFor(() => expect(items.at(-1)).toMatchObject({ seq: 6 }))
+      expect(items.map((item) => ('seq' in item ? item.seq : null))).toEqual([4, 5, 6])
+    }
+  )
 
   it('stores a write whose ack was lost exactly once', async () => {
     const { client } = await joined()
@@ -743,8 +1032,13 @@ describe('client', () => {
     server.handlers.set('thread.follow', () => ({
       joined: [
         {
-          thread: { id: 't1', scope: 'acme', metadata: {}, created_at: '2026-01-01T12:00:00Z' },
-          seq: ++calls === 1 ? 4 : 2,
+          thread: {
+            id: 't1',
+            scope: 'acme',
+            metadata: {},
+            created_at: ++calls === 1 ? '2026-01-01T12:00:00Z' : '2026-02-01T00:00:00Z',
+          },
+          seq: calls === 1 ? 4 : 2,
           truncated: calls > 1,
         },
       ],

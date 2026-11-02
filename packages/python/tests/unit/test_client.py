@@ -1,9 +1,11 @@
 import asyncio
 import contextlib
 import inspect
+from collections.abc import Sequence
 from typing import Any, cast
 
 import pytest
+from pydantic import ValidationError
 from until import until
 
 from rfnry_thread.client import Client, Item
@@ -523,6 +525,300 @@ async def test_a_follower_joining_since_a_seq_while_a_live_event_lands_gets_each
     assert page._cursors["t1"] == 6
     await ana.send("t1", "after")
     assert [item.seq for item in await drain(page) if isinstance(item, Message)] == [7]
+
+
+async def widen_arrival(server: Server, who: str, ana: Client, *texts: str) -> None:
+    arrive = server._hub._arrive
+    widened: list[str] = []
+
+    async def slow(session: Any, thread_id: str) -> None:
+        if session.identity.id == who and not widened:
+            widened.append(thread_id)
+            for text in texts:
+                await ana.send(thread_id, text)
+            await asyncio.sleep(0.05)
+        await arrive(session, thread_id)
+
+    server._hub._arrive = slow  # type: ignore[method-assign]
+
+
+def said(items: Sequence[Item]) -> list[str]:
+    return [
+        part.text
+        for item in items
+        if isinstance(item, Message)
+        for part in item.content
+        if isinstance(part, Text)
+    ]
+
+
+async def test_a_join_past_the_head_keeps_the_event_that_races_its_answer(server: Server) -> None:
+    ana = await server.connect(identity=ANA, scope="acme")
+    await ana.create_thread(thread_id="t1")
+    await ana.add_member("t1", HELPER)
+    await ana.send("t1", "first")
+    page = await server.connect(identity=HELPER, scope="acme")
+    await widen_arrival(server, HELPER.id, ana, "raced")
+    joined = await asyncio.wait_for(page.join("t1", since=40), 2)
+    assert joined.truncated
+    await ana.send("t1", "after")
+    assert said(await drain(page)) == ["raced", "after"]
+
+
+async def test_a_join_past_the_head_emits_the_events_around_the_sent_position_in_order(
+    server: Server,
+) -> None:
+    ana = await server.connect(identity=ANA, scope="acme")
+    await ana.create_thread(thread_id="t1")
+    await ana.add_member("t1", HELPER)
+    await ana.send("t1", "first")
+    head = (await ana.history("t1"))[-1].seq
+    page = await server.connect(identity=HELPER, scope="acme")
+    await widen_arrival(server, HELPER.id, ana, "a", "b", "c", "d")
+    joined = await asyncio.wait_for(page.join("t1", since=head + 3), 2)
+    assert joined.seq == head
+    items = await drain(page)
+    assert said(items) == ["a", "b", "c", "d"]
+    assert [item.seq for item in items if isinstance(item, Message)] == [
+        head + 1,
+        head + 2,
+        head + 3,
+        head + 4,
+    ]
+    assert page._cursors["t1"] == head + 4
+
+
+async def test_overlapping_joins_each_keep_their_own_hold(server: Server) -> None:
+    ana = await server.connect(identity=ANA, scope="acme")
+    await ana.create_thread(thread_id="t1")
+    await ana.add_member("t1", HELPER)
+    await ana.send("t1", "first")
+    page = await server.connect(identity=HELPER, scope="acme")
+    request = page._request
+    entered = asyncio.Event()
+    gate = asyncio.Event()
+
+    async def gated(method: str, payload: dict[str, Any]) -> dict[str, Any]:
+        reply = await request(method, payload)
+        if payload.get("since") == 40:
+            entered.set()
+            await gate.wait()
+        return reply
+
+    page._request = gated  # type: ignore[method-assign]
+    past = asyncio.create_task(page.join("t1", since=40))
+    await asyncio.wait_for(entered.wait(), 2)
+    await ana.send("t1", "raced")
+    await asyncio.sleep(0.05)
+    await asyncio.wait_for(page.join("t1"), 2)
+    gate.set()
+    assert (await asyncio.wait_for(past, 2)).truncated
+    await ana.send("t1", "after")
+    assert said(await drain(page)) == ["raced", "after"]
+    assert not page._holds
+
+
+async def test_a_join_whose_answer_cannot_be_read_leaves_no_hold(server: Server) -> None:
+    ana = await server.connect(identity=ANA, scope="acme")
+    await ana.create_thread(thread_id="t1")
+    await ana.add_member("t1", HELPER)
+    await ana.send("t1", "first")
+    page = await server.connect(identity=HELPER, scope="acme")
+    request = page._request
+    garbled = [True]
+
+    async def unreadable(method: str, payload: dict[str, Any]) -> dict[str, Any]:
+        reply = await request(method, payload)
+        if garbled:
+            garbled.clear()
+            await ana.send("t1", "raced")
+            await asyncio.sleep(0.05)
+            return {"garbled": True}
+        return reply
+
+    page._request = unreadable  # type: ignore[method-assign]
+    with pytest.raises(ValidationError):
+        await page.join("t1", since=40)
+    assert not page._holds
+    await page.join("t1", since=40)
+    await ana.send("t1", "after")
+    assert said(await drain(page)) == ["after"]
+
+
+async def test_a_join_retried_after_a_timeout_keeps_the_events_after_its_answer(
+    server: Server,
+) -> None:
+    ana = await server.connect(identity=ANA, scope="acme")
+    await ana.create_thread(thread_id="t1")
+    await ana.add_member("t1", HELPER)
+    await ana.send("t1", "first")
+    page = await server.connect(identity=HELPER, scope="acme")
+    arrive = server._hub._arrive
+    arrived = asyncio.Event()
+
+    async def slow(session: Any, thread_id: str) -> None:
+        if session.identity.id == HELPER.id:
+            await asyncio.sleep(0.2)
+            arrived.set()
+        await arrive(session, thread_id)
+
+    server._hub._arrive = slow  # type: ignore[method-assign]
+    with pytest.raises(TimeoutError):
+        await asyncio.wait_for(page.join("t1", since=40), 0.05)
+    await asyncio.wait_for(arrived.wait(), 2)
+    server._hub._arrive = arrive  # type: ignore[method-assign]
+    await asyncio.wait_for(page.join("t1", since=40), 2)
+    await ana.send("t1", "after")
+    assert said(await drain(page)) == ["after"]
+
+
+@pytest.mark.parametrize("left", [False, True], ids=["fresh", "left"])
+async def test_overlapping_joins_past_the_head_trust_no_cursor_the_first_one_guessed(
+    server: Server, left: bool
+) -> None:
+    ana = await server.connect(identity=ANA, scope="acme")
+    await ana.create_thread(thread_id="t1")
+    await ana.add_member("t1", HELPER)
+    await ana.send("t1", "first")
+    page = await server.connect(identity=HELPER, scope="acme")
+    if left:
+        await page.join("t1")
+        await page.leave("t1")
+    await widen_arrival(server, HELPER.id, ana, "raced")
+    first, _ = await asyncio.wait_for(
+        asyncio.gather(page.join("t1", since=40), page.join("t1", since=40)), 2
+    )
+    assert first.truncated
+    await ana.send("t1", "after")
+    await ana.send("t1", "later")
+    assert said(await drain(page)) == ["raced", "after", "later"]
+
+
+async def test_overlapping_joins_past_the_head_emit_each_event_once(server: Server) -> None:
+    ana = await server.connect(identity=ANA, scope="acme")
+    await ana.create_thread(thread_id="t1")
+    await ana.add_member("t1", HELPER)
+    await ana.send("t1", "first")
+    page = await server.connect(identity=HELPER, scope="acme")
+    request = page._request
+    gates = [asyncio.Event(), asyncio.Event()]
+    entered: list[asyncio.Event] = [asyncio.Event(), asyncio.Event()]
+    calls: list[int] = []
+
+    async def gated(method: str, payload: dict[str, Any]) -> dict[str, Any]:
+        n = len(calls)
+        calls.append(n)
+        reply = await request(method, payload)
+        entered[n].set()
+        await gates[n].wait()
+        return reply
+
+    page._request = gated  # type: ignore[method-assign]
+    first = asyncio.create_task(page.join("t1", since=40))
+    await asyncio.wait_for(entered[0].wait(), 2)
+    second = asyncio.create_task(page.join("t1", since=40))
+    await asyncio.wait_for(entered[1].wait(), 2)
+    await ana.send("t1", "raced")
+    await asyncio.sleep(0.05)
+    gates[1].set()
+    await asyncio.wait_for(second, 2)
+    gates[0].set()
+    await asyncio.wait_for(first, 2)
+    await ana.send("t1", "after")
+    assert said(await drain(page)) == ["raced", "after"]
+
+
+async def test_a_plain_join_leaves_a_stale_cursor_and_the_past_the_head_join_still_keeps_the_event(
+    server: Server,
+) -> None:
+    ana = await server.connect(identity=ANA, scope="acme")
+    await ana.create_thread(thread_id="t1")
+    await ana.add_member("t1", HELPER)
+    await ana.send("t1", "first")
+    page = await server.connect(identity=HELPER, scope="acme")
+    request = page._request
+    go = asyncio.Event()
+
+    async def delayed(method: str, payload: dict[str, Any]) -> dict[str, Any]:
+        if payload.get("since") == 40:
+            await asyncio.wait_for(go.wait(), 2)
+        return await request(method, payload)
+
+    page._request = delayed  # type: ignore[method-assign]
+    past = asyncio.create_task(page.join("t1", since=40))
+    await asyncio.sleep(0.02)
+    await asyncio.wait_for(page.join("t1"), 2)
+    await ana.send("t1", "raced")
+    await asyncio.sleep(0.05)
+    go.set()
+    await asyncio.wait_for(past, 2)
+    await ana.send("t1", "after")
+    assert said(await drain(page)) == ["raced", "after"]
+
+
+async def test_a_rewind_does_not_emit_again_a_copy_of_an_event_emitted_before_a_hold_registered(
+    server: Server,
+) -> None:
+    ana = await server.connect(identity=ANA, scope="acme")
+    await ana.create_thread(thread_id="t1")
+    await ana.add_member("t1", HELPER)
+    for n in range(3):
+        await ana.send("t1", f"m{n}")
+    page = await server.connect(identity=HELPER, scope="acme")
+    await page.join("t1")
+    await drain(page)
+    request = page._request
+    go = asyncio.Event()
+    finished = asyncio.Event()
+
+    async def ordered(method: str, payload: dict[str, Any]) -> dict[str, Any]:
+        if payload.get("since") == 0:
+            await asyncio.wait_for(go.wait(), 2)
+        reply = await request(method, payload)
+        if payload.get("since") == 40:
+            await asyncio.wait_for(finished.wait(), 2)
+        return reply
+
+    page._request = ordered  # type: ignore[method-assign]
+    rewind = asyncio.create_task(page.join("t1", since=0))
+    await asyncio.sleep(0.02)
+    live = await ana.send("t1", "live")
+    await until(lambda: page._cursors.get("t1") == live.seq)
+    past = asyncio.create_task(page.join("t1", since=40))
+    await asyncio.sleep(0.05)
+    go.set()
+    await asyncio.wait_for(rewind, 2)
+    finished.set()
+    await asyncio.wait_for(past, 2)
+    await ana.send("t1", "after")
+    heard = said(await drain(page))
+    assert heard.count("live") == 1
+    assert heard[-1] == "after"
+
+
+async def test_a_follow_past_the_head_keeps_the_event_that_races_its_answer(server: Server) -> None:
+    ana = await server.connect(identity=ANA, scope="acme")
+    for thread_id in ("t1", "t2"):
+        await ana.create_thread(thread_id=thread_id)
+        await ana.add_member(thread_id, HELPER)
+        await ana.send(thread_id, "first")
+    page = await server.connect(identity=HELPER, scope="acme")
+    page._made.update({"t1": AT, "t2": AT})
+    page._cursors.update({"t1": 40, "t2": 40})
+    enter = server._hub._enter
+
+    async def slow(session: Any, thread: Any, *args: Any) -> Any:
+        entered = await enter(session, thread, *args)
+        if thread.id == "t1":
+            await ana.send("t1", "raced")
+            await asyncio.sleep(0.05)
+        return entered
+
+    server._hub._enter = slow  # type: ignore[method-assign,assignment]
+    found = await asyncio.wait_for(page._follow(True, {"t1": 40, "t2": 40}, None), 2)
+    assert [joined.truncated for joined in found] == [True, True]
+    await ana.send("t1", "after")
+    assert said(await drain(page)) == ["raced", "after"]
 
 
 async def test_overlapping_joins_since_a_followed_thread_each_replay_their_own_window(

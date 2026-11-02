@@ -29,6 +29,15 @@ import type {
 } from './types.js'
 
 type Payload = Record<string, unknown>
+type Hold = {
+  threadId: string
+  sent: number
+  events: Event[]
+  top: number
+  base: number
+  made: string | undefined
+  guessed: boolean
+}
 export type Protocols = string | string[]
 export type ConnectOptions = { url: string; protocols?: Protocols | (() => Promise<Protocols>) }
 export type Listener = (item: Item) => void
@@ -212,6 +221,7 @@ export class Client {
   private nextId = 1
   private readonly listeners = new Map<Listener, boolean>()
   private readonly cursors = new Map<string, number>()
+  private holds: Hold[] = []
   private rewinds: Array<{ threadId: string; since: number; held: number; taken: Set<number> }> = []
   private following = false
   private readonly held = new Set<string>()
@@ -324,14 +334,11 @@ export class Client {
       }
       const cursor = this.cursors.get(event.thread_id)
       if (cursor !== undefined) {
+        if (this.hold(event, cursor)) return
         if (event.seq <= cursor) return
         this.cursors.set(event.thread_id, event.seq)
       }
-      if (event.kind === 'member_removed' && event.identity.id === this.identity.id) {
-        this.cursors.delete(event.thread_id)
-        this.held.delete(event.thread_id)
-      }
-      this.emit(event)
+      this.admit(event)
       return
     }
     const signal = frame.payload as unknown as Signal
@@ -340,6 +347,60 @@ export class Client {
       this.held.delete(signal.thread_id)
     }
     this.emit(signal)
+  }
+
+  private admit(event: Event): void {
+    for (const hold of this.holds) {
+      if (hold.threadId === event.thread_id) hold.top = Math.max(hold.top, event.seq)
+    }
+    if (event.kind === 'member_removed' && event.identity.id === this.identity.id) {
+      this.cursors.delete(event.thread_id)
+      this.held.delete(event.thread_id)
+    }
+    this.emit(event)
+  }
+
+  private trusted(threadId: string): number {
+    if (this.holds.some((hold) => hold.threadId === threadId && hold.guessed)) return 0
+    return this.cursors.get(threadId) ?? 0
+  }
+
+  private hold(event: Event, cursor: number): boolean {
+    const holds = this.holds.filter((hold) => hold.threadId === event.thread_id)
+    if (holds.length === 0) return false
+    if (event.seq > cursor && !holds.some((hold) => hold.events.length > 0)) return false
+    for (const hold of holds) hold.events.push(event)
+    return true
+  }
+
+  private conclude(joined: Joined, hold: Hold | undefined, announce: boolean): void {
+    const threadId = joined.thread.id
+    const created = joined.thread.created_at
+    const before = hold ? hold.made : this.made.get(threadId)
+    this.made.set(threadId, created)
+    const again = before !== undefined && before !== created
+    const past = hold !== undefined && joined.seq < hold.sent
+    const top = hold?.top ?? 0
+    let floor: number
+    if (again) {
+      floor = top
+      this.cursors.set(threadId, Math.max(joined.seq, top))
+    } else if (hold && past) {
+      floor = Math.max(top, hold.base)
+      this.cursors.set(threadId, Math.max(joined.seq, floor))
+    } else {
+      floor = this.cursors.get(threadId) ?? 0
+      this.cursors.set(threadId, Math.max(floor, joined.seq))
+    }
+    if (announce) this.emit(joined)
+    if (!hold) return
+    for (const event of [...hold.events].sort((a, b) => a.seq - b.seq)) {
+      if (event.seq <= floor) continue
+      floor = event.seq
+      this.cursors.set(threadId, Math.max(this.cursors.get(threadId) ?? 0, event.seq))
+      this.admit(event)
+      if (!this.cursors.has(threadId)) return
+    }
   }
 
   private emit(item: Item): void {
@@ -420,7 +481,7 @@ export class Client {
       const cursor = this.cursors.get(threadId)
       if (cursor === undefined || (followed && !this.held.has(threadId))) continue
       try {
-        this.emit(await this.rejoined(threadId, cursor))
+        await this.rejoined(threadId, cursor)
       } catch (error) {
         if (error instanceof TransportError) return
         this.cursors.delete(threadId)
@@ -430,12 +491,12 @@ export class Client {
   }
 
   private async rejoined(threadId: string, cursor: number): Promise<Joined> {
-    if (this.held.has(threadId)) return this.joinFrom(threadId, cursor)
+    if (this.held.has(threadId)) return this.joinFrom(threadId, cursor, false, false, true)
     try {
-      return await this.joinFrom(threadId, cursor, false, true)
+      return await this.joinFrom(threadId, cursor, false, true, true)
     } catch (error) {
       if (!(error instanceof InputError)) throw error
-      return this.joinFrom(threadId, cursor)
+      return this.joinFrom(threadId, cursor, false, false, true)
     }
   }
 
@@ -500,9 +561,22 @@ export class Client {
     threadId: string,
     since: number | null,
     resume = false,
-    away = false
+    away = false,
+    announce = false
   ): Promise<Joined> {
     const held = this.cursors.get(threadId)
+    const hold: Hold | undefined =
+      since === null
+        ? undefined
+        : {
+            threadId,
+            sent: since,
+            events: [],
+            top: 0,
+            base: this.trusted(threadId),
+            made: this.made.get(threadId),
+            guessed: held === undefined,
+          }
     const start = resume ? 0 : since
     const rewind =
       start !== null && held !== undefined && start < held
@@ -513,18 +587,19 @@ export class Client {
     const payload: Payload = { thread_id: threadId, since }
     if (resume) payload.resume = true
     if (away) payload.away = true
-    let joined: Joined
+    if (hold) this.holds.push(hold)
     try {
-      joined = (await this.request('thread.join', payload)) as unknown as Joined
+      let joined: Joined
+      try {
+        joined = (await this.request('thread.join', payload)) as unknown as Joined
+      } finally {
+        this.rewinds = this.rewinds.filter((other) => other !== rewind)
+      }
+      this.conclude(joined, hold, announce)
+      return joined
     } finally {
-      this.rewinds = this.rewinds.filter((other) => other !== rewind)
+      if (hold) this.holds = this.holds.filter((other) => other !== hold)
     }
-    this.made.set(threadId, joined.thread.created_at)
-    this.cursors.set(
-      threadId,
-      joined.seq < (since ?? 0) ? joined.seq : Math.max(this.cursors.get(threadId) ?? 0, joined.seq)
-    )
-    return joined
   }
 
   async createThread(
@@ -635,27 +710,39 @@ export class Client {
           return [id, created === undefined ? { seq } : { seq, created_at: created }]
         })
       )
-    const reply = await this.request('thread.follow', payload)
-    this.following = true
+    const holds = new Map<string, Hold>(
+      Object.entries(since ?? {}).map(([id, sent]) => [
+        id,
+        {
+          threadId: id,
+          sent,
+          events: [],
+          top: 0,
+          base: this.trusted(id),
+          made: this.made.get(id),
+          guessed: false,
+        },
+      ])
+    )
+    this.holds.push(...holds.values())
     const found: Joined[] = []
     const raced: string[] = []
-    for (const joined of reply.joined as Joined[]) {
-      const id = joined.thread.id
-      if (this.left.has(id) && !Object.hasOwn(left, id)) {
-        raced.push(id)
-        continue
+    try {
+      const reply = await this.request('thread.follow', payload)
+      this.following = true
+      for (const joined of reply.joined as Joined[]) {
+        const id = joined.thread.id
+        if (this.left.has(id) && !Object.hasOwn(left, id)) {
+          raced.push(id)
+          continue
+        }
+        this.left.delete(id)
+        found.push(joined)
+        this.conclude(joined, holds.get(id), true)
       }
-      this.left.delete(id)
-      this.made.set(id, joined.thread.created_at)
-      found.push(joined)
-      const sent = since?.[id]
-      this.cursors.set(
-        id,
-        sent !== undefined && joined.seq < sent
-          ? joined.seq
-          : Math.max(this.cursors.get(id) ?? 0, joined.seq)
-      )
-      this.emit(joined)
+    } finally {
+      const own = new Set(holds.values())
+      this.holds = this.holds.filter((hold) => !own.has(hold))
     }
     for (const id of raced) await this.request('thread.leave', { thread_id: id })
     return found

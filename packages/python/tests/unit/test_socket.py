@@ -23,8 +23,8 @@ from rfnry_thread.models import Identity, Joined, Left, Message, Present, Status
 from rfnry_thread.postgres import PostgresStorage
 from rfnry_thread.server import Server
 
-from .factories import BRUNO
-from .test_client import drain
+from .factories import AT, BRUNO
+from .test_client import drain, said, widen_arrival
 
 ANA_HEADERS = {"Authorization": "Bearer ana"}
 
@@ -611,6 +611,55 @@ async def test_a_rejoin_reads_the_cursor_a_live_event_moved_during_the_rejoin_be
         (item.thread_id, first_text(item)) for item in await drain(ana) if isinstance(item, Message)
     ]
     assert said == [(landed[0], "live during the re-joins")]
+
+
+async def test_a_rejoin_past_the_head_announces_the_join_then_the_events_that_race_it(
+    live: Live,
+) -> None:
+    ana, bruno = await room(live)
+    await bruno.send("t1", "first")
+    await drain(ana)
+    ana._cursors["t1"] = 40
+    ana._made["t1"] = AT
+    await widen_arrival(live.server, "ana", bruno, "raced")
+    await drop_and_reopen(live, ana)
+    await bruno.send("t1", "after")
+    items = [i for i in await drain(ana, include_own=False) if isinstance(i, Joined | Message)]
+    assert [type(i).__name__ for i in items] == ["Joined", "Message", "Message"]
+    assert said([i for i in items if isinstance(i, Message)]) == ["raced", "after"]
+
+
+async def test_a_refollow_past_the_head_announces_the_join_then_the_events_that_race_it(
+    live: Live,
+) -> None:
+    ana_identity = Identity(role="user", id="ana", name="Ana")
+    ana = await Client.connect(live.url, headers=ANA_HEADERS)
+    bruno = await live.server.connect(identity=BRUNO, scope="acme")
+    for thread_id in ("t1", "t2"):
+        await bruno.create_thread(thread_id=thread_id)
+        await bruno.add_member(thread_id, ana_identity)
+        await bruno.send(thread_id, "first")
+    await ana.follow()
+    await drain(ana)
+    ana._cursors.update({"t1": 40, "t2": 40})
+    ana._made.update({"t1": AT, "t2": AT})
+    enter = live.server._hub._enter
+
+    async def slow(session: Any, thread: Any, *args: Any) -> Any:
+        entered = await enter(session, thread, *args)
+        if thread.id == "t1" and session.identity.id == "ana":
+            await bruno.send("t1", "raced")
+            await asyncio.sleep(0.05)
+        return entered
+
+    live.server._hub._enter = slow  # type: ignore[method-assign,assignment]
+    await drop_and_reopen(live, ana)
+    items = [i for i in await drain(ana, include_own=False) if isinstance(i, Joined | Message)]
+    assert sorted(type(i).__name__ for i in items) == ["Joined", "Joined", "Message"]
+    at = next(n for n, i in enumerate(items) if isinstance(i, Message))
+    before = items[at - 1]
+    assert isinstance(before, Joined) and before.thread.id == "t1"
+    assert said([items[at]]) == ["raced"]
 
 
 async def test_a_follow_that_fails_leaves_the_client_not_following(live: Live) -> None:

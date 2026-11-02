@@ -4,6 +4,7 @@ import itertools
 import random
 import uuid
 from collections.abc import AsyncIterator, Awaitable, Callable
+from dataclasses import dataclass, field
 from datetime import datetime
 from types import TracebackType
 from typing import Any
@@ -192,6 +193,17 @@ class Stream:
         await self._end()
 
 
+@dataclass
+class _Hold:
+    thread_id: str
+    sent: int
+    events: list[Event] = field(default_factory=list)
+    top: int = 0
+    base: int = 0
+    made: datetime | None = None
+    guessed: bool = False
+
+
 class Client:
     identity: Identity
     scope: str
@@ -204,6 +216,7 @@ class Client:
         self._inbox: asyncio.Queue[Item | None] = asyncio.Queue()
         self._cursors: dict[str, int] = {}
         self._rewinds: list[tuple[str, range, set[int]]] = []
+        self._holds: list[_Hold] = []
         self._following = False
         self._present: set[str] = set()
         self._left: dict[str, int] = {}
@@ -320,19 +333,70 @@ class Client:
                     return
             cursor = self._cursors.get(event.thread_id)
             if cursor is not None:
+                if self._hold(event, cursor):
+                    return
                 if event.seq <= cursor:
                     return
                 self._cursors[event.thread_id] = event.seq
-            if isinstance(event, MemberRemoved) and event.identity.id == self.identity.id:
-                self._cursors.pop(event.thread_id, None)
-                self._present.discard(event.thread_id)
-            self._inbox.put_nowait(event)
+            self._admit(event)
             return
         signal = SIGNALS.validate_python(push.payload)
         if isinstance(signal, ThreadDeleted):
             self._cursors.pop(signal.thread_id, None)
             self._present.discard(signal.thread_id)
         self._inbox.put_nowait(signal)
+
+    def _admit(self, event: Event) -> None:
+        for hold in self._holds:
+            if hold.thread_id == event.thread_id:
+                hold.top = max(hold.top, event.seq)
+        if isinstance(event, MemberRemoved) and event.identity.id == self.identity.id:
+            self._cursors.pop(event.thread_id, None)
+            self._present.discard(event.thread_id)
+        self._inbox.put_nowait(event)
+
+    def _trusted(self, thread_id: str) -> int:
+        if any(hold.guessed for hold in self._holds if hold.thread_id == thread_id):
+            return 0
+        return self._cursors.get(thread_id, 0)
+
+    def _hold(self, event: Event, cursor: int) -> bool:
+        holds = [hold for hold in self._holds if hold.thread_id == event.thread_id]
+        if not holds or not (event.seq <= cursor or any(hold.events for hold in holds)):
+            return False
+        for hold in holds:
+            hold.events.append(event)
+        return True
+
+    def _settle(self, joined: Joined, hold: _Hold | None, announce: bool) -> None:
+        thread_id = joined.thread.id
+        created = joined.thread.created_at
+        before = hold.made if hold is not None else self._made.get(thread_id)
+        self._made[thread_id] = created
+        again = before is not None and before != created
+        past = hold is not None and joined.seq < hold.sent
+        top = hold.top if hold is not None else 0
+        if again:
+            floor = top
+            self._cursors[thread_id] = max(joined.seq, top)
+        elif hold is not None and past:
+            floor = max(top, hold.base)
+            self._cursors[thread_id] = max(joined.seq, floor)
+        else:
+            floor = self._cursors.get(thread_id, 0)
+            self._cursors[thread_id] = max(floor, joined.seq)
+        if announce:
+            self._inbox.put_nowait(joined)
+        if hold is None:
+            return
+        for event in sorted(hold.events, key=lambda raced: raced.seq):
+            if event.seq <= floor:
+                continue
+            floor = event.seq
+            self._cursors[thread_id] = max(self._cursors[thread_id], event.seq)
+            self._admit(event)
+            if thread_id not in self._cursors:
+                return
 
     def _change(self, status: Status) -> None:
         if self._status in (status, "closed"):
@@ -396,22 +460,20 @@ class Client:
             if cursor is None or (followed and thread_id not in self._present):
                 continue
             try:
-                joined = await self._rejoined(thread_id, cursor)
+                await self._rejoined(thread_id, cursor)
             except TransportError:
                 return
             except ThreadException:
                 self._cursors.pop(thread_id, None)
                 self._present.discard(thread_id)
-                continue
-            self._inbox.put_nowait(joined)
 
     async def _rejoined(self, thread_id: str, cursor: int) -> Joined:
         if thread_id in self._present:
-            return await self._join(thread_id, cursor)
+            return await self._join(thread_id, cursor, announce=True)
         try:
-            return await self._join(thread_id, cursor, away=True)
+            return await self._join(thread_id, cursor, away=True, announce=True)
         except InputError:
-            return await self._join(thread_id, cursor)
+            return await self._join(thread_id, cursor, announce=True)
 
     def _fail(self, error: ThreadException) -> None:
         self._failure = error
@@ -503,9 +565,25 @@ class Client:
         return _expect(event, Message)
 
     async def _join(
-        self, thread_id: str, since: int | None, resume: bool = False, away: bool = False
+        self,
+        thread_id: str,
+        since: int | None,
+        resume: bool = False,
+        away: bool = False,
+        announce: bool = False,
     ) -> Joined:
         held = self._cursors.get(thread_id)
+        hold = (
+            _Hold(
+                thread_id,
+                since,
+                base=self._trusted(thread_id),
+                made=self._made.get(thread_id),
+                guessed=held is None,
+            )
+            if since is not None
+            else None
+        )
         start = 0 if resume else since
         rewind: tuple[str, range, set[int]] | None = None
         if held is None:
@@ -518,16 +596,18 @@ class Client:
             payload["resume"] = True
         if away:
             payload["away"] = True
+        if hold is not None:
+            self._holds.append(hold)
         try:
-            reply = await self._request("thread.join", payload)
+            try:
+                reply = await self._request("thread.join", payload)
+            finally:
+                self._rewinds = [other for other in self._rewinds if other is not rewind]
+            joined = Joined.model_validate(reply)
+            self._settle(joined, hold, announce)
         finally:
-            self._rewinds = [other for other in self._rewinds if other is not rewind]
-        joined = Joined.model_validate(reply)
-        self._made[thread_id] = joined.thread.created_at
-        if joined.seq < (since or 0):
-            self._cursors[thread_id] = joined.seq
-        else:
-            self._cursors[thread_id] = max(self._cursors.get(thread_id, 0), joined.seq)
+            if hold is not None:
+                self._holds.remove(hold)
         return joined
 
     async def create_thread(
@@ -584,7 +664,7 @@ class Client:
         known = thread_id in self._cursors
         try:
             joined = await self._join(thread_id, since, resume)
-        except ThreadException:
+        except BaseException:
             if not known:
                 self._cursors.pop(thread_id, None)
             raise
@@ -617,24 +697,29 @@ class Client:
                 else {"seq": seq}
                 for thread_id, seq in left.items()
             }
-        reply = await self._request("thread.follow", payload)
-        self._following = True
-        found: list[Joined] = []
-        raced: list[str] = []
-        for joined in map(Joined.model_validate, reply["joined"]):
-            thread_id = joined.thread.id
-            if thread_id in self._left and thread_id not in (left or {}):
-                raced.append(thread_id)
-                continue
-            self._left.pop(thread_id, None)
-            self._made[thread_id] = joined.thread.created_at
-            found.append(joined)
-            sent = (since or {}).get(thread_id)
-            if sent is not None and joined.seq < sent:
-                self._cursors[thread_id] = joined.seq
-            else:
-                self._cursors[thread_id] = max(self._cursors.get(thread_id, 0), joined.seq)
-            self._inbox.put_nowait(joined)
+        holds = {
+            thread_id: _Hold(
+                thread_id, sent, base=self._trusted(thread_id), made=self._made.get(thread_id)
+            )
+            for thread_id, sent in (since or {}).items()
+        }
+        self._holds.extend(holds.values())
+        try:
+            reply = await self._request("thread.follow", payload)
+            self._following = True
+            found: list[Joined] = []
+            raced: list[str] = []
+            for joined in map(Joined.model_validate, reply["joined"]):
+                thread_id = joined.thread.id
+                if thread_id in self._left and thread_id not in (left or {}):
+                    raced.append(thread_id)
+                    continue
+                self._left.pop(thread_id, None)
+                found.append(joined)
+                self._settle(joined, holds.get(thread_id), True)
+        finally:
+            for hold in holds.values():
+                self._holds.remove(hold)
         for thread_id in raced:
             await self._request("thread.leave", {"thread_id": thread_id})
         return found
