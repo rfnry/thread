@@ -192,6 +192,9 @@ stops on a refusal, with a `ForbiddenError`. `identity` and `scope` are keyword-
 `server.connect` alike. Everything the socket says afterwards is authored as that identity, in that
 scope.
 
+A connection's `thread.join`, `thread.leave`, `thread.away` and `thread.follow` apply in the order it
+sent them; its other requests run concurrently.
+
 There are two ways to get a client, and they are the same class:
 
 ```python

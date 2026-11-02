@@ -43,6 +43,7 @@ from rfnry_thread.verbs import Authorize, Redact, Verbs
 logger = logging.getLogger(__name__)
 
 IN_FLIGHT = 64
+ORDERED = frozenset({"thread.join", "thread.leave", "thread.away", "thread.follow"})
 
 
 class _Args(BaseModel):
@@ -254,7 +255,11 @@ class Server:
 
     async def _answer(self, session: Session, frame: Request) -> None:
         try:
-            payload = await self._call(session, frame.method, frame.payload)
+            if frame.method in ORDERED:
+                async with session.ordered:
+                    payload = await self._call(session, frame.method, frame.payload)
+            else:
+                payload = await self._call(session, frame.method, frame.payload)
         except ThreadException as error:
             session.outbound.put(failure(frame.id, error))
         except asyncio.CancelledError:

@@ -14,10 +14,13 @@ from rfnry_thread.models import (
     Working,
 )
 from rfnry_thread.postgres import PostgresStorage
+from rfnry_thread.protocol import Request, encode
+from rfnry_thread.server import Server
 
 from .factories import ANA, AT, BRUNO, HELPER, message
 from .hubkit import kinds, open_session, pushes
 from .legacy import enroll
+from .peer import Peer
 
 
 async def setup(
@@ -348,3 +351,46 @@ async def test_announce_teaches_another_replica_who_is_here(storage: PostgresSto
     await until(lambda: far.state.present("acme", "t1") == [ANA])
     for stop in stops:
         await stop()
+
+
+async def test_a_leave_sent_right_after_a_join_leaves(storage: PostgresStorage) -> None:
+    server = Server(storage)
+    await server.create_thread("acme", thread_id="t1")
+    await server.add_member("acme", "t1", ANA)
+    await server.add_member("acme", "t1", BRUNO)
+    join = server._hub.join
+
+    async def slow_join(*args: Any, **kwargs: Any) -> Any:
+        await asyncio.sleep(0.3)
+        return await join(*args, **kwargs)
+
+    server._hub.join = slow_join  # type: ignore[method-assign]
+    ana = await Peer.open(server, ANA)
+    bruno = await Peer.open(server, BRUNO)
+    await ana.end.send_text(
+        encode(Request(id="j", method="thread.join", payload={"thread_id": "t1"}))
+    )
+    await ana.end.send_text(
+        encode(Request(id="l", method="thread.leave", payload={"thread_id": "t1"}))
+    )
+    answers: list[str] = []
+    while len(answers) < 2:
+        frame = await ana.frame()
+        if frame["type"] in ("response", "error"):
+            answers.append(frame["id"])
+    assert answers == ["j", "l"]
+    await bruno.call(
+        "event.send",
+        thread_id="t1",
+        kind="message",
+        client_id="c1",
+        content=[{"type": "text", "text": "after leave"}],
+    )
+    with pytest.raises(TimeoutError):
+        while True:
+            frame = await ana.frame(0.4)
+            assert not (frame["type"] == "push" and frame["payload"].get("kind") == "message")
+    present = await bruno.call("thread.present", thread_id="t1")
+    assert "ana" not in [i["id"] for i in present["identities"]]
+    await ana.end.close(1000, "")
+    await bruno.end.close(1000, "")
