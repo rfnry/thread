@@ -1344,3 +1344,17 @@ async def test_a_join_that_crosses_the_threads_deletion_or_its_own_removal_is_re
     await asyncio.wait_for(other, 5)
     assert "t1" not in session.joined and "t1" not in session.present
     assert hub._room("acme", "t1") == []
+
+
+async def test_a_join_since_past_where_a_connection_already_is_says_truncated(
+    storage: PostgresStorage,
+) -> None:
+    hub, thread = await setup(storage, events=3)
+    session, recorder = open_session(HELPER)
+    await hub.join(session, thread, None)
+    await pushes(session, recorder)
+    joined = await hub.join(session, thread, 8)
+    assert (joined.seq, joined.truncated) == (3, True)
+    joined = await hub.join(session, thread, 3)
+    assert (joined.seq, joined.truncated) == (3, False)
+    assert [p for p in await pushes(session, recorder) if "seq" in p] == []

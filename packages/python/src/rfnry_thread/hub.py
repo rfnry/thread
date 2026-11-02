@@ -294,7 +294,7 @@ class Hub:
         if since is not None:
             since = max(since, floor - 1)
         if since is None or since >= cursor:
-            return Joined(thread=thread, seq=cursor)
+            return Joined(thread=thread, seq=cursor, truncated=since is not None and since > cursor)
         truncated = cursor - since > self.replay_limit
         replay = await self.storage.list_events(
             session.scope,
