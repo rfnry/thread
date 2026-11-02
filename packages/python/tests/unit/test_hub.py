@@ -1275,3 +1275,41 @@ async def test_a_write_reaches_the_others_though_the_writers_socket_drops_while_
     assert [p["content"][0]["text"] for p in await helper.quiet(0.5) if p["kind"] == "message"] == [
         "live"
     ]
+
+
+async def test_an_edit_whose_target_cannot_be_read_after_it_is_stored_is_acknowledged_and_caught_up_later(
+    storage: PostgresStorage,
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    server = Server(storage)
+    ana = await Peer.open(server, ANA)
+    await ana.call("thread.create", thread_id="t1", history="since_added")
+    await ana.call("member.add", thread_id="t1", identity=BRUNO.model_dump(mode="json"))
+    bruno = await Peer.open(server, BRUNO)
+    await bruno.call("thread.join", thread_id="t1")
+    first = await say(ana, "t1", "first")
+    await bruno.quiet()
+    get_event = storage.get_event
+
+    async def flaky(scope: str, thread_id: str, event_id: str, floor: int = 0) -> Any:
+        if floor == 0:
+            raise StorageError("postgres: storage rejected get_event: connection reset")
+        return await get_event(scope, thread_id, event_id, floor)
+
+    monkeypatch.setattr(storage, "get_event", flaky)
+    with caplog.at_level(logging.WARNING, logger="rfnry_thread.hub"):
+        edit = await ana.call(
+            "event.send",
+            thread_id="t1",
+            kind="edit",
+            client_id="c-edit",
+            target=first["id"],
+            content=[{"type": "text", "text": "first, edited"}],
+        )
+    assert edit["event"]["kind"] == "edit"
+    assert await bruno.quiet() == []
+    assert any("hub: catching connection" in r.getMessage() for r in caplog.records)
+    monkeypatch.setattr(storage, "get_event", get_event)
+    await say(ana, "t1", "next")
+    assert [p["kind"] for p in await bruno.quiet()] == ["edit", "message"]

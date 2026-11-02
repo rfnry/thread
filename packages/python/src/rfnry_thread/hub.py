@@ -372,12 +372,19 @@ class Hub:
     async def _deliver(self, scope: str, event: Event, after: _Aftermath) -> None:
         payload = event.model_dump(mode="json")
         room = self._audience(scope, event.thread_id)
-        target = await self._target(scope, event, room)
+        target, unread = event.seq, None
+        try:
+            target = await self._target(scope, event, room)
+        except Exception as error:
+            unread = error
         for session in room:
             cursor = session.joined.get(event.thread_id)
             if cursor is None or event.seq <= cursor:
                 continue
             floor = session.floors.get(event.thread_id, 0)
+            if unread is not None and floor > 0:
+                self._behind(session, event.thread_id, unread)
+                continue
             if event.seq > cursor + 1:
                 try:
                     missing = await self.storage.list_events(
@@ -389,13 +396,7 @@ class Hub:
                         floor=floor,
                     )
                 except Exception as error:
-                    logger.warning(
-                        "hub: catching connection %s of %r up in thread %r failed: %s",
-                        session.id,
-                        session.identity.id,
-                        event.thread_id,
-                        error,
-                    )
+                    self._behind(session, event.thread_id, error)
                     continue
                 removed = next((e for e in missing if _removes(e, session)), None)
                 if removed is not None:
@@ -417,6 +418,15 @@ class Hub:
             session.push_event(event, payload)
             if _removes(event, session):
                 self._cut(session, event.thread_id, after)
+
+    def _behind(self, session: Session, thread_id: str, error: Exception) -> None:
+        logger.warning(
+            "hub: catching connection %s of %r up in thread %r failed: %s",
+            session.id,
+            session.identity.id,
+            thread_id,
+            error,
+        )
 
     async def _reentered(
         self, scope: str, thread_id: str, again: list[tuple[Session, MemberAdded]]
