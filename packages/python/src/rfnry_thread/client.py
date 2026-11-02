@@ -236,6 +236,9 @@ class Client:
         self._connected = asyncio.Event()
         self._reader: asyncio.Task[None] | None = None
         self._reconnector: asyncio.Task[None] | None = None
+        self._retrier: asyncio.Task[None] | None = None
+        self._refollow = False
+        self._unjoined: set[str] = set()
         self._attempt = 0
         self._since = 0.0
         self._closed = False
@@ -429,6 +432,8 @@ class Client:
             return
         self._connection = None
         self._connected.clear()
+        if self._retrier is not None and self._retrier is not asyncio.current_task():
+            self._retrier.cancel()
         if asyncio.get_running_loop().time() - self._since >= HEALTHY:
             self._attempt = 0
         for future in self._pending.values():
@@ -462,34 +467,70 @@ class Client:
             self._reconnector = None
 
     async def _rejoin(self) -> None:
-        followed = False
-        if self._following:
-            try:
-                await self._follow(True, dict(self._cursors), dict(self._left))
-                followed = True
-            except ForbiddenError, NotFoundError:
-                self._following = False
-            except (InputError, ConfigurationError) as error:
-                await self._end(error)
-                return
-            except ThreadException:
-                await self._abandon()
-                return
+        connection = self._connection
+        self._refollow, self._unjoined = False, set()
+        followed = self._following and await self._refollowed()
+        if self._connection is not connection:
+            return
         for thread_id in list(self._cursors):
-            cursor = self._cursors.get(thread_id)
-            if cursor is None or (followed and thread_id not in self._present):
+            if followed and thread_id not in self._present:
                 continue
+            if not await self._rejoin_one(thread_id):
+                return
+        if self._refollow or self._unjoined:
+            self._retrier = asyncio.get_running_loop().create_task(self._retry(connection))
+
+    async def _refollowed(self) -> bool:
+        try:
+            await self._follow(True, dict(self._cursors), dict(self._left))
+        except ForbiddenError, NotFoundError:
+            self._following = self._refollow = False
+            return False
+        except ThreadException as error:
+            self._refollow = await self._tolerated(error)
+            return False
+        self._refollow = False
+        return True
+
+    async def _rejoin_one(self, thread_id: str) -> bool:
+        cursor = self._cursors.get(thread_id)
+        if cursor is not None:
             try:
                 await self._rejoined(thread_id, cursor)
             except ForbiddenError, NotFoundError:
                 self._cursors.pop(thread_id, None)
                 self._present.discard(thread_id)
-            except (InputError, ConfigurationError) as error:
-                await self._end(error)
+            except ThreadException as error:
+                if not await self._tolerated(error):
+                    return False
+                self._unjoined.add(thread_id)
+                return True
+        self._unjoined.discard(thread_id)
+        return True
+
+    async def _tolerated(self, error: ThreadException) -> bool:
+        if isinstance(error, InputError | ConfigurationError):
+            await self._end(error)
+            return False
+        if isinstance(error, TransportError):
+            await self._abandon()
+            return False
+        return True
+
+    async def _retry(self, connection: Connection | None) -> None:
+        attempt = 0
+        while self._refollow or self._unjoined:
+            await asyncio.sleep(random.random() * min(RECONNECT_CAP, RECONNECT * 2**attempt))
+            attempt += 1
+            if self._connection is not connection:
                 return
-            except ThreadException:
-                await self._abandon()
+            if self._refollow and await self._refollowed():
+                self._unjoined &= self._present
+            if self._connection is not connection:
                 return
+            for thread_id in sorted(self._unjoined):
+                if not await self._rejoin_one(thread_id):
+                    return
 
     async def _end(self, error: ThreadException) -> None:
         self._fail(error)
@@ -711,6 +752,7 @@ class Client:
                 self._cursors.pop(thread_id, None)
             raise
         self._present.add(thread_id)
+        self._unjoined.discard(thread_id)
         return joined
 
     async def leave(self, thread_id: str) -> None:
@@ -726,7 +768,9 @@ class Client:
 
     async def follow(self, resume: bool = False) -> list[Joined]:
         self._left.clear()
-        return await self._follow(resume, None, None)
+        found = await self._follow(resume, None, None)
+        self._refollow = False
+        return found
 
     async def _follow(
         self, resume: bool, since: dict[str, int] | None, left: dict[str, int] | None
@@ -945,12 +989,12 @@ class Client:
         if self._closed and self._connection is None and self._reader is None:
             return
         self._closed = True
-        for task in (self._reconnector, self._reader):
+        for task in (self._reconnector, self._retrier, self._reader):
             if task is not None and task is not asyncio.current_task():
                 task.cancel()
                 with contextlib.suppress(asyncio.CancelledError, Exception):
                     await task
-        self._reconnector = self._reader = None
+        self._reconnector = self._retrier = self._reader = None
         connection, self._connection = self._connection, None
         self._connected.clear()
         if connection is not None:

@@ -453,9 +453,12 @@ before anything new. A re-join refused because the thread is gone or no longer y
 `ForbiddenError`) forgets that thread, and a re-follow refused so joins each thread instead, the
 client no longer following until you call `follow()` again. A re-join or re-follow refused as a
 wrong request (`InputError`, `ConfigurationError`), as a server of another release refuses it, stops
-the client with that error, as a refused hello does. Any other refusal, a storage failure on the
-server among them, is a failed attempt: the client closes that connection and redials with the same
-backoff.
+the client with that error, as a refused hello does. Any other refusal, a storage failure or an
+`authorize` that raised among them, holds no other thread back: the client keeps that thread's
+cursor, re-joins the rest, and tries it again on the same connection with the same backoff until it
+is taken, and a re-follow refused so joins each thread instead and is tried again the same way.
+Until then nothing of that thread reaches the client, though writes to it still go out; its
+`Joined` arrives once it is joined again.
 A re-follow's or re-join's `Joined`
 also arrives in `events()`, and when it says `truncated`, redraw from the latest page. Each position
 a re-join or re-follow resumes from carries the `created_at` of the thread it was read in, so a
@@ -468,12 +471,13 @@ and the function called again. Items wait in the client until you read them, so 
 joins and then starts reading misses nothing.
 
 A client's `status` says where its connection is: `"open"`; `"reconnecting"` from the moment its
-socket drops until it follows again, if it was following, and every thread it had joined is joined
-again; `"closed"` once it stops, by `close()` or a refused reconnect — an expired session, or a
-hello the server answers with an error such as another protocol version. A push the client cannot
+socket drops until the new connection's re-follow and every re-join are answered, and `"open"` then
+even while a thread or the follow is still being tried again; `"closed"` once it stops, by `close()`
+or a refused reconnect — an expired session, a hello the server answers with an error such as
+another protocol version, or a re-join or re-follow refused as a wrong request. A push the client cannot
 read, one with a name it does not know included, is skipped, not fatal. A client needs a server of its own
 release: a 0.1.5 client needs a 0.1.5 server. Each change arrives in
-`events()` as a `StatusChanged` — `"open"` after the re-follow's and re-joins' `Joined` — the one
+`events()` as a `StatusChanged` — `"open"` after the `Joined` of the re-follow and the re-joins it took — the one
 item that names no thread. It is how a person's page says it
 is reconnecting.
 

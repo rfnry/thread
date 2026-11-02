@@ -503,7 +503,8 @@ follows again from what it has seen, without the threads it had left unless it w
 again since or they were deleted and made again; refused because a thread is gone or not the
 caller's, it joins each thread instead and no longer follows until `follow()` is called again,
 refused as a wrong request it stops the client with that error, and refused for anything else, a
-storage failure among them, it closes that connection and tries again on the next. Threads
+storage failure among them, it joins each thread instead and is tried again on the same connection
+with backoff. Threads
 `authorize` refuses to `read` are left out.
 Raises `InputError` for a negative position.
 
@@ -778,8 +779,9 @@ def status(self) -> Status: ...
 ```
 
 The connection's status, a `Status`, which is `Literal["open", "reconnecting", "closed"]`: `"open"`
-once connected, `"reconnecting"` from a dropped socket until it is back, follows again if it was
-following, and every thread joined is joined again, and `"closed"` for good after `close()` or a refused reconnect. Each change arrives in
+once connected, `"reconnecting"` from a dropped socket until it is back and its re-follow and
+re-joins are answered (a thread, or the follow, refused for a storage failure or the like is tried
+again meanwhile), and `"closed"` for good after `close()` or a refused reconnect. Each change arrives in
 `events()` as a `StatusChanged`.
 
 ### `Client.close`
@@ -1767,8 +1769,8 @@ class Client {
 
 A participant's connection, made by `connect`; the constructor alone opens no socket. `identity` and
 `scope` are as the server knows them. `status` is the connection's: `'open'` once connected,
-`'reconnecting'` from a dropped socket until it is back, follows again if it was following, and every
-thread joined is joined again, and
+`'reconnecting'` from a dropped socket until it is back and its re-follow and re-joins are answered
+(a thread, or the follow, refused for a storage failure or the like is tried again meanwhile), and
 `'closed'` for good; listeners hear each change as a `StatusChanged`. `closed` resolves when the
 client stops for good: `null` after `close()`, or the error that stopped it, a `ForbiddenError` when
 a reconnect is closed with 1008 before its hello is answered, the error that answered a refused
@@ -1908,7 +1910,8 @@ follows again from what it has seen, without the threads it had left unless it w
 again since or they were deleted and made again; refused because a thread is gone or not the
 caller's, it joins each thread instead and no longer follows until `follow()` is called again,
 refused as a wrong request it stops the client with that error, and refused for anything else, a
-storage failure among them, it closes that connection and tries again on the next. Threads
+storage failure among them, it joins each thread instead and is tried again on the same connection
+with backoff. Threads
 `authorize` refuses to `read` are left out.
 Raises `InputError` for a negative position.
 

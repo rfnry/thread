@@ -2,7 +2,7 @@ import asyncio
 import contextlib
 import inspect
 import random
-from collections.abc import Sequence
+from collections.abc import Awaitable, Callable, Sequence
 from typing import Any, cast
 
 import pytest
@@ -1494,7 +1494,31 @@ def failing_once(
     return armed
 
 
-async def test_a_rejoin_refused_by_a_storage_failure_redials_and_joins_the_thread_again(
+def dialling(client: Client) -> list[int]:
+    dials: list[int] = []
+    dial = client._dial
+
+    async def counted() -> Connection:
+        dials.append(1)
+        return await dial()
+
+    client._dial = counted
+    return dials
+
+
+def reopened(client: Client, connection: Connection) -> bool:
+    return client.status == "open" and client._connection not in (None, connection)
+
+
+def ana_in(server: Server, thread_id: str) -> bool:
+    return any(s.identity.id == ANA.id and thread_id in s.joined for s in server._hub.sessions)
+
+
+def ana_follows(server: Server) -> list[bool]:
+    return [s.following for s in server._hub.sessions if s.identity.id == ANA.id]
+
+
+async def test_a_rejoin_refused_by_a_storage_failure_is_tried_again_on_the_same_connection(
     storage: PostgresStorage, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     monkeypatch.setattr(client_module, "RECONNECT", 0.01)
@@ -1505,16 +1529,21 @@ async def test_a_rejoin_refused_by_a_storage_failure_redials_and_joins_the_threa
     await bruno.add_member("t1", ANA)
     await ana.join("t1")
     await drain(ana)
+    dials = dialling(ana)
     armed = failing_once(storage, monkeypatch, "get_thread")
-    items = await dropped(ana)
-    assert not armed and "t1" in ana._cursors and "t1" in ana._present
+    connection = ana._connection
+    assert connection is not None
+    await connection.close()
+    await until(lambda: reopened(ana, connection) and ana_in(server, "t1"))
+    items = await drain(ana)
+    assert not armed and dials == [1] and "t1" in ana._present
     told = [i.status if isinstance(i, StatusChanged) else type(i).__name__ for i in items]
-    assert told == ["reconnecting", "Present", "Joined", "open"]
+    assert told == ["reconnecting", "open", "Present", "Joined"]
     sent = await bruno.send("t1", "after the reconnect")
     assert (await take(ana, Message)).id == sent.id
 
 
-async def test_a_refollow_refused_by_a_storage_failure_redials_and_follows_again(
+async def test_a_refollow_refused_by_a_storage_failure_joins_each_thread_and_follows_again(
     storage: PostgresStorage, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     monkeypatch.setattr(client_module, "RECONNECT", 0.01)
@@ -1525,13 +1554,84 @@ async def test_a_refollow_refused_by_a_storage_failure_redials_and_follows_again
     await bruno.add_member("t1", ANA)
     await ana.follow()
     await drain(ana)
+    dials = dialling(ana)
     armed = failing_once(storage, monkeypatch, "list_threads")
-    await dropped(ana)
-    assert not armed and ana._following
-    assert [s.following for s in server._hub.sessions if s.identity.id == ANA.id] == [True]
+    connection = ana._connection
+    assert connection is not None
+    await connection.close()
+    await until(lambda: reopened(ana, connection) and ana_follows(server) == [True])
+    assert not armed and dials == [1] and ana._following
+    await drain(ana)
     await bruno.create_thread(thread_id="t2")
     await bruno.add_member("t2", ANA)
     assert (await take(ana, Joined)).thread.id == "t2"
+
+
+def unreliable(broken: set[str]) -> Callable[[Identity, str, Thread], Awaitable[bool]]:
+    async def authorize(identity: Identity, action: str, thread: Thread) -> bool:
+        if thread.id in broken:
+            raise RuntimeError("policy service timed out")
+        return True
+
+    return authorize
+
+
+async def test_a_thread_whose_rejoin_keeps_failing_is_tried_again_while_the_others_resume(
+    storage: PostgresStorage, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(client_module, "RECONNECT", 0.01)
+    broken: set[str] = set()
+    server = Server(storage, authorize=unreliable(broken))
+    ana = await server.connect(identity=ANA, scope="acme")
+    bruno = await server.connect(identity=BRUNO, scope="acme")
+    for thread_id in ("t1", "t2"):
+        await bruno.create_thread(thread_id=thread_id)
+        await bruno.add_member(thread_id, ANA)
+        await ana.join(thread_id)
+    await drain(ana)
+    dials = dialling(ana)
+    broken.add("t1")
+    connection = ana._connection
+    assert connection is not None
+    await connection.close()
+    await until(lambda: reopened(ana, connection))
+    sent = await bruno.send("t2", "in the healthy thread")
+    assert (await take(ana, Message)).id == sent.id
+    assert set(ana._cursors) == {"t1", "t2"} and not ana_in(server, "t1") and dials == [1]
+    broken.clear()
+    assert (await take(ana, Joined, timeout=3)).thread.id == "t1"
+    sent = await bruno.send("t1", "in the thread that came back")
+    assert (await take(ana, Message)).id == sent.id and dials == [1]
+
+
+async def test_a_refollow_that_keeps_failing_joins_each_thread_and_is_tried_again(
+    storage: PostgresStorage, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(client_module, "RECONNECT", 0.01)
+    broken: set[str] = set()
+    server = Server(storage, authorize=unreliable(broken))
+    ana = await server.connect(identity=ANA, scope="acme")
+    bruno = await server.connect(identity=BRUNO, scope="acme")
+    for thread_id in ("t1", "t2"):
+        await bruno.create_thread(thread_id=thread_id)
+        await bruno.add_member(thread_id, ANA)
+    await ana.follow()
+    await drain(ana)
+    dials = dialling(ana)
+    broken.add("t1")
+    connection = ana._connection
+    assert connection is not None
+    await connection.close()
+    await until(lambda: reopened(ana, connection))
+    sent = await bruno.send("t2", "in the healthy thread")
+    assert (await take(ana, Message)).id == sent.id
+    assert ana._following and ana._refollow and dials == [1]
+    broken.clear()
+    await until(lambda: ana_follows(server) == [True], timeout=3)
+    await bruno.create_thread(thread_id="t3")
+    await bruno.add_member("t3", ANA)
+    found = [i for i in await drain(ana, 0.3) if isinstance(i, Joined)]
+    assert {j.thread.id for j in found} >= {"t1", "t3"} and dials == [1]
 
 
 async def ended(client: Client) -> ThreadException:

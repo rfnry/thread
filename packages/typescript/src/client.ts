@@ -250,6 +250,9 @@ export class Client {
   private attempt = 0
   private reconnecting = false
   private nap: { timer: ReturnType<typeof setTimeout>; wake: () => void } | null = null
+  private pause: { timer: ReturnType<typeof setTimeout>; wake: () => void } | null = null
+  private refollow = false
+  private readonly unjoined = new Set<string>()
   private since = 0
   private current: Status = 'open'
   private failure: ThreadException | null = null
@@ -453,6 +456,7 @@ export class Client {
   private lost(socket: WebSocket): void {
     if (this.socket !== socket) return
     this.socket = null
+    this.wake()
     if (Date.now() - this.since >= timing.healthyMs) this.attempt = 0
     for (const waiter of this.pending.values())
       waiter.reject(new TransportError('client: connection lost'))
@@ -498,28 +502,80 @@ export class Client {
   }
 
   private async rejoin(): Promise<void> {
-    let followed = false
-    if (this.following) {
-      try {
-        await this.followFrom(true, Object.fromEntries(this.cursors), Object.fromEntries(this.left))
-        followed = true
-      } catch (error) {
-        if (wrong(error)) return this.end(error)
-        if (!gone(error)) return this.abandon()
-        this.following = false
-      }
-    }
+    const socket = this.socket
+    this.refollow = false
+    this.unjoined.clear()
+    const followed = this.following && (await this.refollowed())
+    if (this.socket !== socket) return
     for (const threadId of [...this.cursors.keys()]) {
-      const cursor = this.cursors.get(threadId)
-      if (cursor === undefined || (followed && !this.held.has(threadId))) continue
+      if (followed && !this.held.has(threadId)) continue
+      if (!(await this.rejoinOne(threadId))) return
+    }
+    if (socket && (this.refollow || this.unjoined.size > 0)) void this.retry(socket)
+  }
+
+  private async refollowed(): Promise<boolean> {
+    try {
+      await this.followFrom(true, Object.fromEntries(this.cursors), Object.fromEntries(this.left))
+    } catch (error) {
+      if (gone(error)) {
+        this.following = false
+        this.refollow = false
+      } else this.refollow = this.tolerated(error)
+      return false
+    }
+    this.refollow = false
+    return true
+  }
+
+  private async rejoinOne(threadId: string): Promise<boolean> {
+    const cursor = this.cursors.get(threadId)
+    if (cursor !== undefined) {
       try {
         await this.rejoined(threadId, cursor)
       } catch (error) {
-        if (wrong(error)) return this.end(error)
-        if (!gone(error)) return this.abandon()
+        if (!gone(error)) {
+          if (!this.tolerated(error)) return false
+          this.unjoined.add(threadId)
+          return true
+        }
         this.cursors.delete(threadId)
         this.held.delete(threadId)
       }
+    }
+    this.unjoined.delete(threadId)
+    return true
+  }
+
+  private tolerated(error: unknown): boolean {
+    if (wrong(error)) this.end(error)
+    else if (error instanceof ThreadException && !(error instanceof TransportError)) return true
+    else this.abandon()
+    return false
+  }
+
+  private async retry(socket: WebSocket): Promise<void> {
+    for (let attempt = 0; this.refollow || this.unjoined.size > 0; attempt++) {
+      const ceiling = Math.min(timing.reconnectCapMs, timing.reconnectMs * 2 ** attempt)
+      await new Promise<void>((wake) => {
+        this.pause = { timer: setTimeout(wake, Math.random() * ceiling), wake }
+      })
+      this.pause = null
+      if (this.socket !== socket) return
+      if (this.refollow && (await this.refollowed()))
+        for (const threadId of this.unjoined)
+          if (!this.held.has(threadId)) this.unjoined.delete(threadId)
+      if (this.socket !== socket) return
+      for (const threadId of [...this.unjoined].sort())
+        if (!(await this.rejoinOne(threadId))) return
+    }
+  }
+
+  private wake(): void {
+    for (const sleeping of [this.nap, this.pause]) {
+      if (!sleeping) continue
+      clearTimeout(sleeping.timer)
+      sleeping.wake()
     }
   }
 
@@ -716,6 +772,7 @@ export class Client {
     try {
       const joined = await this.joinFrom(threadId, options.since ?? null, options.resume ?? false)
       this.held.add(threadId)
+      this.unjoined.delete(threadId)
       return joined
     } catch (error) {
       if (!known) this.cursors.delete(threadId)
@@ -739,7 +796,9 @@ export class Client {
 
   async follow(options: { resume?: boolean } = {}): Promise<Joined[]> {
     this.left.clear()
-    return this.followFrom(options.resume ?? false, null, {})
+    const found = await this.followFrom(options.resume ?? false, null, {})
+    this.refollow = false
+    return found
   }
 
   private async followFrom(
@@ -950,10 +1009,7 @@ export class Client {
   async close(): Promise<void> {
     if (this.stopped && this.socket === null) return
     this.stopped = true
-    if (this.nap) {
-      clearTimeout(this.nap.timer)
-      this.nap.wake()
-    }
+    this.wake()
     const socket = this.socket
     this.socket = null
     for (const waiter of this.pending.values())

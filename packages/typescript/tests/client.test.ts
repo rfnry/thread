@@ -1054,7 +1054,7 @@ describe('client', () => {
     await client.close()
   })
 
-  it('redials and joins the thread again when a re-join meets a storage failure', async () => {
+  it('joins the thread again on the same connection when a re-join meets a storage failure', async () => {
     const { client, items } = await joined()
     const join = server.handlers.get('thread.join')
     let failing = true
@@ -1066,19 +1066,52 @@ describe('client', () => {
       return join?.(payload) ?? {}
     })
     server.drop()
-    await vi.waitFor(() => expect(items).toContainEqual({ kind: 'status', status: 'open' }))
+    await vi.waitFor(() => expect(items.filter((item) => 'truncated' in item)).toHaveLength(1))
     expect(server.sent('thread.join')).toHaveLength(3)
-    expect(server.hellos).toHaveLength(3)
+    expect(server.hellos).toHaveLength(2)
     expect([...(client as unknown as { cursors: Map<string, number> }).cursors.keys()]).toEqual([
       't1',
     ])
     expect(
       items.map((item) => ('status' in item ? item.status : 'truncated' in item ? 'joined' : 'x'))
-    ).toEqual(['reconnecting', 'joined', 'open'])
+    ).toEqual(['reconnecting', 'open', 'joined'])
     await client.close()
   })
 
-  it('redials and follows again when a re-follow meets a storage failure', async () => {
+  it('opens with the other threads while one re-join keeps failing, and joins it once it is taken', async () => {
+    const client = await connect({ url: 'ws://fake' })
+    const items: Item[] = []
+    client.subscribe((item) => items.push(item))
+    await client.join('t1', { since: 0 })
+    await client.join('t2', { since: 0 })
+    const join = server.handlers.get('thread.join')
+    let failing = true
+    server.handlers.set('thread.join', (payload) => {
+      if (failing && payload.thread_id === 't1')
+        throw { code: 'thread', message: 'server: request failed' }
+      return join?.(payload) ?? {}
+    })
+    server.drop()
+    await vi.waitFor(() => expect(items).toContainEqual({ kind: 'status', status: 'open' }))
+    const joinedNow = () => items.flatMap((item) => ('truncated' in item ? [item.thread.id] : []))
+    expect(joinedNow()).toEqual(['t2'])
+    await vi.waitFor(() =>
+      expect(
+        server.sent('thread.join').filter((frame) => frame.payload.thread_id === 't1').length
+      ).toBeGreaterThanOrEqual(4)
+    )
+    expect(joinedNow()).toEqual(['t2'])
+    expect([...(client as unknown as { cursors: Map<string, number> }).cursors.keys()]).toEqual([
+      't1',
+      't2',
+    ])
+    failing = false
+    await vi.waitFor(() => expect(joinedNow()).toEqual(['t2', 't1']))
+    expect(server.hellos).toHaveLength(2)
+    await client.close()
+  })
+
+  it('joins each thread instead when a re-follow meets a storage failure, and follows again on the same connection', async () => {
     let calls = 0
     server.handlers.set('thread.follow', () => {
       if (++calls === 2) throw { code: 'storage', message: 'server: storage failed' }
@@ -1097,9 +1130,12 @@ describe('client', () => {
     client.subscribe((item) => items.push(item))
     await client.follow()
     server.drop()
-    await vi.waitFor(() => expect(items).toContainEqual({ kind: 'status', status: 'open' }))
-    expect(server.sent('thread.follow')).toHaveLength(3)
-    expect(server.sent('thread.join')).toEqual([])
+    await vi.waitFor(() => expect(server.sent('thread.follow')).toHaveLength(3))
+    expect(items).toContainEqual({ kind: 'status', status: 'open' })
+    expect(server.sent('thread.join').map((frame) => frame.payload)).toEqual([
+      { thread_id: 't1', since: 4, away: true, created_at: '2026-01-01T12:00:00Z' },
+    ])
+    expect(server.hellos).toHaveLength(2)
     expect((client as unknown as { following: boolean }).following).toBe(true)
     await client.close()
   })
