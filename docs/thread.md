@@ -209,6 +209,10 @@ async function the same way. `server.connect` is in-process and trusted — your
 identity. Both expose `client.identity` and `client.scope`, as the server knows them, and close with
 `await client.close()`.
 
+A connection that sends no hello within 10 seconds is refused with an error frame and closed with
+`CLOSE_PROTOCOL` (4000), so a silent socket never holds a slot. A connection too slow to keep up is closed with
+`CLOSE_SLOW` (4001); a client reconnects after either.
+
 ### Threads and members
 
 ```python
@@ -966,7 +970,7 @@ thread metadata over 8 KiB, a position past 2**63 - 1. Sizes count UTF-8 bytes, 
 setup that cannot work: a limit that is not positive, a `system` identity given to `serve` or
 `server.connect`, a `redact` that returns something other than parts, a `ThreadTools` with an empty
 `thread_id`, two tools with the same name in one `Tools`, a `Tool` with no body when it is called, a
-query on a database without search set up. `StorageError` for the database. `TransportError` for the
+query on a database without search set up. `StorageError` for the database; a client only ever sees `server: storage failed`, the database's own text stays in the server's log. `TransportError` for the
 socket: a write not acknowledged within its deadline, a client used after `close()`, a connection
 that cannot be opened. On a client, an error the server raised is raised again with its class and
 message.

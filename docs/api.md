@@ -1548,6 +1548,24 @@ The close code an endpoint refuses a connection with, after accepting it; a clie
 server closes with 4000 when a client breaks the protocol and 4001 when a connection cannot keep up;
 after either, and after any close once the hello was answered, a client reconnects.
 
+### `CLOSE_PROTOCOL`
+
+```python
+CLOSE_PROTOCOL = 4000
+```
+
+The close code the server uses when a client breaks the protocol: a malformed frame, a frame a
+client may not send, or no hello within 10 seconds. A client reconnects after it.
+
+### `CLOSE_SLOW`
+
+```python
+CLOSE_SLOW = 4001
+```
+
+The close code the server uses when a connection cannot keep up with what it is sent. A client
+reconnects after it.
+
 ### `ThreadException`
 
 ```python
@@ -2625,6 +2643,24 @@ The close code an endpoint refuses a connection with, after accepting it; a clie
 `ForbiddenError` when its socket is closed with it before the hello is answered, and stops. The
 server closes with 4000 when a client breaks the protocol and 4001 when a connection cannot keep up;
 after either, and after any close once the hello was answered, a client reconnects.
+
+### `CLOSE_PROTOCOL`
+
+```ts
+export const CLOSE_PROTOCOL = 4000
+```
+
+The close code the server uses when a client breaks the protocol: a malformed frame, a frame a
+client may not send, or no hello within 10 seconds. A client reconnects after it.
+
+### `CLOSE_SLOW`
+
+```ts
+export const CLOSE_SLOW = 4001
+```
+
+The close code the server uses when a connection cannot keep up with what it is sent. A client
+reconnects after it.
 
 ### `ThreadException`
 

@@ -11,7 +11,7 @@ import {
   ThreadException,
   TransportError,
 } from '../src/errors.js'
-import { CLOSE_REFUSED } from '../src/index.js'
+import { CLOSE_PROTOCOL, CLOSE_REFUSED, CLOSE_SLOW } from '../src/index.js'
 
 const SRC = join(import.meta.dirname, '../src')
 const PREFIXES: Record<string, string> = { outbox: 'client' }
@@ -61,5 +61,13 @@ describe('errors', () => {
         !text.startsWith(prefix) || /^[A-Z\s]|^$/.test(text.slice(prefix.length))
     )
     expect(wrong).toEqual([])
+  })
+})
+
+describe('close codes', () => {
+  it('are exported', () => {
+    expect(CLOSE_REFUSED).toBe(1008)
+    expect(CLOSE_PROTOCOL).toBe(4000)
+    expect(CLOSE_SLOW).toBe(4001)
   })
 })

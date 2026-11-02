@@ -8,7 +8,7 @@ from pydantic import BaseModel, ConfigDict, Field, ValidationError
 
 from rfnry_thread.client import Client
 from rfnry_thread.connection import Connection
-from rfnry_thread.errors import ConfigurationError, InputError, ThreadException
+from rfnry_thread.errors import ConfigurationError, InputError, StorageError, ThreadException
 from rfnry_thread.hub import Hub, Session
 from rfnry_thread.models import (
     SYSTEM,
@@ -26,7 +26,7 @@ from rfnry_thread.pipe import End, pipe
 from rfnry_thread.protocol import (
     CLOSE_PROTOCOL,
     CLOSE_SLOW,
-    HELLO,
+    HELLO as HELLO_ID,
     PROTOCOL,
     Hello,
     Notify,
@@ -43,6 +43,7 @@ from rfnry_thread.verbs import Authorize, Redact, Verbs, _clean, _sized
 logger = logging.getLogger(__name__)
 
 IN_FLIGHT = 64
+HELLO = 10.0
 ORDERED = frozenset({"thread.join", "thread.leave", "thread.away", "thread.follow"})
 
 
@@ -160,7 +161,7 @@ async def _close(connection: Connection, code: int, reason: str) -> None:
 
 async def _refuse(connection: Connection, error: ThreadException) -> None:
     with contextlib.suppress(Exception):
-        await connection.send_text(encode(failure(HELLO, error)))
+        await connection.send_text(encode(failure(HELLO_ID, error)))
     await _close(connection, CLOSE_PROTOCOL, str(error))
 
 
@@ -189,7 +190,10 @@ class Server:
         who = _identity(identity)
         _scope(scope)
         try:
-            text = await connection.receive_text()
+            text = await asyncio.wait_for(connection.receive_text(), HELLO)
+        except TimeoutError:
+            await _refuse(connection, InputError(f"server: no hello within {HELLO:g} seconds"))
+            return
         except Exception:
             return
         try:
@@ -217,7 +221,7 @@ class Server:
         session = Session(identity=identity, scope=scope, outbound=Outbound(connection, too_slow))
         self._hub.sessions.add(session)
         session.outbound.put(
-            Response(id=HELLO, payload={"identity": _dump(identity), "scope": scope})
+            Response(id=HELLO_ID, payload={"identity": _dump(identity), "scope": scope})
         )
         tasks: set[asyncio.Task[None]] = set()
         try:
@@ -265,6 +269,9 @@ class Server:
                     payload = await self._call(session, frame.method, frame.payload)
             else:
                 payload = await self._call(session, frame.method, frame.payload)
+        except StorageError as error:
+            logger.warning("server: %s failed: %s", frame.method, error)
+            session.outbound.put(failure(frame.id, StorageError("server: storage failed")))
         except ThreadException as error:
             session.outbound.put(failure(frame.id, error))
         except asyncio.CancelledError:

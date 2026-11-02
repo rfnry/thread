@@ -12,6 +12,8 @@ from rfnry_thread import models
 
 EXPECTED = {
     "CLOSE_REFUSED",
+    "CLOSE_PROTOCOL",
+    "CLOSE_SLOW",
     "Server",
     "Connection",
     "Client",
@@ -117,6 +119,11 @@ SERVER = {
     "delete_scope",
     "verify_absent",
 }
+
+
+def test_the_close_codes_are_exported() -> None:
+    assert rfnry_thread.CLOSE_PROTOCOL == 4000
+    assert rfnry_thread.CLOSE_SLOW == 4001
 
 
 def test_public_names_are_exactly_these() -> None:

@@ -3,11 +3,12 @@ import json
 
 import pytest
 
-from rfnry_thread.errors import ConfigurationError, InputError
+from rfnry_thread import server as server_module
+from rfnry_thread.errors import ConfigurationError, InputError, StorageError
 from rfnry_thread.models import SYSTEM
 from rfnry_thread.pipe import pipe
 from rfnry_thread.postgres import PostgresStorage
-from rfnry_thread.protocol import Hello, encode
+from rfnry_thread.protocol import CLOSE_PROTOCOL, Hello, encode
 from rfnry_thread.server import Server
 
 from .factories import ANA, lookalike
@@ -105,3 +106,32 @@ async def test_serve_reads_the_identity_by_its_fields(server: Server) -> None:
     assert reply["payload"]["identity"] == ANA.model_dump(mode="json")
     await ours.close()
     await asyncio.wait_for(task, 1.0)
+
+
+async def test_a_connection_without_a_hello_is_refused_after_the_deadline(
+    server: Server, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(server_module, "HELLO", 0.05)
+    ours, theirs = pipe()
+    task = asyncio.create_task(server.serve(theirs, identity=ANA, scope="acme"))
+    reply = json.loads(await asyncio.wait_for(ours.receive_text(), 1.0))
+    assert reply["type"] == "error"
+    assert reply["error"]["message"] == "server: no hello within 0.05 seconds"
+    await asyncio.wait_for(task, 1.0)
+    assert ours.code == CLOSE_PROTOCOL
+
+
+async def test_a_storage_failure_reaches_the_client_without_the_databases_text(
+    server: Server,
+    storage: PostgresStorage,
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    async def broken(*args: object, **kwargs: object) -> None:
+        raise StorageError("postgres: storage rejected list_threads: secret DETAIL")
+
+    monkeypatch.setattr(storage, "list_threads", broken)
+    client = await server.connect(identity=ANA, scope="acme")
+    with pytest.raises(StorageError, match="^server: storage failed$"):
+        await client.list_threads()
+    assert "secret DETAIL" in caplog.text
