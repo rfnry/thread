@@ -24,6 +24,7 @@ from rfnry_thread.models import (
     Marked,
     Member,
     MemberAdded,
+    MemberRemoved,
     Message,
     Order,
     Part,
@@ -34,6 +35,7 @@ from rfnry_thread.models import (
     StreamStart,
     Text,
     Thread,
+    ThreadUpdated,
     Working,
 )
 from rfnry_thread.storage import Storage
@@ -124,30 +126,32 @@ class Verbs:
             history=history,
         )
         await self._allow(actor, "create", candidate)
-        thread, created = await self._storage.create_thread(scope, candidate)
+        creator = None if actor.role == "system" else self._added(candidate.id, actor, actor)
+        thread, created = await self._storage.create_thread(scope, candidate, creator)
         if not created:
             return await self.thread(actor, scope, thread.id, "read")
-        if actor.role != "system":
-            await self._admit(scope, thread, actor, actor)
+        if creator is not None:
+            await self._admitted(scope, thread, actor, creator.model_copy(update={"seq": 1}))
         return thread
 
-    async def _admit(self, scope: str, thread: Thread, identity: Identity, by: Identity) -> Member:
-        member, created = await self._storage.add_member(
-            scope, Member(thread_id=thread.id, identity=identity, added_at=now(), added_by=by)
+    def _added(self, thread_id: str, identity: Identity, by: Identity) -> MemberAdded:
+        return MemberAdded(
+            id=uuid.uuid4().hex,
+            thread_id=thread_id,
+            author=by,
+            created_at=now(),
+            client_id=uuid.uuid4().hex,
+            identity=identity,
         )
-        if created:
-            added = await self._append(
-                scope,
-                {
-                    "kind": "member_added",
-                    "thread_id": thread.id,
-                    "author": by,
-                    "client_id": uuid.uuid4().hex,
-                    "identity": identity,
-                },
-            )
-            await self._storage.mark(scope, thread.id, identity.id, added.seq - 1)
-            await self._hub.added(scope, thread, by, identity, added.seq)
+
+    async def _admitted(self, scope: str, thread: Thread, by: Identity, added: MemberAdded) -> None:
+        await self._hub.deliver(scope, added)
+        await self._hub.added(scope, thread, by, added.identity, added.seq)
+
+    async def _admit(self, scope: str, thread: Thread, identity: Identity, by: Identity) -> Member:
+        member, added = await self._storage.add_member(scope, self._added(thread.id, identity, by))
+        if added is not None:
+            await self._admitted(scope, thread, by, added)
         return member
 
     async def get_thread(self, actor: Identity, scope: str, thread_id: str) -> Thread:
@@ -194,20 +198,20 @@ class Verbs:
         self, actor: Identity, scope: str, thread_id: str, metadata: dict[str, Any]
     ) -> Thread:
         await self.thread(actor, scope, thread_id, "manage")
-        updated = await self._storage.update_thread(scope, thread_id, metadata)
-        if updated is None:
-            raise NotFoundError(f"server: thread {thread_id!r} was not found")
-        await self._append(
-            scope,
-            {
-                "kind": "thread_updated",
-                "thread_id": thread_id,
-                "author": actor,
-                "client_id": uuid.uuid4().hex,
-                "metadata": metadata,
-            },
+        event = ThreadUpdated(
+            id=uuid.uuid4().hex,
+            thread_id=thread_id,
+            author=actor,
+            created_at=now(),
+            client_id=uuid.uuid4().hex,
+            metadata=metadata,
         )
-        return updated
+        result = await self._storage.update_thread(scope, event)
+        if result is None:
+            raise NotFoundError(f"server: thread {thread_id!r} was not found")
+        thread, stored = result
+        await self._hub.deliver(scope, stored)
+        return thread
 
     async def delete_thread(self, actor: Identity, scope: str, thread_id: str) -> None:
         await self.thread(actor, scope, thread_id, "delete")
@@ -226,27 +230,18 @@ class Verbs:
         self, actor: Identity, scope: str, thread_id: str, identity_id: str
     ) -> None:
         await self.thread(actor, scope, thread_id, "manage")
-        member = next(
-            (
-                m
-                for m in await self._storage.list_members(scope, thread_id)
-                if m.identity.id == identity_id
-            ),
-            None,
+        event = MemberRemoved(
+            id=uuid.uuid4().hex,
+            thread_id=thread_id,
+            author=actor,
+            created_at=now(),
+            client_id=uuid.uuid4().hex,
+            identity=Identity(role="user", id=identity_id),
         )
-        if member is None:
+        stored = await self._storage.remove_member(scope, event)
+        if stored is None:
             raise NotFoundError(f"server: {identity_id!r} is not a member of thread {thread_id!r}")
-        await self._storage.remove_member(scope, thread_id, identity_id)
-        await self._append(
-            scope,
-            {
-                "kind": "member_removed",
-                "thread_id": thread_id,
-                "author": actor,
-                "client_id": uuid.uuid4().hex,
-                "identity": member.identity,
-            },
-        )
+        await self._hub.deliver(scope, stored)
 
     async def list_members(self, actor: Identity, scope: str, thread_id: str) -> list[Member]:
         await self.thread(actor, scope, thread_id, "read")

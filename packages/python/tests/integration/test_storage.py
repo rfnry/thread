@@ -3,21 +3,22 @@ from datetime import timedelta
 from typing import Any
 
 import pytest
-from unit.factories import ANA, AT, BRUNO, HELPER
+from database import Schemas
+from unit.factories import ANA, AT, BRUNO, HELPER, added, removed, updated
 from until import until
 
-from rfnry_thread.errors import NotFoundError
+from rfnry_thread import migrations
+from rfnry_thread.errors import NotFoundError, StorageError
 from rfnry_thread.models import (
-    SYSTEM,
     Edit,
     Event,
-    Member,
     Message,
     Read,
     Retract,
     Text,
     Thread,
 )
+from rfnry_thread.postgres import PostgresStorage
 from rfnry_thread.storage import Storage
 
 
@@ -50,9 +51,7 @@ async def room(
 ) -> Thread:
     stored, _ = await storage.create_thread(scope, thread(thread_id, scope))
     for identity in members or (ANA,):
-        await storage.add_member(
-            scope, Member(thread_id=thread_id, identity=identity, added_at=AT, added_by=SYSTEM)
-        )
+        await storage.add_member(scope, added(thread_id, identity))
     return stored
 
 
@@ -69,9 +68,7 @@ async def test_threads_are_listed_for_a_member_newest_first_in_pages(storage: St
     for minutes, thread_id in enumerate(["a", "b", "c", "d"]):
         await storage.create_thread("acme", thread(thread_id, minutes=minutes))
         if thread_id != "c":
-            await storage.add_member(
-                "acme", Member(thread_id=thread_id, identity=ANA, added_at=AT, added_by=SYSTEM)
-            )
+            await storage.add_member("acme", added(thread_id, ANA))
     assert [t.id for t in await storage.list_threads("acme", "ana")] == ["d", "b", "a"]
     assert [t.id for t in await storage.list_threads("acme", "ana", limit=2)] == ["d", "b"]
     assert [t.id for t in await storage.list_threads("acme", "ana", before="b")] == ["a"]
@@ -102,9 +99,7 @@ async def test_threads_are_listed_by_metadata_for_anyone_or_for_a_member(
         "globex", Thread(id="g", scope="globex", metadata={"elevated": True}, created_at=AT)
     )
     for thread_id in ("a", "b"):
-        await storage.add_member(
-            "acme", Member(thread_id=thread_id, identity=ANA, added_at=AT, added_by=SYSTEM)
-        )
+        await storage.add_member("acme", added(thread_id, ANA))
 
     async def listed(member_id: str | None = None, **query: Any) -> list[str]:
         return [t.id for t in await storage.list_threads("acme", member_id, **query)]
@@ -131,9 +126,10 @@ async def test_threads_are_listed_by_metadata_for_anyone_or_for_a_member(
 async def test_update_and_delete_take_members_and_events_along(storage: Storage) -> None:
     await room(storage)
     await storage.append_event("acme", say("t1", "c1"))
-    updated = await storage.update_thread("acme", "t1", {"topic": "refunds"})
-    assert updated is not None and updated.metadata == {"topic": "refunds"}
-    assert await storage.update_thread("acme", "ghost", {}) is None
+    result = await storage.update_thread("acme", updated("t1", {"topic": "refunds"}))
+    assert result is not None and result[0].metadata == {"topic": "refunds"}
+    assert result[1].metadata == {"topic": "refunds"} and result[1].seq > 0
+    assert await storage.update_thread("acme", updated("ghost", {})) is None
     assert await storage.delete_thread("acme", "t1") is True
     assert await storage.delete_thread("acme", "t1") is False
     assert await storage.list_members("acme", "t1") == []
@@ -143,22 +139,16 @@ async def test_update_and_delete_take_members_and_events_along(storage: Storage)
 
 async def test_members_are_added_once_and_removed(storage: Storage) -> None:
     await room(storage)
-    member, created = await storage.add_member(
-        "acme", Member(thread_id="t1", identity=BRUNO, added_at=AT, added_by=ANA)
-    )
-    again, created_again = await storage.add_member(
-        "acme", Member(thread_id="t1", identity=BRUNO, added_at=AT + timedelta(1), added_by=HELPER)
-    )
-    assert (created, created_again) == (True, False) and again == member
+    member, event = await storage.add_member("acme", added("t1", BRUNO, ANA))
+    again, event_again = await storage.add_member("acme", added("t1", BRUNO, HELPER))
+    assert event is not None and event_again is None and again == member
     assert [m.identity.id for m in await storage.list_members("acme", "t1")] == ["ana", "bruno"]
     assert await storage.is_member("acme", "t1", "bruno")
-    assert await storage.remove_member("acme", "t1", "bruno") is True
-    assert await storage.remove_member("acme", "t1", "bruno") is False
+    assert await storage.remove_member("acme", removed("t1", BRUNO)) is not None
+    assert await storage.remove_member("acme", removed("t1", BRUNO)) is None
     assert not await storage.is_member("acme", "t1", "bruno")
     with pytest.raises(NotFoundError, match=r"^\w+: thread 'ghost' was not found$"):
-        await storage.add_member(
-            "acme", Member(thread_id="ghost", identity=BRUNO, added_at=AT, added_by=ANA)
-        )
+        await storage.add_member("acme", added("ghost", BRUNO, ANA))
 
 
 async def test_seq_is_thread_local_gapless_and_dedup_answers_with_the_stored_event(
@@ -174,9 +164,9 @@ async def test_seq_is_thread_local_gapless_and_dedup_answers_with_the_stored_eve
     assert (
         repeat == first and isinstance(repeat, Message) and repeat.content == [Text(text="hello")]
     )
-    assert (first.seq, second.seq, other.seq) == (1, 2, 1)
+    assert (first.seq, second.seq, other.seq) == (2, 3, 2)
     bruno, _ = await storage.append_event("acme", say("t1", "c1", author=BRUNO))
-    assert bruno.seq == 3
+    assert bruno.seq == 4
     with pytest.raises(NotFoundError):
         await storage.append_event("acme", say("ghost", "c1"))
 
@@ -187,7 +177,7 @@ async def test_a_message_keeps_its_metadata(storage: Storage) -> None:
     sent = say("t1", "c1").model_copy(update={"metadata": metadata})
     stored, _ = await storage.append_event("acme", sent)
     assert isinstance(stored, Message) and stored.metadata == metadata
-    listed = (await storage.list_events("acme", "t1"))[0]
+    listed = (await storage.list_events("acme", "t1", kinds=["message"]))[0]
     fetched = await storage.get_event("acme", "t1", stored.id)
     assert isinstance(listed, Message) and listed.metadata == metadata
     assert isinstance(fetched, Message) and fetched.metadata == metadata
@@ -212,7 +202,7 @@ async def test_concurrent_duplicates_store_one_event_and_seq_stays_gapless(
     results = await asyncio.gather(*same, *distinct)
     assert sum(created for _, created in results[:20]) == 1
     assert len({event.id for event, _ in results[:20]}) == 1
-    assert [e.seq for e in await storage.list_events("acme", "t1", limit=100)] == list(range(1, 22))
+    assert [e.seq for e in await storage.list_events("acme", "t1", limit=100)] == list(range(1, 23))
 
 
 async def test_list_events_pages_both_ways_and_filters_kinds(storage: Storage) -> None:
@@ -222,11 +212,11 @@ async def test_list_events_pages_both_ways_and_filters_kinds(storage: Storage) -
     await storage.append_event(
         "acme", Read(id="r", thread_id="t1", author=ANA, created_at=AT, client_id="r", up_to_seq=10)
     )
-    assert seqs(await storage.list_events("acme", "t1", limit=3)) == [9, 10, 11]
+    assert seqs(await storage.list_events("acme", "t1", limit=3)) == [10, 11, 12]
     assert seqs(await storage.list_events("acme", "t1", since=2, limit=3)) == [3, 4, 5]
     assert seqs(await storage.list_events("acme", "t1", before=5, limit=3)) == [2, 3, 4]
     assert seqs(await storage.list_events("acme", "t1", since=2, before=5)) == [3, 4]
-    assert seqs(await storage.list_events("acme", "t1", kinds=["read"])) == [11]
+    assert seqs(await storage.list_events("acme", "t1", kinds=["read"])) == [12]
     assert (await storage.get_event("acme", "t1", "r")) is not None
     assert await storage.get_event("acme", "t1", "ghost") is None
 
@@ -238,8 +228,8 @@ async def test_a_head_is_the_last_seq_for_a_member_and_none_for_anyone_else(
     await room(storage, "t1", "globex")
     for client_id in ("c1", "c2"):
         await storage.append_event("acme", say("t1", client_id))
-    assert await storage.head("acme", "t1", "ana") == (2, 0)
-    assert await storage.head("globex", "t1", "ana") == (0, 0)
+    assert await storage.head("acme", "t1", "ana") == (3, 0)
+    assert await storage.head("globex", "t1", "ana") == (1, 0)
     assert await storage.head("acme", "t1", "bruno") is None
     assert await storage.head("acme", "ghost", "ana") is None
 
@@ -248,23 +238,23 @@ async def test_the_same_thread_id_in_two_scopes_is_two_threads(storage: Storage)
     await room(storage, "t1", "tenant-a")
     await room(storage, "t1", "tenant-b")
     await storage.append_event("tenant-a", say("t1", "c1", "MARKER-A"))
-    assert await storage.list_events("tenant-b", "t1") == []
+    assert [e.kind for e in await storage.list_events("tenant-b", "t1")] == ["member_added"]
     assert await storage.get_event("tenant-b", "t1", "id-c1-MARKER-A") is None
-    await storage.update_thread("tenant-a", "t1", {"tenant": "a"})
-    await storage.update_thread("tenant-b", "t1", {"tenant": "b"})
+    await storage.update_thread("tenant-a", updated("t1", {"tenant": "a"}))
+    await storage.update_thread("tenant-b", updated("t1", {"tenant": "b"}))
     [listed] = await storage.list_threads("tenant-b", "ana")
     assert (listed.scope, listed.id, listed.metadata, listed.created_at, listed.last_seq) == (
         "tenant-b",
         "t1",
         {"tenant": "b"},
         AT,
-        0,
+        2,
     )
     assert await storage.list_threads("tenant-b", "ana", query="marker") == []
     assert await storage.list_threads("tenant-b", None, query="marker") == []
     assert await storage.search("tenant-b", "t1", "marker") == []
     assert [m.id for m in await storage.search("tenant-a", "t1", "marker")] == ["id-c1-MARKER-A"]
-    assert await storage.delete_scope("tenant-a") == 5
+    assert await storage.delete_scope("tenant-a") == 8
     assert await storage.verify_absent("tenant-a")
     assert not await storage.verify_absent("tenant-b")
 
@@ -285,7 +275,7 @@ async def test_listeners_hear_new_events_and_published_signals(storage: Storage)
     await storage.append_event("acme", say("t1", "c1"))
     await storage.publish("acme", "t1", {"o": "r1", "kind": "idle"})
     await until(lambda: len(events) == 1 and len(signals) == 1)
-    assert events == [("acme", "t1", 1)]
+    assert events == [("acme", "t1", 2)]
     assert signals == [("acme", "t1", {"o": "r1", "kind": "idle"})]
     await stop()
     await storage.append_event("acme", say("t1", "c2"))
@@ -304,11 +294,11 @@ async def test_a_mark_moves_forward_only_counts_what_others_said_after_it_and_sa
     for n in range(3):
         await storage.append_event("acme", say("t1", f"b{n}", author=BRUNO))
     await storage.append_event("acme", say("t1", "a0", author=ANA))
-    assert await storage.mark("acme", "t1", "ana", 1) == (1, 2, True)
-    assert await storage.mark("acme", "t1", "ana", 0) == (1, 2, False)
-    assert await storage.mark("acme", "t1", "ana", 1) == (1, 2, False)
-    assert await storage.mark("acme", "t1", "ana", 4) == (4, 0, True)
-    assert await storage.mark("acme", "t1", "bruno", 0) == (0, 1, True)
+    assert await storage.mark("acme", "t1", "ana", 3) == (3, 2, True)
+    assert await storage.mark("acme", "t1", "ana", 0) == (3, 2, False)
+    assert await storage.mark("acme", "t1", "ana", 3) == (3, 2, False)
+    assert await storage.mark("acme", "t1", "ana", 6) == (6, 0, True)
+    assert await storage.mark("acme", "t1", "bruno", 2) == (2, 1, True)
 
 
 async def test_a_mark_moves_back_only_when_asked(storage: Storage) -> None:
@@ -316,33 +306,30 @@ async def test_a_mark_moves_back_only_when_asked(storage: Storage) -> None:
     for n in range(3):
         await storage.append_event("acme", say("t1", f"b{n}", author=BRUNO))
     await storage.append_event("acme", say("t1", "a0", author=ANA))
-    assert await storage.mark("acme", "t1", "ana", 4) == (4, 0, True)
-    assert await storage.mark("acme", "t1", "ana", 1) == (4, 0, False)
-    assert await storage.mark("acme", "t1", "ana", 1, back=True) == (1, 2, True)
-    assert await storage.mark("acme", "t1", "ana", 1, back=True) == (1, 2, False)
-    assert await storage.mark("acme", "t1", "ana", 3, back=True) == (3, 0, True)
-    assert await storage.mark("acme", "t1", "bruno", 2, back=True) == (2, 1, True)
-    assert await storage.get_mark("acme", "t1", "ana") == 3
+    assert await storage.mark("acme", "t1", "ana", 6) == (6, 0, True)
+    assert await storage.mark("acme", "t1", "ana", 3) == (6, 0, False)
+    assert await storage.mark("acme", "t1", "ana", 3, back=True) == (3, 2, True)
+    assert await storage.mark("acme", "t1", "ana", 3, back=True) == (3, 2, False)
+    assert await storage.mark("acme", "t1", "ana", 5, back=True) == (5, 0, True)
+    assert await storage.mark("acme", "t1", "bruno", 4, back=True) == (4, 1, True)
+    assert await storage.get_mark("acme", "t1", "ana") == 5
 
 
 async def test_a_mark_needs_a_membership_and_leaves_with_it(storage: Storage) -> None:
     await room(storage, "t1", "acme", ANA)
     with pytest.raises(NotFoundError, match="'bruno' is not a member of thread 't1'$"):
         await storage.mark("acme", "t1", "bruno", 0)
-    await storage.add_member(
-        "acme", Member(thread_id="t1", identity=BRUNO, added_at=AT, added_by=SYSTEM)
-    )
+    await storage.add_member("acme", added("t1", BRUNO))
     await storage.append_event("acme", say("t1", "b1", author=BRUNO))
-    assert await storage.mark("acme", "t1", "ana", 1) == (1, 0, True)
-    await storage.remove_member("acme", "t1", "ana")
-    await storage.add_member(
-        "acme", Member(thread_id="t1", identity=ANA, added_at=AT, added_by=SYSTEM)
-    )
-    assert await storage.mark("acme", "t1", "ana", 0) == (0, 1, True)
+    assert await storage.mark("acme", "t1", "ana", 3) == (3, 0, True)
+    await storage.remove_member("acme", removed("t1", ANA))
+    await storage.add_member("acme", added("t1", ANA))
+    assert await storage.get_mark("acme", "t1", "ana") == 4
+    assert await storage.mark("acme", "t1", "ana", 0, back=True) == (0, 1, True)
 
 
 async def test_baseline_marks_set_the_last_seq_only_where_there_is_no_mark(
-    storage: Storage,
+    storage: Storage, pool: Any
 ) -> None:
     await room(storage, "t1", "acme", ANA)
     await room(storage, "t2", "acme", ANA)
@@ -351,9 +338,11 @@ async def test_baseline_marks_set_the_last_seq_only_where_there_is_no_mark(
         await storage.append_event("acme", say("t1", client_id))
     await storage.append_event("acme", say("t2", "z"))
     await storage.mark("acme", "t2", "ana", 0)
+    async with pool.acquire() as conn:
+        await conn.execute("DELETE FROM thread_marks WHERE thread_id = 't1'")
     assert await storage.baseline_marks("acme", "ana") == 1
     assert await storage.baseline_marks("acme", "ana") == 0
-    assert (await storage.mark("acme", "t1", "ana", 0))[0] == 2
+    assert (await storage.mark("acme", "t1", "ana", 0))[0] == 3
     assert (await storage.mark("acme", "t2", "ana", 0))[0] == 0
 
 
@@ -363,20 +352,20 @@ async def test_a_mark_is_read_for_one_membership_and_is_none_without_one(
     await room(storage, "t1", "acme", ANA, BRUNO)
     await room(storage, "t1", "other", ANA)
     await storage.append_event("acme", say("t1", "x"))
-    assert await storage.get_mark("acme", "t1", "ana") is None
-    await storage.mark("acme", "t1", "ana", 1)
-    assert await storage.get_mark("acme", "t1", "ana") == 1
-    assert await storage.get_mark("acme", "t1", "bruno") is None
-    assert await storage.get_mark("other", "t1", "ana") is None
+    assert await storage.get_mark("acme", "t1", "ana") == 0
+    await storage.mark("acme", "t1", "ana", 3)
+    assert await storage.get_mark("acme", "t1", "ana") == 3
+    assert await storage.get_mark("acme", "t1", "bruno") == 1
+    assert await storage.get_mark("other", "t1", "ana") == 0
     assert await storage.get_mark("acme", "missing", "ana") is None
-    await storage.remove_member("acme", "t1", "ana")
+    await storage.remove_member("acme", removed("t1", ANA))
     assert await storage.get_mark("acme", "t1", "ana") is None
 
 
 async def test_a_deleted_scope_takes_its_marks_along(storage: Storage) -> None:
     await room(storage, "t1", "acme", ANA)
     await storage.mark("acme", "t1", "ana", 0)
-    assert await storage.delete_scope("acme") == 4
+    assert await storage.delete_scope("acme") == 5
     assert await storage.verify_absent("acme")
 
 
@@ -388,12 +377,12 @@ async def test_a_member_listing_carries_its_mark_and_what_others_said_after_it(
     await storage.append_event("acme", say("t1", "a1", author=ANA))
     await storage.append_event("acme", say("t1", "b2", author=BRUNO))
     [before] = await storage.list_threads("acme", "ana")
-    assert (before.last_seq, before.marked, before.unread) == (3, None, None)
-    await storage.mark("acme", "t1", "ana", 1)
+    assert (before.last_seq, before.marked, before.unread) == (5, 0, 2)
+    await storage.mark("acme", "t1", "ana", 3)
     [after] = await storage.list_threads("acme", "ana")
-    assert (after.marked, after.unread) == (1, 1)
+    assert (after.marked, after.unread) == (3, 1)
     [anyone] = await storage.list_threads("acme", None)
-    assert (anyone.last_seq, anyone.marked, anyone.unread) == (3, None, None)
+    assert (anyone.last_seq, anyone.marked, anyone.unread) == (5, None, None)
 
 
 async def test_unread_is_counted_up_to_100(storage: Storage) -> None:
@@ -408,9 +397,7 @@ async def test_unread_is_counted_up_to_100(storage: Storage) -> None:
 async def test_activity_order_follows_the_latest_message_and_pages(storage: Storage) -> None:
     for minutes, thread_id in enumerate(["a", "b", "c"]):
         await storage.create_thread("acme", thread(thread_id, minutes=minutes))
-        await storage.add_member(
-            "acme", Member(thread_id=thread_id, identity=ANA, added_at=AT, added_by=SYSTEM)
-        )
+        await storage.add_member("acme", added(thread_id, ANA))
     late = say("a", "late").model_copy(update={"created_at": AT + timedelta(hours=1)})
     await storage.append_event("acme", late)
     read = Read(
@@ -443,9 +430,7 @@ async def test_a_listed_thread_places_the_next_page_after_it_is_deleted_or_moves
 ) -> None:
     for minutes, thread_id in enumerate(["a", "b", "c", "d"]):
         await storage.create_thread("acme", thread(thread_id, minutes=minutes))
-        await storage.add_member(
-            "acme", Member(thread_id=thread_id, identity=ANA, added_at=AT, added_by=SYSTEM)
-        )
+        await storage.add_member("acme", added(thread_id, ANA))
         later = AT + timedelta(hours=1, minutes=minutes)
         await storage.append_event(
             "acme", say(thread_id, thread_id).model_copy(update={"created_at": later})
@@ -537,7 +522,7 @@ async def test_a_preview_reads_the_last_five_messages_with_the_edits_and_retract
 async def test_a_kind_filter_reads_only_kinds_a_log_can_hold(storage: Storage) -> None:
     await room(storage, "t1", "acme", ANA)
     await storage.append_event("acme", say("t1", "c1"))
-    assert seqs(await storage.list_events("acme", "t1", kinds=["it's", "message"])) == [1]
+    assert seqs(await storage.list_events("acme", "t1", kinds=["it's", "message"])) == [2]
     assert await storage.list_events("acme", "t1", kinds=["it's"]) == []
     assert await storage.list_events("acme", "t1", since=0, kinds=[]) == []
 
@@ -562,13 +547,9 @@ async def test_a_thread_since_added_keeps_what_came_before_a_member_from_them(
     assert stored.history == "since_added"
     got = await storage.get_thread("acme", "t1")
     assert got is not None and got.history == "since_added"
-    await storage.add_member(
-        "acme", Member(thread_id="t1", identity=ANA, added_at=AT, added_by=SYSTEM)
-    )
+    await storage.add_member("acme", added("t1", ANA))
     before, _ = await storage.append_event("acme", say("t1", "c1", "before"))
-    await storage.add_member(
-        "acme", Member(thread_id="t1", identity=BRUNO, added_at=AT, added_by=SYSTEM)
-    )
+    await storage.add_member("acme", added("t1", BRUNO))
     previews = {
         who: (await storage.list_threads("acme", who, preview=True))[0] for who in ("ana", "bruno")
     }
@@ -578,16 +559,16 @@ async def test_a_thread_since_added_keeps_what_came_before_a_member_from_them(
     await storage.append_event("acme", changed(Edit, "e1", before.id, content=[Text(text="x")]))
     await storage.append_event("acme", changed(Edit, "e2", after.id, content=[Text(text="y")]))
     await storage.append_event("acme", changed(Retract, "r1", before.id))
-    assert await storage.head("acme", "t1", "ana") == (5, 1)
-    assert await storage.head("acme", "t1", "bruno") == (5, 2)
-    assert seqs(await storage.list_events("acme", "t1")) == [1, 2, 3, 4, 5]
-    assert seqs(await storage.list_events("acme", "t1", floor=2)) == [2, 4]
-    assert seqs(await storage.list_events("acme", "t1", since=0, floor=2)) == [2, 4]
-    assert seqs(await storage.list_events("acme", "t1", before=4, floor=2)) == [2]
+    assert await storage.head("acme", "t1", "ana") == (7, 1)
+    assert await storage.head("acme", "t1", "bruno") == (7, 3)
+    assert seqs(await storage.list_events("acme", "t1")) == [1, 2, 3, 4, 5, 6, 7]
+    assert seqs(await storage.list_events("acme", "t1", floor=3)) == [3, 4, 6]
+    assert seqs(await storage.list_events("acme", "t1", since=0, floor=3)) == [3, 4, 6]
+    assert seqs(await storage.list_events("acme", "t1", before=4, floor=3)) == [3]
     for hidden in (before.id, "e1", "r1"):
-        assert await storage.get_event("acme", "t1", hidden, floor=2) is None
+        assert await storage.get_event("acme", "t1", hidden, floor=3) is None
         assert await storage.get_event("acme", "t1", hidden) is not None
-    assert await storage.get_event("acme", "t1", "e2", floor=2) is not None
+    assert await storage.get_event("acme", "t1", "e2", floor=3) is not None
     [seen] = await storage.list_threads("acme", "bruno", preview=True)
     assert seen.last_message is not None and seen.last_message.content == [Text(text="y")]
 
@@ -595,12 +576,10 @@ async def test_a_thread_since_added_keeps_what_came_before_a_member_from_them(
 async def test_a_thread_with_its_whole_history_floors_no_member(storage: Storage) -> None:
     await room(storage, "t1", "acme", ANA)
     await storage.append_event("acme", say("t1", "c1"))
-    await storage.add_member(
-        "acme", Member(thread_id="t1", identity=BRUNO, added_at=AT, added_by=SYSTEM)
-    )
+    await storage.add_member("acme", added("t1", BRUNO))
     got = await storage.get_thread("acme", "t1")
     assert got is not None and got.history == "all"
-    assert await storage.head("acme", "t1", "bruno") == (1, 0)
+    assert await storage.head("acme", "t1", "bruno") == (3, 0)
     assert await storage.head("acme", "t1", "zed") is None
 
 
@@ -625,9 +604,7 @@ async def test_a_member_listing_by_activity_filters_metadata_and_pages_together(
             ),
         )
         if thread_id != "b":
-            await storage.add_member(
-                "acme", Member(thread_id=thread_id, identity=ANA, added_at=AT, added_by=SYSTEM)
-            )
+            await storage.add_member("acme", added(thread_id, ANA))
     late = say("a", "late", author=BRUNO).model_copy(update={"created_at": AT + timedelta(hours=1)})
     await storage.append_event("acme", late)
     await storage.mark("acme", "a", "ana", 0)
@@ -638,9 +615,9 @@ async def test_a_member_listing_by_activity_filters_metadata_and_pages_together(
         )
         return [(t.id, t.unread) for t in threads]
 
-    assert await listed() == [("a", 1), ("d", None)]
+    assert await listed() == [("a", 1), ("d", 0)]
     assert await listed(limit=1) == [("a", 1)]
-    assert await listed(before="a") == [("d", None)]
+    assert await listed(before="a") == [("d", 0)]
     assert await listed(before="d") == []
 
 
@@ -654,22 +631,150 @@ async def test_a_member_added_while_an_append_is_in_flight_is_floored_after_it(
         await writer.execute(
             "SELECT last_seq FROM thread_threads WHERE scope = 'acme' AND id = 't1' FOR UPDATE"
         )
-        secret = say("t1", "c1", "before the add").model_copy(update={"seq": 1})
+        secret = say("t1", "c1", "before the add").model_copy(update={"seq": 2})
         await writer.execute(
             "INSERT INTO thread_events (scope, thread_id, seq, id, kind, author_id, client_id, "
-            "body) VALUES ('acme', 't1', 1, $1, 'message', 'ana', 'c1', $2::jsonb)",
+            "body) VALUES ('acme', 't1', 2, $1, 'message', 'ana', 'c1', $2::jsonb)",
             secret.id,
             secret.model_dump_json(),
         )
         await writer.execute(
-            "UPDATE thread_threads SET last_seq = 1 WHERE scope = 'acme' AND id = 't1'"
+            "UPDATE thread_threads SET last_seq = 2 WHERE scope = 'acme' AND id = 't1'"
         )
-        adding = asyncio.ensure_future(
-            storage.add_member(
-                "acme", Member(thread_id="t1", identity=BRUNO, added_at=AT, added_by=SYSTEM)
-            )
-        )
+        adding = asyncio.ensure_future(storage.add_member("acme", added("t1", BRUNO)))
         await asyncio.sleep(0.2)
         assert not adding.done()
     await adding
-    assert await storage.head("acme", "t1", "bruno") == (1, 2)
+    assert await storage.head("acme", "t1", "bruno") == (3, 3)
+
+
+async def failing(schemas: Schemas) -> tuple[PostgresStorage, Any]:
+    pool = await schemas.pool(await schemas.create())
+    async with pool.acquire() as conn:
+        await migrations.apply(conn, migrations.plan_create)
+    return PostgresStorage(pool), pool
+
+
+async def fail_on(pool: Any, kind: str) -> None:
+    async with pool.acquire() as conn:
+        await conn.execute(
+            "CREATE FUNCTION refuse_event() RETURNS trigger LANGUAGE plpgsql AS $$ BEGIN "
+            f"IF NEW.kind = '{kind}' THEN RAISE EXCEPTION 'refused'; END IF; RETURN NEW; END $$"
+        )
+        await conn.execute(
+            "CREATE TRIGGER refuse BEFORE INSERT ON thread_events "
+            "FOR EACH ROW EXECUTE FUNCTION refuse_event()"
+        )
+
+
+async def unfail(pool: Any) -> None:
+    async with pool.acquire() as conn:
+        await conn.execute("DROP FUNCTION refuse_event() CASCADE")
+
+
+async def test_a_failed_membership_event_leaves_the_membership_as_it_was(
+    schemas: Schemas,
+) -> None:
+    storage, pool = await failing(schemas)
+    await room(storage)
+    before = await storage.list_events("acme", "t1")
+    await fail_on(pool, "member_added")
+    with pytest.raises(StorageError):
+        await storage.add_member("acme", added("t1", BRUNO))
+    assert not await storage.is_member("acme", "t1", "bruno")
+    assert await storage.list_events("acme", "t1") == before
+    await unfail(pool)
+    await storage.add_member("acme", added("t1", BRUNO))
+    await fail_on(pool, "member_removed")
+    with pytest.raises(StorageError):
+        await storage.remove_member("acme", removed("t1", BRUNO))
+    assert await storage.is_member("acme", "t1", "bruno")
+
+
+async def test_a_failed_update_event_leaves_the_metadata_as_it_was(schemas: Schemas) -> None:
+    storage, pool = await failing(schemas)
+    await room(storage)
+    old = (await storage.get_thread("acme", "t1")).metadata  # type: ignore[union-attr]
+    await fail_on(pool, "thread_updated")
+    with pytest.raises(StorageError):
+        await storage.update_thread("acme", updated("t1", {"topic": "new"}))
+    got = await storage.get_thread("acme", "t1")
+    assert got is not None and got.metadata == old
+
+
+async def test_a_failed_creator_event_leaves_no_thread_and_a_retry_makes_it(
+    schemas: Schemas,
+) -> None:
+    storage, pool = await failing(schemas)
+    await fail_on(pool, "member_added")
+    with pytest.raises(StorageError):
+        await storage.create_thread("acme", thread("t1"), added("t1", ANA, ANA))
+    assert await storage.get_thread("acme", "t1") is None
+    await unfail(pool)
+    made, created = await storage.create_thread("acme", thread("t1"), added("t1", ANA, ANA))
+    assert created and made.id == "t1"
+    assert await storage.is_member("acme", "t1", "ana")
+    events = await storage.list_events("acme", "t1")
+    assert [(e.kind, e.seq) for e in events] == [("member_added", 1)]
+    assert await storage.get_mark("acme", "t1", "ana") == 0
+
+
+async def test_membership_reads_from_its_member_added_event(storage: Storage) -> None:
+    await storage.create_thread("acme", thread("t1").model_copy(update={"history": "since_added"}))
+    await storage.append_event("acme", say("t1", "c1", "one"))
+    await storage.append_event("acme", say("t1", "c2", "two"))
+    _, event = await storage.add_member("acme", added("t1", BRUNO))
+    assert event is not None
+    head = await storage.head("acme", "t1", "bruno")
+    assert head is not None and head[1] == event.seq
+    assert await storage.get_mark("acme", "t1", "bruno") == event.seq - 1
+    assert await storage.remove_member("acme", removed("t1", BRUNO)) is not None
+    _, again = await storage.add_member("acme", added("t1", BRUNO))
+    assert again is not None and again.seq > event.seq
+    head = await storage.head("acme", "t1", "bruno")
+    assert head is not None and head[1] == again.seq
+
+
+async def test_removing_a_non_member_writes_nothing(storage: Storage) -> None:
+    await room(storage)
+    before = await storage.list_events("acme", "t1")
+    assert await storage.remove_member("acme", removed("t1", BRUNO)) is None
+    assert await storage.list_events("acme", "t1") == before
+
+
+async def refuse(pool: Any, table: str, when: str) -> None:
+    async with pool.acquire() as conn:
+        await conn.execute(
+            "CREATE FUNCTION refuse_row() RETURNS trigger LANGUAGE plpgsql AS $$ BEGIN "
+            "RAISE EXCEPTION 'refused'; END $$"
+        )
+        await conn.execute(
+            f"CREATE TRIGGER refuse_row {when} ON {table} "
+            "FOR EACH ROW EXECUTE FUNCTION refuse_row()"
+        )
+
+
+async def test_a_failed_mark_after_the_event_leaves_no_member_and_no_event(
+    schemas: Schemas,
+) -> None:
+    storage, pool = await failing(schemas)
+    await room(storage)
+    before = await storage.list_events("acme", "t1")
+    await refuse(pool, "thread_marks", "BEFORE INSERT")
+    with pytest.raises(StorageError):
+        await storage.add_member("acme", added("t1", BRUNO))
+    assert not await storage.is_member("acme", "t1", "bruno")
+    assert await storage.list_events("acme", "t1") == before
+
+
+async def test_a_failed_metadata_write_after_the_event_leaves_no_event(schemas: Schemas) -> None:
+    storage, pool = await failing(schemas)
+    await room(storage)
+    before = await storage.list_events("acme", "t1")
+    old = (await storage.get_thread("acme", "t1")).metadata  # type: ignore[union-attr]
+    await refuse(pool, "thread_threads", "BEFORE UPDATE OF metadata")
+    with pytest.raises(StorageError):
+        await storage.update_thread("acme", updated("t1", {"topic": "new"}))
+    got = await storage.get_thread("acme", "t1")
+    assert got is not None and got.metadata == old
+    assert await storage.list_events("acme", "t1") == before

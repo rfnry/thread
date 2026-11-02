@@ -5,7 +5,8 @@ import json
 import random
 from collections.abc import AsyncIterator, Callable, Sequence
 from contextlib import asynccontextmanager
-from typing import Any
+from datetime import datetime
+from typing import Any, cast
 
 from rfnry_thread import migrations
 from rfnry_thread.errors import (
@@ -15,7 +16,19 @@ from rfnry_thread.errors import (
     StorageError,
     ThreadException,
 )
-from rfnry_thread.models import EVENT_KINDS, EVENTS, Edit, Event, Member, Message, Order, Thread
+from rfnry_thread.models import (
+    EVENT_KINDS,
+    EVENTS,
+    Edit,
+    Event,
+    Member,
+    MemberAdded,
+    MemberRemoved,
+    Message,
+    Order,
+    Thread,
+    ThreadUpdated,
+)
 from rfnry_thread.resolve import last_message
 from rfnry_thread.storage import PREVIEW_DEPTH, UNREAD_CAP, OnEvent, OnResume, OnSignal, Stop
 
@@ -100,9 +113,12 @@ class PostgresStorage:
         self._names: tuple[str, str] | None = None
         self._texts: str | None = None
 
-    async def _channels(self) -> tuple[str, str]:
+    async def _channels(self, conn: Any = None) -> tuple[str, str]:
         if self._names is None:
-            async with self._guard("channels"), self._pool.acquire() as conn:
+            if conn is None:
+                async with self._guard("channels"), self._pool.acquire() as held:
+                    schema = await held.fetchval("SELECT current_schema()")
+            else:
                 schema = await conn.fetchval("SELECT current_schema()")
             if schema is None:
                 raise StorageError("postgres: no schema on the search_path exists")
@@ -125,27 +141,26 @@ class PostgresStorage:
         if found:
             raise ConfigurationError(f"postgres: {'; '.join(found)}")
 
-    async def create_thread(self, scope: str, thread: Thread) -> tuple[Thread, bool]:
+    async def create_thread(
+        self, scope: str, thread: Thread, creator: MemberAdded | None = None
+    ) -> tuple[Thread, bool]:
         if thread.scope != scope:
             raise StorageError("postgres: row scope does not match the call scope")
-        async with self._guard("create_thread"), self._pool.acquire() as conn:
+        async with self._guard("create_thread"), self._pool.acquire() as conn, conn.transaction():
             row = await conn.fetchrow(
                 f"INSERT INTO thread_threads ({_THREAD}) VALUES ($1, $2, $3::jsonb, $4, $5) "
-                f"ON CONFLICT (scope, id) DO NOTHING RETURNING {_THREAD}",
+                "ON CONFLICT (scope, id) DO UPDATE SET scope = EXCLUDED.scope "
+                f"RETURNING {_THREAD}, last_seq, (xmax = 0) AS created",
                 scope,
                 thread.id,
                 json.dumps(thread.metadata),
                 thread.created_at,
                 thread.history,
             )
-            if row is not None:
-                return _thread(row), True
-            row = await conn.fetchrow(
-                f"SELECT {_THREAD} FROM thread_threads WHERE scope = $1 AND id = $2",
-                scope,
-                thread.id,
-            )
-            return _thread(row), False
+            if row["created"] and creator is not None:
+                stored = await self._append(conn, scope, creator, int(row["last_seq"]))
+                await self._admitted(conn, scope, creator.created_at, stored)
+        return _thread(row), bool(row["created"])
 
     async def get_thread(self, scope: str, thread_id: str) -> Thread | None:
         async with self._guard("get_thread"), self._pool.acquire() as conn:
@@ -377,16 +392,21 @@ class PostgresStorage:
         return [found[key] for key in sorted(found)]
 
     async def update_thread(
-        self, scope: str, thread_id: str, metadata: dict[str, Any]
-    ) -> Thread | None:
-        async with self._guard("update_thread"), self._pool.acquire() as conn:
+        self, scope: str, updated: ThreadUpdated
+    ) -> tuple[Thread, ThreadUpdated] | None:
+        async with self._guard("update_thread"), self._pool.acquire() as conn, conn.transaction():
+            last = await self._locked(conn, scope, updated.thread_id)
+            if last is None:
+                return None
+            stored = await self._append(conn, scope, updated, last)
             row = await conn.fetchrow(
-                f"UPDATE thread_threads SET metadata = $3::jsonb WHERE scope = $1 AND id = $2 RETURNING {_THREAD}",
+                "UPDATE thread_threads SET metadata = $3::jsonb WHERE scope = $1 AND id = $2 "
+                f"RETURNING {_THREAD}",
                 scope,
-                thread_id,
-                json.dumps(metadata),
+                updated.thread_id,
+                json.dumps(updated.metadata),
             )
-        return None if row is None else _thread(row)
+        return _thread(row), stored
 
     async def delete_thread(self, scope: str, thread_id: str) -> bool:
         async with self._guard("delete_thread"), self._pool.acquire() as conn:
@@ -395,40 +415,77 @@ class PostgresStorage:
             )
         return _count(status) > 0
 
-    async def add_member(self, scope: str, member: Member) -> tuple[Member, bool]:
-        async with self._guard("add_member"), self._pool.acquire() as conn:
-            body = await conn.fetchval(
-                "INSERT INTO thread_members (scope, thread_id, identity_id, added_at, body, added_seq) "
-                "SELECT $1, $2, $3, $4, $5::jsonb, t.last_seq + 1 FROM thread_threads t "
-                "WHERE t.scope = $1 AND t.id = $2 FOR SHARE "
-                "ON CONFLICT (scope, thread_id, identity_id) DO NOTHING RETURNING body",
-                scope,
-                member.thread_id,
-                member.identity.id,
-                member.added_at,
-                member.model_dump_json(),
-            )
-            if body is not None:
-                return Member.model_validate(_json(body)), True
+    async def add_member(self, scope: str, added: MemberAdded) -> tuple[Member, MemberAdded | None]:
+        async with self._guard("add_member"), self._pool.acquire() as conn, conn.transaction():
+            last = await self._locked(conn, scope, added.thread_id)
+            if last is None:
+                raise NotFoundError(f"postgres: thread {added.thread_id!r} was not found")
             existing = await conn.fetchval(
-                "SELECT body FROM thread_members WHERE scope = $1 AND thread_id = $2 AND identity_id = $3",
+                "SELECT body FROM thread_members "
+                "WHERE scope = $1 AND thread_id = $2 AND identity_id = $3",
                 scope,
-                member.thread_id,
-                member.identity.id,
+                added.thread_id,
+                added.identity.id,
             )
-        if existing is None:
-            raise NotFoundError(f"postgres: thread {member.thread_id!r} was not found")
-        return Member.model_validate(_json(existing)), False
+            if existing is not None:
+                return Member.model_validate(_json(existing)), None
+            stored = await self._append(conn, scope, added, last)
+            member = await self._admitted(conn, scope, added.created_at, stored)
+        return member, stored
 
-    async def remove_member(self, scope: str, thread_id: str, identity_id: str) -> bool:
-        async with self._guard("remove_member"), self._pool.acquire() as conn:
-            status = await conn.execute(
-                "DELETE FROM thread_members WHERE scope = $1 AND thread_id = $2 AND identity_id = $3",
+    async def remove_member(self, scope: str, removed: MemberRemoved) -> MemberRemoved | None:
+        async with self._guard("remove_member"), self._pool.acquire() as conn, conn.transaction():
+            last = await self._locked(conn, scope, removed.thread_id)
+            if last is None:
+                raise NotFoundError(f"postgres: thread {removed.thread_id!r} was not found")
+            body = await conn.fetchval(
+                "DELETE FROM thread_members WHERE scope = $1 AND thread_id = $2 "
+                "AND identity_id = $3 RETURNING body",
                 scope,
-                thread_id,
-                identity_id,
+                removed.thread_id,
+                removed.identity.id,
             )
-        return _count(status) > 0
+            if body is None:
+                return None
+            member = Member.model_validate(_json(body))
+            stamped = removed.model_copy(update={"identity": member.identity})
+            stored = await self._append(conn, scope, stamped, last)
+        return stored
+
+    async def _locked(self, conn: Any, scope: str, thread_id: str) -> int | None:
+        last = await conn.fetchval(
+            "SELECT last_seq FROM thread_threads WHERE scope = $1 AND id = $2 FOR UPDATE",
+            scope,
+            thread_id,
+        )
+        return None if last is None else int(last)
+
+    async def _admitted(self, conn: Any, scope: str, at: datetime, added: MemberAdded) -> Member:
+        member = Member(
+            thread_id=added.thread_id,
+            identity=added.identity,
+            added_at=at,
+            added_by=added.author,
+        )
+        await conn.execute(
+            "INSERT INTO thread_members (scope, thread_id, identity_id, added_at, body, added_seq) "
+            "VALUES ($1, $2, $3, $4, $5::jsonb, $6)",
+            scope,
+            member.thread_id,
+            member.identity.id,
+            member.added_at,
+            member.model_dump_json(),
+            added.seq,
+        )
+        await conn.execute(
+            "INSERT INTO thread_marks (scope, thread_id, identity_id, seq, at) "
+            "VALUES ($1, $2, $3, $4, now())",
+            scope,
+            member.thread_id,
+            member.identity.id,
+            added.seq - 1,
+        )
+        return member
 
     async def list_members(self, scope: str, thread_id: str) -> list[Member]:
         async with self._guard("list_members"), self._pool.acquire() as conn:
@@ -464,13 +521,8 @@ class PostgresStorage:
             )
 
     async def append_event(self, scope: str, event: Event) -> tuple[Event, bool]:
-        events_channel, _ = await self._channels()
         async with self._guard("append_event"), self._pool.acquire() as conn, conn.transaction():
-            last = await conn.fetchval(
-                "SELECT last_seq FROM thread_threads WHERE scope = $1 AND id = $2 FOR UPDATE",
-                scope,
-                event.thread_id,
-            )
+            last = await self._locked(conn, scope, event.thread_id)
             if last is None:
                 raise NotFoundError(f"postgres: thread {event.thread_id!r} was not found")
             existing = await conn.fetchval(
@@ -482,41 +534,45 @@ class PostgresStorage:
             )
             if existing is not None:
                 return _event(existing), False
-            stored = event.model_copy(update={"seq": int(last) + 1})
+            return await self._append(conn, scope, event, last), True
+
+    async def _append[E: Event](self, conn: Any, scope: str, event: E, last: int) -> E:
+        events_channel, _ = await self._channels(conn)
+        stored = cast(E, event.model_copy(update={"seq": last + 1}))
+        await conn.execute(
+            "INSERT INTO thread_events (scope, thread_id, seq, id, kind, author_id, client_id, body) "
+            "VALUES ($1, $2, $3, $4, $5, $6, $7, $8::jsonb)",
+            scope,
+            stored.thread_id,
+            stored.seq,
+            stored.id,
+            stored.kind,
+            stored.author.id,
+            stored.client_id,
+            stored.model_dump_json(),
+        )
+        if stored.kind == "message":
             await conn.execute(
-                "INSERT INTO thread_events (scope, thread_id, seq, id, kind, author_id, client_id, body) "
-                "VALUES ($1, $2, $3, $4, $5, $6, $7, $8::jsonb)",
+                "UPDATE thread_threads SET last_seq = $3, last_message_at = $4 "
+                "WHERE scope = $1 AND id = $2",
                 scope,
                 stored.thread_id,
                 stored.seq,
-                stored.id,
-                stored.kind,
-                stored.author.id,
-                stored.client_id,
-                stored.model_dump_json(),
+                stored.created_at,
             )
-            if stored.kind == "message":
-                await conn.execute(
-                    "UPDATE thread_threads SET last_seq = $3, last_message_at = $4 "
-                    "WHERE scope = $1 AND id = $2",
-                    scope,
-                    stored.thread_id,
-                    stored.seq,
-                    stored.created_at,
-                )
-            else:
-                await conn.execute(
-                    "UPDATE thread_threads SET last_seq = $3 WHERE scope = $1 AND id = $2",
-                    scope,
-                    stored.thread_id,
-                    stored.seq,
-                )
+        else:
             await conn.execute(
-                "SELECT pg_notify($1, $2)",
-                events_channel,
-                json.dumps({"s": scope, "t": stored.thread_id, "q": stored.seq}),
+                "UPDATE thread_threads SET last_seq = $3 WHERE scope = $1 AND id = $2",
+                scope,
+                stored.thread_id,
+                stored.seq,
             )
-        return stored, True
+        await conn.execute(
+            "SELECT pg_notify($1, $2)",
+            events_channel,
+            json.dumps({"s": scope, "t": stored.thread_id, "q": stored.seq}),
+        )
+        return stored
 
     async def list_events(
         self,

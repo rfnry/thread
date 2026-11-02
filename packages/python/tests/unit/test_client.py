@@ -23,7 +23,6 @@ from rfnry_thread.models import (
     Image,
     Invited,
     Marked,
-    Member,
     MemberAdded,
     Message,
     Present,
@@ -43,7 +42,8 @@ from rfnry_thread.protocol import Push
 from rfnry_thread.resolve import resolve
 from rfnry_thread.server import Server
 
-from .factories import ANA, AT, BRUNO, HELPER, Lookalike, lookalike
+from .factories import ANA, BRUNO, HELPER, Lookalike, lookalike
+from .legacy import enroll
 
 
 async def take[T](
@@ -447,9 +447,7 @@ async def test_marked_reads_the_callers_own_mark_without_moving_it(
     ana = await server.connect(identity=ANA, scope="acme")
     helper = await server.connect(identity=HELPER, scope="acme")
     await ana.create_thread(thread_id="t1")
-    await storage.add_member(
-        "acme", Member(thread_id="t1", identity=HELPER, added_at=AT, added_by=SYSTEM)
-    )
+    await enroll(storage, "t1", HELPER)
     message = await ana.send("t1", "hi")
     assert await helper.marked("t1") is None
     await helper.mark("t1", message.seq)

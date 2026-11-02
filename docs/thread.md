@@ -904,7 +904,10 @@ sharing a schema do.
 `Storage` is the protocol `PostgresStorage` implements; a storage of your own implements it too, and
 `Server` takes it the same way. `scope` is the first argument of every method that reads or writes a
 row. The log is append-only: an event is never updated or deleted on its own, only with its thread
-or its scope.
+or its scope. `create_thread` (with its creator), `add_member`, `remove_member` and `update_thread`
+take the event they log and write the row and the event in one transaction: a storage of your own
+must do the same, and its signatures changed from the earlier releases (a breaking change for it;
+`PostgresStorage` and `Server` are unaffected).
 
 ## Tenancy
 

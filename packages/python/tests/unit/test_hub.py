@@ -7,8 +7,6 @@ from until import until
 
 from rfnry_thread.hub import Hub
 from rfnry_thread.models import (
-    SYSTEM,
-    Member,
     MemberRemoved,
     StreamDelta,
     StreamStart,
@@ -19,6 +17,7 @@ from rfnry_thread.postgres import PostgresStorage
 
 from .factories import ANA, AT, BRUNO, HELPER, message
 from .hubkit import kinds, open_session, pushes
+from .legacy import enroll
 
 
 async def setup(
@@ -26,9 +25,7 @@ async def setup(
 ) -> tuple[Hub, Thread]:
     thread, _ = await storage.create_thread("acme", Thread(id="t1", scope="acme", created_at=AT))
     for identity in (ANA, HELPER, BRUNO):
-        await storage.add_member(
-            "acme", Member(thread_id="t1", identity=identity, added_at=AT, added_by=SYSTEM)
-        )
+        await enroll(storage, "t1", identity)
     for n in range(1, events + 1):
         await storage.append_event("acme", message(n, f"m{n}"))
     return Hub(storage, replay_limit), thread
@@ -187,9 +184,7 @@ async def test_leaving_ends_its_streams_and_work_in_that_thread_only(
 ) -> None:
     hub, thread = await setup(storage)
     other, _ = await storage.create_thread("acme", Thread(id="t2", scope="acme", created_at=AT))
-    await storage.add_member(
-        "acme", Member(thread_id="t2", identity=HELPER, added_at=AT, added_by=SYSTEM)
-    )
+    await enroll(storage, "t2", HELPER)
     helper, _ = open_session(HELPER)
     ana, recorder = open_session(ANA)
     await hub.join(ana, thread, None)

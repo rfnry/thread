@@ -1371,7 +1371,9 @@ Returns a `Tools` without the tools named; a name that is not one of them is ign
 class Storage(Protocol):
     async def check(self) -> None: ...
 
-    async def create_thread(self, scope: str, thread: Thread) -> tuple[Thread, bool]: ...
+    async def create_thread(
+        self, scope: str, thread: Thread, creator: MemberAdded | None = None
+    ) -> tuple[Thread, bool]: ...
 
     async def get_thread(self, scope: str, thread_id: str) -> Thread | None: ...
 
@@ -1398,14 +1400,16 @@ class Storage(Protocol):
     ) -> list[Message]: ...
 
     async def update_thread(
-        self, scope: str, thread_id: str, metadata: dict[str, Any]
-    ) -> Thread | None: ...
+        self, scope: str, updated: ThreadUpdated
+    ) -> tuple[Thread, ThreadUpdated] | None: ...
 
     async def delete_thread(self, scope: str, thread_id: str) -> bool: ...
 
-    async def add_member(self, scope: str, member: Member) -> tuple[Member, bool]: ...
+    async def add_member(
+        self, scope: str, added: MemberAdded
+    ) -> tuple[Member, MemberAdded | None]: ...
 
-    async def remove_member(self, scope: str, thread_id: str, identity_id: str) -> bool: ...
+    async def remove_member(self, scope: str, removed: MemberRemoved) -> MemberRemoved | None: ...
 
     async def list_members(self, scope: str, thread_id: str) -> list[Member]: ...
 
@@ -1458,10 +1462,20 @@ class Storage(Protocol):
 The protocol `PostgresStorage` implements, and a storage of your own implements to take its place;
 `scope` is the first argument of every method that reads or writes a row, and the log is
 append-only: an event is removed only with its thread or its scope. `check` only reads, and raises
-`ConfigurationError` when the storage does not fit this version. `create_thread`, `add_member` and
-`append_event` return the row stored and whether it is new (an existing thread, membership, or event
-of the same author and `client_id` comes back with `False`, and a new event gets the thread's next
-`seq`); the getters return `None` for what the scope does not hold, `list_threads` returns threads
+`ConfigurationError` when the storage does not fit this version. A membership or metadata change
+and its event are one write: `create_thread` given a `creator`, `add_member`, `remove_member` and
+`update_thread` take the event, and store the row, the event at the thread's next `seq` (taken under
+the thread's lock), the new member's mark and the notice in one transaction, so a failure leaves
+none of them. `create_thread` returns the thread and whether it is new; with a `creator`, a new
+thread's first event (`seq` 1) is that `MemberAdded`, its membership and its mark at 0, and an
+existing thread comes back with `False` and nothing else written. `add_member` returns the member
+and the event stored, `None` with the existing member when it already was one (nothing written);
+the member's `added_at` and `added_by` are the event's `created_at` and `author`, its floor is the
+event's `seq`, and its mark `seq - 1`. `remove_member` returns the event stored with the identity
+the membership held, `None` when the identity was not a member (nothing written). `update_thread`
+returns the thread with its new metadata and the event stored, `None` when the thread is missing.
+`append_event` returns the event stored and whether it is new (an existing event of the same author
+and `client_id` comes back with `False`, and a new event gets the thread's next `seq`); the getters return `None` for what the scope does not hold, `list_threads` returns threads
 newest first and `list_events` events in `seq` order, with `since` the first after it and without it
 the latest. `order` is an `Order`, which is `Literal["created", "activity"]`: `"activity"` lists by
 the latest message instead, a thread without messages by its creation; `preview=True` fills each
@@ -1479,13 +1493,13 @@ so paging holds when that thread is deleted or moves meanwhile. A member listing
 the server heard the thread change since. `head` returns a thread's last `seq` and the member's
 floor when `identity_id` is a member of it, `None` otherwise: the one read that enters a thread for
 a connection. The floor is 0 in a thread whose `history` is `"all"`, and in a `"since_added"` one
-the thread's last `seq` plus one when the member was added (`add_member` records it); `list_events`
+the `seq` of the member's `MemberAdded` event; `list_events`
 and `get_event` given a `floor` leave out events below it and edits and retractions of them.
 `listen` takes an `OnEvent`, `on_event(scope, thread_id, seq)`, and an `OnSignal`,
 `on_signal(scope, thread_id, payload)`, called for what any server on the storage appends or
 publishes, and an `OnResume`, `on_resume()`, called once a dropped listener is back; it returns a
 `Stop`, `stop()`, that ends it, and all four are async functions returning `None`. Raises
-`NotFoundError`, from `add_member`, `append_event` and `list_threads` with a `before` id, when the
+`NotFoundError`, from `add_member`, `remove_member`, `append_event` and `list_threads` with a `before` id, when the
 scope holds no such thread, and `StorageError`, from `create_thread`, when the thread's scope is not
 `scope`. `mark` stores the identity's private read position in the thread, never lowering it unless
 `back` is true, and returns it with the count of `message` events by others after it, at most 100,

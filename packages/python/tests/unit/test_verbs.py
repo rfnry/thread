@@ -643,3 +643,32 @@ async def test_creating_an_existing_thread_returns_it_only_to_a_member_who_may_r
         await helper.create_thread(thread_id="t1")
     for client in (ana, bruno, helper):
         await client.close()
+
+
+async def test_two_concurrent_removals_write_one_event(server: Server) -> None:
+    ana = await room(server, BRUNO)
+    peer = await Peer.open(server, HELPER)
+    await ana.call("member.add", thread_id="t1", identity=HELPER.model_dump(mode="json"))
+    results = await asyncio.gather(
+        ana.call("member.remove", thread_id="t1", identity_id="bruno"),
+        peer.call("member.remove", thread_id="t1", identity_id="bruno"),
+        return_exceptions=True,
+    )
+    failures = [r for r in results if isinstance(r, BaseException)]
+    assert len(failures) == 1 and isinstance(failures[0], NotFoundError)
+    assert str(failures[0]) == "server: 'bruno' is not a member of thread 't1'"
+    assert {} in results
+    history = await ana.call("thread.history", thread_id="t1")
+    assert [e["kind"] for e in history["events"]].count("member_removed") == 1
+
+
+async def test_concurrent_updates_store_what_the_last_event_says(server: Server) -> None:
+    ana = await room(server, BRUNO)
+    await asyncio.gather(
+        ana.call("thread.update", thread_id="t1", metadata={"v": "A"}),
+        ana.call("thread.update", thread_id="t1", metadata={"v": "B"}),
+    )
+    history = await ana.call("thread.history", thread_id="t1")
+    last = [e for e in history["events"] if e["kind"] == "thread_updated"][-1]
+    stored = await ana.call("thread.get", thread_id="t1")
+    assert stored["thread"]["metadata"] == last["metadata"]

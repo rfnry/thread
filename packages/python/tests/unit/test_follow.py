@@ -5,12 +5,13 @@ import pytest
 
 from rfnry_thread import verbs
 from rfnry_thread.errors import ForbiddenError, InputError, StorageError
-from rfnry_thread.models import SYSTEM, Identity, Member, Thread
+from rfnry_thread.models import Identity, Thread
 from rfnry_thread.postgres import PostgresStorage
 from rfnry_thread.server import Server
 
 from .conftest import say
-from .factories import ANA, AT, BRUNO, HELPER
+from .factories import ANA, BRUNO, HELPER
+from .legacy import enroll
 from .peer import Peer
 
 
@@ -348,9 +349,7 @@ async def test_a_follow_with_a_since_map_leaves_a_membership_without_a_mark_unma
     storage: PostgresStorage, server: Server
 ) -> None:
     await server.create_thread("acme", "t1")
-    await storage.add_member(
-        "acme", Member(thread_id="t1", identity=HELPER, added_at=AT, added_by=SYSTEM)
-    )
+    await enroll(storage, "t1", HELPER)
     helper = await Peer.open(server, HELPER)
     await helper.call("thread.follow", resume=True, since={"t1": 0})
     assert await storage.get_mark("acme", "t1", "helper") is None
@@ -485,9 +484,7 @@ async def test_a_membership_with_no_mark_resumes_from_now_and_is_given_one(
 ) -> None:
     await server.create_thread("acme", "t1")
     await server.add_member("acme", "t1", ANA)
-    await storage.add_member(
-        "acme", Member(thread_id="t1", identity=HELPER, added_at=AT, added_by=SYSTEM)
-    )
+    await enroll(storage, "t1", HELPER)
     ana = await Peer.open(server, ANA)
     await say(ana, "t1", "old")
     helper = await Peer.open(server, HELPER)
@@ -558,9 +555,7 @@ async def test_a_join_with_resume_into_a_membership_with_no_mark_starts_now_and_
 ) -> None:
     await server.create_thread("acme", "t1")
     await server.add_member("acme", "t1", ANA)
-    await storage.add_member(
-        "acme", Member(thread_id="t1", identity=HELPER, added_at=AT, added_by=SYSTEM)
-    )
+    await enroll(storage, "t1", HELPER)
     ana = await Peer.open(server, ANA)
     await say(ana, "t1", "old")
     helper = await Peer.open(server, HELPER)
@@ -580,9 +575,7 @@ async def test_a_join_with_resume_gives_a_mark_to_its_own_thread_alone(
 ) -> None:
     for thread_id in ("t1", "t2"):
         await server.create_thread("acme", thread_id)
-        await storage.add_member(
-            "acme", Member(thread_id=thread_id, identity=HELPER, added_at=AT, added_by=SYSTEM)
-        )
+        await enroll(storage, thread_id, HELPER)
     helper = await Peer.open(server, HELPER)
     joined = await helper.call("thread.join", thread_id="t1", resume=True)
     assert joined["thread"]["marked"] == await storage.get_mark("acme", "t1", "helper")
@@ -813,17 +806,22 @@ async def test_a_removal_delivered_inside_a_gap_cuts_the_removed_connection(
     await bruno.call("thread.join", thread_id="t1")
     helper = await Peer.open(server, HELPER)
     await bruno.quiet()
-    real = storage.append_event
+    real = storage.remove_member
+    sent: list[int] = []
 
-    async def append(scope: str, event: Any) -> Any:
+    async def remove(scope: str, event: Any) -> Any:
         stored = await real(scope, event)
-        if event.kind == "member_removed":
-            monkeypatch.setattr(storage, "append_event", real)
-            await say(helper, "t1", "concurrent")
+        if stored is not None:
+            monkeypatch.setattr(storage, "remove_member", real)
+            sent.append((await say(helper, "t1", "concurrent"))["seq"])
         return stored
 
-    monkeypatch.setattr(storage, "append_event", append)
+    monkeypatch.setattr(storage, "remove_member", remove)
     await ana.call("member.remove", thread_id="t1", identity_id="bruno")
+    history = await storage.list_events("acme", "t1")
+    kinds = [e.kind for e in history]
+    assert sent == [history[-1].seq]
+    assert kinds[-2:] == ["member_removed", "message"]
     assert [p["kind"] for p in await bruno.quiet() if "seq" in p] == ["member_removed"]
     await say(ana, "t1", "after the removal")
     assert await bruno.quiet() == []

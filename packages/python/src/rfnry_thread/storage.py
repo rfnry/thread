@@ -1,7 +1,16 @@
 from collections.abc import Awaitable, Callable, Sequence
 from typing import Any, Protocol, runtime_checkable
 
-from rfnry_thread.models import Event, Member, Message, Order, Thread
+from rfnry_thread.models import (
+    Event,
+    Member,
+    MemberAdded,
+    MemberRemoved,
+    Message,
+    Order,
+    Thread,
+    ThreadUpdated,
+)
 
 OnEvent = Callable[[str, str, int], Awaitable[None]]
 OnSignal = Callable[[str, str, dict[str, Any]], Awaitable[None]]
@@ -16,7 +25,9 @@ PREVIEW_DEPTH = 5
 class Storage(Protocol):
     async def check(self) -> None: ...
 
-    async def create_thread(self, scope: str, thread: Thread) -> tuple[Thread, bool]: ...
+    async def create_thread(
+        self, scope: str, thread: Thread, creator: MemberAdded | None = None
+    ) -> tuple[Thread, bool]: ...
 
     async def get_thread(self, scope: str, thread_id: str) -> Thread | None: ...
 
@@ -43,14 +54,16 @@ class Storage(Protocol):
     ) -> list[Message]: ...
 
     async def update_thread(
-        self, scope: str, thread_id: str, metadata: dict[str, Any]
-    ) -> Thread | None: ...
+        self, scope: str, updated: ThreadUpdated
+    ) -> tuple[Thread, ThreadUpdated] | None: ...
 
     async def delete_thread(self, scope: str, thread_id: str) -> bool: ...
 
-    async def add_member(self, scope: str, member: Member) -> tuple[Member, bool]: ...
+    async def add_member(
+        self, scope: str, added: MemberAdded
+    ) -> tuple[Member, MemberAdded | None]: ...
 
-    async def remove_member(self, scope: str, thread_id: str, identity_id: str) -> bool: ...
+    async def remove_member(self, scope: str, removed: MemberRemoved) -> MemberRemoved | None: ...
 
     async def list_members(self, scope: str, thread_id: str) -> list[Member]: ...
 

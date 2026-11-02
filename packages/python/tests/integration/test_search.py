@@ -8,11 +8,11 @@ from uuid import uuid4
 import asyncpg
 import pytest
 from database import URL, Schemas, admin, quoted
-from unit.factories import ANA, AT, BRUNO
+from unit.factories import ANA, AT, BRUNO, added, updated
 
 from rfnry_thread import migrations
 from rfnry_thread.errors import ConfigurationError, InputError, StorageError
-from rfnry_thread.models import SYSTEM, Edit, Member, Message, Retract, Text, Thread
+from rfnry_thread.models import Edit, Message, Retract, Text, Thread
 from rfnry_thread.postgres import PostgresStorage, _terms
 
 
@@ -45,9 +45,7 @@ async def room(
         ),
     )
     for identity in members:
-        await storage.add_member(
-            "acme", Member(thread_id=thread_id, identity=identity, added_at=AT, added_by=SYSTEM)
-        )
+        await storage.add_member("acme", added(thread_id, identity))
 
 
 async def say(
@@ -141,7 +139,7 @@ async def test_the_index_follows_a_threads_metadata_as_it_is_made_and_changed(
     _, storage, pool = await made(schemas)
     await room(storage, "t1", {"title": "Pump order", "tags": ["urgent"]})
     assert await listed(storage, "pump") == ["t1"]
-    await storage.update_thread("acme", "t1", {"title": "Valve order"})
+    await storage.update_thread("acme", updated("t1", {"title": "Valve order"}))
     assert await listed(storage, "pump") == []
     assert await listed(storage, "urgent") == []
     assert await listed(storage, "valve") == ["t1"]
@@ -158,7 +156,7 @@ async def test_deleting_a_thread_or_a_scope_takes_its_texts_along(schemas: Schem
     assert await storage.delete_thread("acme", "t1")
     assert [t for t, _, _ in await texts(pool)] == ["t2"]
     removed = await storage.delete_scope("acme")
-    assert removed == 5
+    assert removed == 7
     assert await texts(pool) == []
     assert await storage.verify_absent("acme")
 
@@ -280,9 +278,7 @@ async def test_a_since_added_member_finds_only_what_it_may_read(schemas: Schemas
     _, storage, _ = await made(schemas)
     await room(storage, "t1", {"title": "Hiring plans"}, history="since_added")
     await say(storage, "t1", "before the add, secret")
-    await storage.add_member(
-        "acme", Member(thread_id="t1", identity=BRUNO, added_at=AT, added_by=SYSTEM)
-    )
+    await storage.add_member("acme", added("t1", BRUNO))
     after = await say(storage, "t1", "after the add, open")
     for word, ana, bruno in (
         ("secret", ["t1"], []),
@@ -513,7 +509,7 @@ async def test_thread_texts_takes_the_owner_and_grants_thread_events_has(schemas
                 await room(storage, f"t-{role}", {"title": "Pumps"})
                 sent = await say(storage, f"t-{role}", "a pump leaks")
                 await change(storage, Edit, sent, "a pump leaks oil")
-                await storage.update_thread("acme", f"t-{role}", {"title": "Valves"})
+                await storage.update_thread("acme", updated(f"t-{role}", {"title": "Valves"}))
                 found = await storage.search("acme", f"t-{role}", "oil")
                 assert [m.id for m in found] == [sent.id]
                 assert await storage.delete_thread("acme", f"t-{role}")
@@ -634,7 +630,7 @@ async def test_a_schema_without_search_never_reads_texts_further_along_the_path(
             await storage.list_threads("acme", "ana", query="pump")
         with pytest.raises(ConfigurationError, match=unset):
             await storage.search("acme", "t1", "pump")
-        assert await storage.delete_scope("acme") == 2
+        assert await storage.delete_scope("acme") == 4
         assert await storage.verify_absent("acme")
     finally:
         await pool.close()
