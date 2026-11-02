@@ -6,7 +6,6 @@ from rfnry_thread.connection import Connection
 from rfnry_thread.errors import ForbiddenError
 from rfnry_thread.protocol import CLOSE_REFUSED
 
-MAX_FRAME = 16 * 1024 * 1024
 REFUSED = frozenset({401, 403})
 
 
@@ -53,7 +52,7 @@ async def open_socket(
             url,
             additional_headers=headers,
             subprotocols=offered,
-            max_size=MAX_FRAME,
+            max_size=None,
             open_timeout=10,
         )
     except InvalidStatus as exc:

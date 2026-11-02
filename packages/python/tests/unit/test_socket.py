@@ -19,7 +19,16 @@ from rfnry_thread.errors import (
     ThreadException,
     TransportError,
 )
-from rfnry_thread.models import Identity, Joined, Left, Message, Present, StatusChanged, Text
+from rfnry_thread.models import (
+    Identity,
+    Image,
+    Joined,
+    Left,
+    Message,
+    Present,
+    StatusChanged,
+    Text,
+)
 from rfnry_thread.postgres import PostgresStorage
 from rfnry_thread.server import Server
 
@@ -157,6 +166,20 @@ async def test_a_socket_client_is_the_same_client(live: Live) -> None:
     await ana.send("t1", "hello")
     assert [e.kind for e in await ana.history("t1")] == ["member_added", "message"]
     await ana.close()
+
+
+async def test_a_page_over_sixteen_mebibytes_is_read_whole(live: Live) -> None:
+    local = await live.server.connect(identity=Identity(role="user", id="ana"), scope="acme")
+    await local.create_thread(thread_id="photos")
+    image = Image(media_type="image/png", data=bytes(256 * 1000))
+    for _ in range(50):
+        await local.send("photos", [image])
+    ana = await Client.connect(live.url, headers=ANA_HEADERS)
+    events = await asyncio.wait_for(ana.history("photos", limit=50, kinds=["message"]), 20)
+    assert len(events) == 50
+    assert all(isinstance(e, Message) and e.content[0] == image for e in events)
+    await ana.close()
+    await local.close()
 
 
 async def test_a_refused_upgrade_and_an_unreachable_server_raise(live: Live) -> None:
