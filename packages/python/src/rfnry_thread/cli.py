@@ -1,5 +1,6 @@
 import argparse
 import asyncio
+import signal
 import sys
 from functools import partial
 from importlib.util import find_spec
@@ -70,10 +71,17 @@ def _confirmed(args: argparse.Namespace, warning: str = _WARNING) -> bool:
         return True
     print(warning)
     try:
+        previous = signal.signal(signal.SIGINT, signal.default_int_handler)
+    except ValueError:
+        previous = None
+    try:
         answer = input("run these steps? [y/N] ")
     except EOFError, KeyboardInterrupt:
-        print()
-        return False
+        print(file=sys.stderr)
+        raise
+    finally:
+        if previous is not None:
+            signal.signal(signal.SIGINT, previous)
     return answer.strip().lower() in ("y", "yes")
 
 
@@ -134,9 +142,18 @@ async def _run(args: argparse.Namespace) -> int:
         warning = _WARNING
         if args.command == "set":
             warning = _SEARCHING if args.search else _UNSEARCHING
-        if args.command != "create" and not _confirmed(args, warning):
-            print("nothing was run")
-            return 0
+        if args.command != "create":
+            try:
+                confirmed = _confirmed(args, warning)
+            except EOFError:
+                print(
+                    "cli: nothing was run — no one answered the prompt; pass --yes to run without asking",
+                    file=sys.stderr,
+                )
+                return 1
+            if not confirmed:
+                print("nothing was run")
+                return 0
         await migrations.apply(conn, planner, expected=shown, before=before)
         if args.command == "set":
             print(f"schema {args.schema}: search is {'on' if args.search else 'off'}")
@@ -166,6 +183,9 @@ def main(argv: list[str] | None = None) -> int:
         return 1
     try:
         return asyncio.run(_run(args))
+    except KeyboardInterrupt:
+        print("cli: interrupted", file=sys.stderr)
+        return 130
     except ThreadException as exc:
         print(_scrubbed(str(exc), args.url), file=sys.stderr)
         return 1

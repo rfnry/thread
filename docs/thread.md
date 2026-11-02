@@ -890,6 +890,8 @@ rfnry-thread check --schema thread            # exits 0 when the schema fits thi
 
 Take a snapshot and stop the app instances running the old version first: `upgrade` reminds you,
 asks before it runs unless `--yes`, and runs every pending step in one transaction under a lock.
+An answer of no exits 0 with nothing run; with no one to answer (standard input closed), `upgrade` and `set` exit 1
+and name `--yes`; Ctrl-C at the prompt stops it at once with nothing run and exits 130.
 
 Search is a setting of the schema, off until you set it:
 

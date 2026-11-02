@@ -1,6 +1,10 @@
-import argparse
 import asyncio
-from concurrent.futures import ThreadPoolExecutor
+import os
+import select
+import signal
+import subprocess
+import sys
+import time
 from typing import Any
 
 import pytest
@@ -205,31 +209,92 @@ def test_without_asyncpg_the_command_says_what_to_install(
     assert capsys.readouterr().err == "cli: install rfnry-thread[postgres] to use this command\n"
 
 
-async def test_a_closed_input_at_the_prompt_runs_nothing(
-    schemas: Schemas, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+@pytest.mark.parametrize("command", [["upgrade"], ["set", "--search"]])
+async def test_a_closed_input_at_the_prompt_runs_nothing_and_fails(
+    command: list[str],
+    schemas: Schemas,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
 ) -> None:
     name = schemas.name()
     assert await run("create", "--schema", name) == 0
-    noting(monkeypatch)
+    if command[0] == "upgrade":
+        noting(monkeypatch)
 
     def closed(prompt: str) -> str:
         raise EOFError
 
     monkeypatch.setattr("builtins.input", closed)
-    assert await run("upgrade", "--schema", name) == 0
-    assert capsys.readouterr().out.endswith("nothing was run\n")
-    assert await run("check", "--schema", name) == 1
+    capsys.readouterr()
+    assert await run(*command, "--schema", name) == 1
+    err = capsys.readouterr().err
+    assert err.startswith("\ncli: nothing was run") and "--yes" in err
+    assert await run("check", "--schema", name) == (1 if command[0] == "upgrade" else 0)
+    pool = await schemas.pool(name)
+    async with pool.acquire() as conn:
+        assert await conn.fetchval("SELECT to_regclass('thread_texts')") is None
 
 
-def test_an_interrupt_at_the_prompt_runs_nothing(monkeypatch: pytest.MonkeyPatch) -> None:
+@pytest.mark.parametrize("command", [["upgrade"], ["set", "--search"]])
+async def test_an_interrupt_at_the_prompt_runs_nothing_and_exits_130(
+    command: list[str],
+    schemas: Schemas,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    name = schemas.name()
+    assert await run("create", "--schema", name) == 0
+    if command[0] == "upgrade":
+        noting(monkeypatch)
+
     def interrupted(prompt: str) -> str:
         raise KeyboardInterrupt
 
     monkeypatch.setattr("builtins.input", interrupted)
-    with ThreadPoolExecutor(1) as worker:
-        asked = worker.submit(cli._confirmed, argparse.Namespace(yes=False))
-        assert asked.exception() is None
-        assert asked.result() is False
+    capsys.readouterr()
+    assert await run(*command, "--schema", name) == 130
+    captured = capsys.readouterr()
+    assert captured.err == "\ncli: interrupted\n"
+    assert not captured.out.endswith("\n\n")
+    pool = await schemas.pool(name)
+    async with pool.acquire() as conn:
+        assert await conn.fetchval("SELECT to_regclass('thread_texts')") is None
+
+
+async def test_a_real_interrupt_at_the_prompt_ends_the_process_without_a_traceback(
+    schemas: Schemas,
+) -> None:
+    name = schemas.name()
+    assert await run("create", "--schema", name) == 0
+    pool = await schemas.pool(name)
+    code = "import sys; from rfnry_thread import cli; sys.exit(cli.main())"
+    proc = subprocess.Popen(
+        [sys.executable, "-c", code, "set", "--search", "--url", URL, "--schema", name],
+        stdin=subprocess.PIPE,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        env={**os.environ, "PYTHONUNBUFFERED": "1"},
+    )
+    try:
+        assert proc.stdout is not None
+        seen = b""
+        deadline = time.monotonic() + 20
+        while b"run these steps?" not in seen:
+            assert time.monotonic() < deadline
+            if select.select([proc.stdout], [], [], 0.2)[0]:
+                chunk = os.read(proc.stdout.fileno(), 4096)
+                assert chunk
+                seen += chunk
+        proc.send_signal(signal.SIGINT)
+        _, err = proc.communicate(timeout=20)
+    finally:
+        if proc.poll() is None:
+            proc.kill()
+            proc.wait()
+    assert proc.returncode == 130
+    assert err.decode().endswith("\ncli: interrupted\n") and "Traceback" not in err.decode()
+    async with pool.acquire() as conn:
+        assert await conn.fetchval("SELECT to_regclass('thread_texts')") is None
 
 
 async def test_upgrade_into_a_missing_schema_points_at_tables_initialize_made(
