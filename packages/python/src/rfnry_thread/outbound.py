@@ -27,6 +27,16 @@ def _delta_key(frame: Outgoing) -> tuple[str, str] | None:
     return None
 
 
+def _stream_key(frame: Outgoing) -> tuple[str, str] | None:
+    if (
+        isinstance(frame, Push)
+        and frame.name == "signal"
+        and frame.payload.get("kind") in ("stream.start", "stream.end")
+    ):
+        return (str(frame.payload["thread_id"]), str(frame.payload["stream_id"]))
+    return None
+
+
 class Outbound:
     def __init__(
         self,
@@ -55,6 +65,9 @@ class Outbound:
             return
         if not self._frames:
             self._progress = self._clock()
+        boundary = _stream_key(frame)
+        if boundary is not None:
+            self._deltas.pop(boundary, None)
         key = _delta_key(frame)
         if key is not None and isinstance(frame, Push):
             pending = self._deltas.get(key)

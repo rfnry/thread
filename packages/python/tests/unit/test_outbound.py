@@ -35,6 +35,18 @@ def delta(text: str, index: int, stream: str = "s1") -> Push:
     )
 
 
+def stream_signal(kind: str, stream: str = "s1") -> Push:
+    return Push(
+        name="signal",
+        payload={
+            "kind": kind,
+            "thread_id": "t1",
+            "sender": HELPER.model_dump(mode="json"),
+            "stream_id": stream,
+        },
+    )
+
+
 def event(seq: int) -> Push:
     return Push(name="event", payload={"kind": "message", "seq": seq})
 
@@ -124,4 +136,26 @@ async def test_a_connection_that_keeps_writing_is_never_closed() -> None:
         await asyncio.sleep(0)
     await queue.drain()
     assert not queue.closed and len(sink.sent) == 49
+    await queue.close()
+
+
+async def test_a_restarted_stream_never_folds_into_the_old_ones_delta() -> None:
+    sink = Sink()
+    sink.gate.clear()
+    queue = Outbound(sink, nothing)
+    queue.put(event(1))
+    await asyncio.sleep(0)
+    queue.put(delta("first", 0))
+    queue.put(stream_signal("stream.end"))
+    queue.put(stream_signal("stream.start"))
+    queue.put(delta("second", 0))
+    sink.gate.set()
+    await queue.drain()
+    sent = [(f["payload"]["kind"], f["payload"].get("text")) for f in sink.sent[1:]]
+    assert sent == [
+        ("stream.delta", "first"),
+        ("stream.end", None),
+        ("stream.start", None),
+        ("stream.delta", "second"),
+    ]
     await queue.close()

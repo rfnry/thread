@@ -657,7 +657,14 @@ class PostgresStorage:
     async def mark(
         self, scope: str, thread_id: str, identity_id: str, seq: int, back: bool = False
     ) -> tuple[int, int, bool]:
-        async with self._guard("mark"), self._pool.acquire() as conn:
+        async with self._guard("mark"), self._pool.acquire() as conn, conn.transaction():
+            await conn.execute(
+                "SELECT 1 FROM thread_members "
+                "WHERE scope = $1 AND thread_id = $2 AND identity_id = $3 FOR UPDATE",
+                scope,
+                thread_id,
+                identity_id,
+            )
             row = await conn.fetchrow(
                 "WITH old AS (SELECT seq FROM thread_marks "
                 "WHERE scope = $1 AND thread_id = $2 AND identity_id = $3), "

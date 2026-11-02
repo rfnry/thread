@@ -324,6 +324,16 @@ async def test_a_mark_moves_forward_only_counts_what_others_said_after_it_and_sa
     assert await storage.mark("acme", "t1", "bruno", 2) == (2, 1, True)
 
 
+async def test_concurrent_marks_report_one_move(storage: Storage) -> None:
+    await room(storage, "t1", "acme", ANA, BRUNO)
+    for n in range(5):
+        await storage.append_event("acme", say("t1", f"c{n}", author=BRUNO))
+    for seq in range(1, 6):
+        results = await asyncio.gather(*(storage.mark("acme", "t1", "ana", seq) for _ in range(5)))
+        assert [moved for _, _, moved in results].count(True) == 1
+    assert await storage.get_mark("acme", "t1", "ana") == 5
+
+
 async def test_a_mark_moves_back_only_when_asked(storage: Storage) -> None:
     await room(storage, "t1", "acme", ANA, BRUNO)
     for n in range(3):
