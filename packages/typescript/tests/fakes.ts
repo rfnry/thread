@@ -56,6 +56,7 @@ export class FakeServer {
   readonly stored = new Map<string, Frame>()
   down = false
   refusing = false
+  helloReplies: Frame[] = []
   dropAck = false
   seq = 0
   identity: Frame = { role: 'user', id: 'ana', name: 'Ana', metadata: {} }
@@ -114,6 +115,11 @@ export class FakeServer {
       this.hellos.push(frame)
       if (this.refusing) {
         socket.close(1008, 'session expired')
+        return
+      }
+      const scripted = this.helloReplies.shift()
+      if (scripted) {
+        socket.deliver(scripted)
         return
       }
       socket.deliver({

@@ -432,6 +432,26 @@ describe('client', () => {
     await client.close()
   })
 
+  it('stops when a reconnect hello is refused, and keeps trying after a malformed reply', async () => {
+    const client = await connect({ url: 'ws://fake', protocols: ['thread', 'tok'] })
+    server.helloReplies.push({ type: 'nonsense' })
+    server.helloReplies.push({ type: 'response', id: 'hello', payload: { scope: 'acme' } })
+    server.helloReplies.push({ type: 'response', id: 'hello' })
+    server.helloReplies.push({ type: 'response', id: 'hello', payload: null })
+    server.drop()
+    await vi.waitFor(() => expect(server.hellos).toHaveLength(6))
+    await vi.waitFor(() => expect(client.status).toBe('open'))
+    server.helloReplies.push({
+      type: 'error',
+      id: 'hello',
+      error: { code: 'input', message: 'server: protocol 2 is not supported' },
+    })
+    server.drop()
+    const reason = await client.closed
+    expect(reason).toBeInstanceOf(InputError)
+    expect(client.status).toBe('closed')
+  })
+
   it('closes a socket a reconnect opened after close()', async () => {
     let calls = 0
     let held = false

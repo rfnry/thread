@@ -7,6 +7,7 @@ import pytest
 from until import until
 
 from rfnry_thread.client import Client, Item
+from rfnry_thread.connection import Connection
 from rfnry_thread.errors import (
     ConfigurationError,
     ForbiddenError,
@@ -37,8 +38,9 @@ from rfnry_thread.models import (
     Thread,
     Working,
 )
+from rfnry_thread.pipe import pipe
 from rfnry_thread.postgres import PostgresStorage
-from rfnry_thread.protocol import Push
+from rfnry_thread.protocol import ErrorFrame, Failure, Push, Response, encode
 from rfnry_thread.resolve import resolve
 from rfnry_thread.server import Server
 
@@ -747,3 +749,156 @@ async def test_a_follow_replay_for_a_thread_without_a_cursor_arrives_once_before
         ("Joined", 4),
         ("Message", 5),
     ]
+
+
+async def test_a_push_the_client_cannot_read_is_skipped(server: Server) -> None:
+    ana = await server.connect(identity=ANA, scope="acme")
+    bruno = await server.connect(identity=BRUNO, scope="acme")
+    await ana.create_thread(thread_id="t1")
+    await ana.add_member("t1", BRUNO)
+    await ana.join("t1")
+    await bruno.join("t1")
+    await drain(ana)
+    await drain(bruno)
+    session = next(s for s in server._hub.sessions if s.identity == ANA)
+    connection = ana._connection
+    session.outbound.put(
+        Push(name="signal", payload={"kind": "from.the.future", "thread_id": "t1"})
+    )
+    await bruno.send("t1", "still here")
+    assert (await take(ana, Message)).content == [Text(text="still here")]
+    assert ana.status == "open" and ana._connection is connection
+    assert len(server._hub.sessions) == 2
+    await ana.close()
+    await bruno.close()
+
+
+class Silent:
+    def __init__(self) -> None:
+        self.closed = False
+
+    async def receive_text(self) -> str:
+        await asyncio.sleep(3600)
+        return ""
+
+    async def send_text(self, data: str) -> None:
+        return None
+
+    async def close(self, code: int = 1000, reason: str | None = None) -> None:
+        self.closed = True
+
+
+def hello_reply() -> str:
+    return encode(
+        Response(id="hello", payload={"identity": {"role": "user", "id": "ana"}, "scope": "acme"})
+    )
+
+
+async def test_close_during_a_reconnect_hello_closes_that_connection() -> None:
+    first, theirs = pipe()
+    silent = Silent()
+    dials = 0
+
+    async def dial() -> Connection:
+        nonlocal dials
+        dials += 1
+        return first if dials == 1 else cast(Connection, silent)
+
+    async def answer() -> None:
+        await theirs.receive_text()
+        await theirs.send_text(hello_reply())
+
+    helper = asyncio.create_task(answer())
+    client = await Client._open(dial)
+    await helper
+    await theirs.close()
+    await until(lambda: dials == 2)
+    await asyncio.sleep(0.05)
+    await client.close()
+    assert silent.closed
+
+
+async def test_a_hello_refused_on_reconnect_ends_the_client() -> None:
+    first, theirs = pipe()
+    second, there = pipe()
+    dials = 0
+
+    async def dial() -> Connection:
+        nonlocal dials
+        dials += 1
+        return first if dials == 1 else second
+
+    async def answer() -> None:
+        await theirs.receive_text()
+        await theirs.send_text(hello_reply())
+
+    async def refuse() -> None:
+        await there.receive_text()
+        await there.send_text(
+            encode(ErrorFrame(id="hello", error=Failure(code="input", message="server: no")))
+        )
+
+    helper = asyncio.create_task(answer())
+    client = await Client._open(dial)
+    await helper
+    refusal = asyncio.create_task(refuse())
+    await theirs.close()
+    await refusal
+
+    async def read() -> None:
+        async for _ in client.events():
+            pass
+
+    with pytest.raises(InputError, match="^server: no$"):
+        await asyncio.wait_for(read(), 3.0)
+    assert client.status == "closed" and dials == 2
+    assert second.closed
+
+
+async def test_a_hello_reply_without_an_identity_keeps_the_client_reconnecting() -> None:
+    first, theirs = pipe()
+    second, there = pipe()
+    third, over = pipe()
+    ends = [first, second, third]
+
+    async def dial() -> Connection:
+        return ends.pop(0)
+
+    async def answer(end: Connection, reply: str) -> None:
+        await end.receive_text()
+        await end.send_text(reply)
+
+    bad = encode(Response(id="hello", payload={"scope": "acme"}))
+    helper = asyncio.create_task(answer(theirs, hello_reply()))
+    client = await Client._open(dial)
+    await helper
+    tasks = [
+        asyncio.create_task(answer(there, bad)),
+        asyncio.create_task(answer(over, hello_reply())),
+    ]
+    await theirs.close()
+    await asyncio.wait_for(asyncio.gather(*tasks), 3.0)
+    await until(lambda: client.status == "open" and client._connection is not None)
+    assert second.closed
+    await client.close()
+
+
+async def test_a_connection_that_ends_on_garbage_is_closed_and_the_client_reconnects() -> None:
+    first, theirs = pipe()
+    second, _ = pipe()
+    ends = [first, second]
+
+    async def dial() -> Connection:
+        return ends.pop(0)
+
+    async def answer() -> None:
+        await theirs.receive_text()
+        await theirs.send_text(hello_reply())
+        await theirs.send_text("garbage")
+
+    helper = asyncio.create_task(answer())
+    client = await Client._open(dial)
+    await helper
+    await until(lambda: client.status == "reconnecting")
+    assert first.closed
+    await client.close()

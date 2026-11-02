@@ -8,6 +8,8 @@ from datetime import datetime
 from types import TracebackType
 from typing import Any
 
+from pydantic import ValidationError
+
 from rfnry_thread.connection import Connection
 from rfnry_thread.errors import (
     ConfigurationError,
@@ -246,24 +248,37 @@ class Client:
             raise
         except Exception as exc:
             raise TransportError(f"client: could not connect: {exc}") from exc
+        adopted = False
         try:
-            await connection.send_text(encode(Hello(protocol=PROTOCOL)))
-            reply = decode(await asyncio.wait_for(connection.receive_text(), HANDSHAKE))
-        except Exception as exc:
-            with contextlib.suppress(Exception):
-                await connection.close(1000, "client: hello failed")
-            if isinstance(exc, ThreadException) and not isinstance(exc, InputError):
-                raise
-            raise TransportError(f"client: the hello was not answered: {exc}") from exc
-        if isinstance(reply, ErrorFrame):
-            raise raised(reply.error.code, reply.error.message)
-        if not isinstance(reply, Response) or reply.id != HELLO:
-            raise TransportError("client: the server did not answer the hello")
-        self.identity = Identity.model_validate(reply.payload["identity"])
-        self.scope = str(reply.payload["scope"])
-        self._connection = connection
-        self._reader = asyncio.get_running_loop().create_task(self._read(connection))
-        self._connected.set()
+            try:
+                await connection.send_text(encode(Hello(protocol=PROTOCOL)))
+                reply = decode(await asyncio.wait_for(connection.receive_text(), HANDSHAKE))
+            except Exception as exc:
+                if isinstance(exc, ThreadException) and not isinstance(exc, InputError):
+                    raise
+                raise TransportError(f"client: the hello was not answered: {exc}") from exc
+            if isinstance(reply, ErrorFrame):
+                raise raised(reply.error.code, reply.error.message)
+            if not isinstance(reply, Response) or reply.id != HELLO:
+                raise TransportError("client: the server did not answer the hello")
+            if self._closed:
+                raise TransportError("client: the client is closed")
+            try:
+                identity = Identity.model_validate(reply.payload["identity"])
+                scope = str(reply.payload["scope"])
+            except (KeyError, ValidationError) as exc:
+                raise TransportError(f"client: the hello reply is malformed: {exc}") from exc
+            self.identity, self.scope = identity, scope
+            self._connection = connection
+            self._reader = asyncio.get_running_loop().create_task(self._read(connection))
+            self._connected.set()
+            adopted = True
+        finally:
+            if not adopted:
+                with contextlib.suppress(Exception):
+                    await connection.close(
+                        1000, "client: closed" if self._closed else "client: hello failed"
+                    )
 
     async def _read(self, connection: Connection) -> None:
         try:
@@ -278,11 +293,13 @@ class Client:
                     else:
                         future.set_result(frame.payload)
                 elif isinstance(frame, Push):
-                    self._receive(frame)
+                    with contextlib.suppress(ValidationError):
+                        self._receive(frame)
         except asyncio.CancelledError:
             raise
         except Exception:
-            pass
+            with contextlib.suppress(Exception):
+                await connection.close(1000, "client: connection lost")
         self._lost(connection)
 
     def _receive(self, push: Push) -> None:
@@ -346,7 +363,7 @@ class Client:
                 await asyncio.sleep(random.random() * ceiling)
                 try:
                     await self._establish()
-                except (ForbiddenError, ConfigurationError) as error:
+                except (ForbiddenError, ConfigurationError, InputError) as error:
                     self._fail(error)
                     return
                 except ThreadException:

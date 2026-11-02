@@ -78,13 +78,20 @@ function handshake(socket: WebSocket): Promise<Payload> {
       try {
         frame = decode(String(message.data))
       } catch (error) {
-        reject(error)
+        reject(new TransportError(`client: the hello was not answered: ${String(error)}`))
         return
       }
       if (frame.type === 'error' && frame.id === HELLO)
         reject(raised(frame.error.code, frame.error.message))
-      else if (frame.type === 'response' && frame.id === HELLO) resolve(frame.payload)
-      else reject(new TransportError('client: the server did not answer the hello'))
+      else if (frame.type === 'response' && frame.id === HELLO) {
+        const body = frame.payload as Payload | null | undefined
+        const who = (typeof body === 'object' && body !== null ? body.identity : undefined) as
+          | Identity
+          | undefined
+        if (body && typeof who?.id === 'string' && typeof who.role === 'string' && 'scope' in body)
+          resolve(body)
+        else reject(new TransportError('client: the hello reply is malformed'))
+      } else reject(new TransportError('client: the server did not answer the hello'))
     }
     socket.onclose = (event) => {
       clearTimeout(timer)
@@ -377,7 +384,11 @@ export class Client {
       try {
         await this.establish()
       } catch (error) {
-        if (error instanceof ForbiddenError || error instanceof ConfigurationError) {
+        if (
+          error instanceof ForbiddenError ||
+          error instanceof ConfigurationError ||
+          error instanceof InputError
+        ) {
           this.fail(error)
           return
         }

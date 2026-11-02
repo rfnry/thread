@@ -453,7 +453,9 @@ joins and then starts reading misses nothing.
 
 A client's `status` says where its connection is: `"open"`; `"reconnecting"` from the moment its
 socket drops until it follows again, if it was following, and every thread it had joined is joined
-again; `"closed"` once it stops, by `close()` or a refused reconnect. Each change arrives in
+again; `"closed"` once it stops, by `close()` or a refused reconnect — an expired session, or a
+hello the server answers with an error such as another protocol version. A push the client cannot
+read is skipped, not fatal. Each change arrives in
 `events()` as a `StatusChanged` — `"open"` after the re-follow's and re-joins' `Joined` — the one
 item that names no thread. It is how a person's page says it
 is reconnecting.
@@ -700,7 +702,8 @@ at the end, merged over the stream's; `abort()` abandons. `client.status` is the
 `StatusChanged`, `{ kind: 'status', status }`: the one item without a thread, so a listener that
 follows one thread checks for it first. `client.closed` resolves when the client stops for good —
 `null` after `close()`, or the error when your `protocols` function throws `ForbiddenError` on a
-reconnect or your endpoint refuses it, an expired session say. A browser cannot see why an upgrade
+reconnect or your endpoint refuses it, an expired session say; a hello the server answers with an
+error, another protocol version, ends it too. A browser cannot see why an upgrade
 failed, so an upgrade refused with HTTP 401 or 403 keeps retrying with backoff, `'reconnecting'` all
 along; a connection accepted and closed with 1008 is the refusal it sees. Stores, hooks and
 rendering are your UI's.
