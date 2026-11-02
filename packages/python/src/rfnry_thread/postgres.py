@@ -101,8 +101,8 @@ def _holds(column: str, first: int, count: int) -> str:
     return " AND ".join(f"{column} ILIKE ${n}" for n in range(first, first + count))
 
 
-_UNSEARCHED = ("42P01", "42883")
-_TEXTS = (
+_MISSING = ("42P01", "42883")
+_TEXTS_TABLE = (
     "SELECT quote_ident(current_schema()) || '.thread_texts' AS name, "
     "to_regclass(quote_ident(current_schema()) || '.thread_texts') IS NOT NULL AS held"
 )
@@ -250,37 +250,58 @@ class PostgresStorage:
                     f"WHERE {' AND '.join(where)} {ordered}",
                     *args,
                 )
-                threads = [_listed(row) for row in rows]
+                listed = [(_listed(row), int(row["floor"])) for row in rows]
             else:
-                first = len(args) + 1
-                args.extend(terms)
-                hit = (
-                    f"SELECT x.seq FROM {await self._held(conn)} x WHERE x.scope = t.scope "
-                    f"AND x.thread_id = t.id AND {_holds('x.text', first, len(terms))}"
+                listed = await self._found_threads(
+                    conn, scope, terms, args, where, member, join, columns, floor, ordered
                 )
-                rows, found = await self._searched(
-                    conn,
-                    scope,
-                    f"WITH picked AS MATERIALIZED (SELECT t.id FROM thread_threads t {member}"
-                    f"WHERE {' AND '.join(where)} AND EXISTS ({hit} "
-                    f"AND (x.seq = 0 OR x.seq >= {floor})) {ordered}) "
-                    f"SELECT {columns}, h.seq AS hit FROM thread_threads t {join}"
-                    f"LEFT JOIN LATERAL ({hit} AND x.seq >= GREATEST({floor}, 1) "
-                    "ORDER BY x.seq DESC LIMIT 1) h ON true "
-                    f"WHERE t.scope = $1 AND t.id IN (SELECT id FROM picked) {ordered}",
-                    args,
-                    lambda listed: [
-                        (row["id"], int(row["hit"])) for row in listed if row["hit"] is not None
-                    ],
-                )
-                threads = [
-                    _listed(row).model_copy(update={"match": found.get((row["id"], row["hit"]))})
-                    for row in rows
-                ]
+            threads = [thread for thread, _ in listed]
             if preview and threads:
-                floors = [int(row["floor"]) for row in rows]
+                floors = [floor for _, floor in listed]
                 threads = await self._previewed(conn, scope, threads, floors)
         return threads
+
+    async def _found_threads(
+        self,
+        conn: Any,
+        scope: str,
+        terms: list[str],
+        args: list[Any],
+        where: list[str],
+        member: str,
+        join: str,
+        columns: str,
+        floor: str,
+        ordered: str,
+    ) -> list[Any]:
+        first = len(args) + 1
+        args.extend(terms)
+        hit = (
+            f"SELECT x.seq FROM {await self._held(conn)} x WHERE x.scope = t.scope "
+            f"AND x.thread_id = t.id AND {_holds('x.text', first, len(terms))}"
+        )
+        rows, found = await self._matched(
+            conn,
+            scope,
+            f"WITH picked AS MATERIALIZED (SELECT t.id FROM thread_threads t {member}"
+            f"WHERE {' AND '.join(where)} AND EXISTS ({hit} "
+            f"AND (x.seq = 0 OR x.seq >= {floor})) {ordered}) "
+            f"SELECT {columns}, h.seq AS hit FROM thread_threads t {join}"
+            f"LEFT JOIN LATERAL ({hit} AND x.seq >= GREATEST({floor}, 1) "
+            "ORDER BY x.seq DESC LIMIT 1) h ON true "
+            f"WHERE t.scope = $1 AND t.id IN (SELECT id FROM picked) {ordered}",
+            args,
+            lambda listed: [
+                (row["id"], int(row["hit"])) for row in listed if row["hit"] is not None
+            ],
+        )
+        return [
+            (
+                _listed(row).model_copy(update={"match": found.get((row["id"], row["hit"]))}),
+                int(row["floor"]),
+            )
+            for row in rows
+        ]
 
     async def _previewed(
         self, conn: Any, scope: str, threads: list[Thread], floors: list[int]
@@ -307,13 +328,13 @@ class PostgresStorage:
 
     async def _held(self, conn: Any) -> str:
         if self._texts is None:
-            row = await conn.fetchrow(_TEXTS)
+            row = await conn.fetchrow(_TEXTS_TABLE)
             if row["name"] is None:
                 raise StorageError("postgres: no schema on the search_path exists")
             self._texts = str(row["name"])
         return self._texts
 
-    async def _searched(
+    async def _matched(
         self,
         conn: Any,
         scope: str,
@@ -327,7 +348,7 @@ class PostgresStorage:
                 rows = list(await conn.fetch(sql, *args))
                 return rows, await self._current(conn, scope, hits(rows))
         except Exception as exc:
-            if getattr(exc, "sqlstate", None) not in _UNSEARCHED:
+            if getattr(exc, "sqlstate", None) not in _MISSING:
                 raise
             schema = await conn.fetchval("SELECT current_schema()")
             made, _ = await migrations.search_state(conn)
@@ -385,7 +406,7 @@ class PostgresStorage:
         size = len(args)
         where.append(_holds("x.text", size + 1, len(terms)))
         async with self._guard("search"), self._pool.acquire() as conn:
-            _, found = await self._searched(
+            _, found = await self._matched(
                 conn,
                 scope,
                 f"SELECT x.seq FROM {await self._held(conn)} x WHERE {' AND '.join(where)} "
@@ -717,7 +738,7 @@ class PostgresStorage:
     async def delete_scope(self, scope: str) -> int:
         async with self._guard("delete_scope"), self._pool.acquire() as conn, conn.transaction():
             removed = 0
-            texts = await conn.fetchrow(_TEXTS)
+            texts = await conn.fetchrow(_TEXTS_TABLE)
             for table in (
                 *([texts["name"]] if texts["held"] else []),
                 "thread_marks",
@@ -732,7 +753,7 @@ class PostgresStorage:
 
     async def verify_absent(self, scope: str) -> bool:
         async with self._guard("verify_absent"), self._pool.acquire() as conn:
-            texts = await conn.fetchrow(_TEXTS)
+            texts = await conn.fetchrow(_TEXTS_TABLE)
             counts = [
                 await conn.fetchval(f"SELECT count(*) FROM {table} WHERE scope = $1", scope)
                 for table in (

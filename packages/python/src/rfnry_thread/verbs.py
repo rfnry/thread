@@ -135,13 +135,6 @@ class Verbs:
         await self._allow(actor, action, thread)
         return thread
 
-    async def _append(self, scope: str, fields: dict[str, Any]) -> Event:
-        event = EVENTS.validate_python({"id": uuid.uuid4().hex, "created_at": now(), **fields})
-        stored, created = await self._storage.append_event(scope, event)
-        if created:
-            await self._hub.deliver(scope, stored)
-        return stored
-
     async def create_thread(
         self,
         actor: Identity,
@@ -358,8 +351,10 @@ class Verbs:
     ) -> tuple[int, int]:
         actor, scope = session.identity, session.scope
         thread = await self.thread(actor, scope, thread_id, "read")
-        latest = await self._storage.list_events(scope, thread_id, limit=1)
-        head = latest[-1].seq if latest else 0
+        found = await self._storage.head(scope, thread_id, actor.id)
+        if found is None:
+            raise NotFoundError(f"server: {actor.id!r} is not a member of thread {thread_id!r}")
+        head = found[0]
         low = max(await self._floor(actor, scope, thread) - 1, 0)
         if not low <= seq <= head:
             raise InputError(f"server: seq must be between {low} and {head}")
@@ -391,8 +386,8 @@ class Verbs:
         if resume:
             since = await self._storage.get_mark(scope, thread_id, actor.id)
             if since is None:
-                latest = await self._storage.list_events(scope, thread_id, limit=1)
-                head = latest[-1].seq if latest else 0
+                found = await self._storage.head(scope, thread_id, actor.id)
+                head = found[0] if found else 0
                 with contextlib.suppress(NotFoundError):
                     since, _, _ = await self._storage.mark(scope, thread_id, actor.id, head)
             thread = thread.model_copy(update={"marked": since})

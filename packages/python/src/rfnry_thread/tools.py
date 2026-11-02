@@ -234,8 +234,9 @@ class ThreadTools(Tools):
                 Tool("send", "Post a message to the conversation", body=send, args=_Send),
                 Tool(
                     "read_recent",
-                    "Read the latest messages and steps of the conversation, as they were sent, "
-                    "each under its seq; with before, the ones before that seq",
+                    "Read the latest messages and steps of the conversation as they read now "
+                    "(edits applied, retractions gone), each under its seq; "
+                    "with before, the ones before that seq",
                     body=read_recent,
                     args=_ReadRecent,
                 ),

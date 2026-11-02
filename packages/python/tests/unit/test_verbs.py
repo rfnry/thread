@@ -5,7 +5,7 @@ from typing import Any
 import pytest
 
 from rfnry_thread.errors import ConfigurationError, ForbiddenError, InputError, NotFoundError
-from rfnry_thread.models import Identity, Thread
+from rfnry_thread.models import SYSTEM, Identity, Thread
 from rfnry_thread.pipe import pipe
 from rfnry_thread.postgres import PostgresStorage
 from rfnry_thread.server import Server
@@ -14,6 +14,7 @@ from rfnry_thread.verbs import now
 
 from .conftest import say
 from .factories import ANA, BRUNO, HELPER, lookalike, message
+from .hubkit import open_session
 from .peer import Peer
 
 
@@ -858,3 +859,15 @@ async def test_a_nul_in_a_removal_an_event_id_a_query_or_a_listing_is_refused(
         await ana.call("thread.history", thread_id="t1", before=-1)
     with pytest.raises(InputError, match="^server: invalid thread.search payload"):
         await ana.call("thread.search", thread_id="t1", query="x", before=-1)
+
+
+async def test_a_system_actor_that_is_not_a_member_cannot_mark_whatever_the_seq(
+    server: Server,
+) -> None:
+    await room(server)
+    session, _ = open_session(SYSTEM)
+    for seq in (0, 1, 99):
+        with pytest.raises(
+            NotFoundError, match="^server: 'system' is not a member of thread 't1'$"
+        ):
+            await server._verbs.mark(session, "t1", seq)
