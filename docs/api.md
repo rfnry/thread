@@ -2154,7 +2154,8 @@ Stores the text written, or `content` instead, as the finishing message, ends th
 the message. `options.metadata` is merged over the stream's, key by key, and checked against the
 same 8 KiB; the stream's own object is left as it was. Raises `InputError` when the stream has
 already ended, `ForbiddenError` when the start was refused because the connection has not joined the
-thread, and what `Client.send` raises.
+thread, and what `Client.send` raises. A start lost to a reconnect does not stop the message:
+it goes through the outbox like `send`, and only the stream's live signals are lost.
 
 ### `Stream.abort`
 

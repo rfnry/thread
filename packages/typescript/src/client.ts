@@ -175,7 +175,11 @@ export class Stream {
       options.metadata === undefined
         ? this.options.metadata
         : { ...this.options.metadata, ...options.metadata }
-    await this.started
+    try {
+      await this.started
+    } catch (error) {
+      if (error instanceof ThreadException && !(error instanceof TransportError)) throw error
+    }
     try {
       return await this.wire.message(
         this.threadId,

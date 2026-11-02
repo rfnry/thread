@@ -292,6 +292,26 @@ describe('client', () => {
     ])
   })
 
+  it('stores the finishing message of a stream opened while the client was reconnecting', async () => {
+    const { client } = await joined()
+    server.down = true
+    server.drop()
+    await vi.waitFor(() => expect(client.status).toBe('reconnecting'))
+    const reply = client.stream('t1')
+    reply.write('Refunded in full.')
+    const plain = client.send('t1', 'plain send while reconnecting')
+    server.down = false
+    await vi.waitFor(() => expect(client.status).toBe('open'))
+    const [finished, sent] = await Promise.all([reply.finish(), plain])
+    expect(finished.client_id).toBe(reply.id)
+    expect(sent.seq).toBeGreaterThan(0)
+    expect(
+      server
+        .sent('event.send')
+        .map((frame) => (frame.payload.content as { text: string }[])[0]?.text)
+    ).toEqual(expect.arrayContaining(['Refunded in full.', 'plain send while reconnecting']))
+  })
+
   it('reconnects with fresh protocols, says hello again, and re-joins from the cursor', async () => {
     const protocols = vi.fn(async () => ['thread', 'tok'])
     const client = await connect({ url: 'ws://fake', protocols })
