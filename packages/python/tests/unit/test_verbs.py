@@ -4,13 +4,13 @@ from typing import Any
 
 import pytest
 
+from rfnry_thread import verbs
 from rfnry_thread.errors import ConfigurationError, ForbiddenError, InputError, NotFoundError
 from rfnry_thread.models import SYSTEM, Identity, Thread
 from rfnry_thread.pipe import pipe
 from rfnry_thread.postgres import PostgresStorage
 from rfnry_thread.server import Server
 from rfnry_thread.tools import ThreadTools
-from rfnry_thread.verbs import now
 
 from .conftest import say
 from .factories import ANA, BRUNO, HELPER, lookalike, message
@@ -360,7 +360,9 @@ async def test_listing_by_activity_lists_a_thread_once_when_the_page_it_ended_on
     async def move(page: list[Thread]) -> None:
         await storage.append_event(
             "acme",
-            message(1, "up").model_copy(update={"thread_id": page[-1].id, "created_at": now()}),
+            message(1, "up").model_copy(
+                update={"thread_id": page[-1].id, "created_at": verbs.now()}
+            ),
         )
 
     after_the_first_page(storage, monkeypatch, move)

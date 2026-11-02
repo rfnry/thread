@@ -1,5 +1,7 @@
 import asyncio
+import itertools
 from collections.abc import AsyncIterator
+from datetime import UTC, datetime, timedelta
 from functools import partial
 from typing import Any
 
@@ -7,7 +9,7 @@ import asyncpg
 import pytest
 from database import SCHEMA, URL, Schemas, admin, open_pool
 
-from rfnry_thread import migrations
+from rfnry_thread import migrations, verbs
 from rfnry_thread.postgres import PostgresStorage
 
 START = (
@@ -46,6 +48,13 @@ def pytest_sessionstart(session: pytest.Session) -> None:
 
 def pytest_sessionfinish(session: pytest.Session) -> None:
     asyncio.run(admin(f"DROP SCHEMA {SCHEMA} CASCADE"))
+
+
+@pytest.fixture(autouse=True)
+def clock(monkeypatch: pytest.MonkeyPatch) -> None:
+    start = datetime.now(UTC)
+    ticks = itertools.count()
+    monkeypatch.setattr(verbs, "now", lambda: start + timedelta(milliseconds=next(ticks)))
 
 
 @pytest.fixture
