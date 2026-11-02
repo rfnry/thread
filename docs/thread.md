@@ -443,7 +443,10 @@ minute passes, then a `TransportError`. The server deduplicates on the thread, t
 From the server to a client, delivery is in order and complete per connection: a connection never
 sees `seq` 7 before `seq` 6, and never skips one it may read (in a `since_added` thread, an edit or
 retraction of what came before the add is one it may not). A dropped socket reconnects with jittered
-backoff, with fresh `headers`; a following client follows again from the last `seq` it saw in each
+backoff, with fresh `headers`, and the backoff carries over from one connection to the next: it starts
+over only once a connection has stayed open for 30 seconds, so a server that answers the hello and
+drops the socket at once is redialled at once the first time and after a growing delay each time
+after, while a long-lived connection that drops is redialled at once; a following client follows again from the last `seq` it saw in each
 thread (and joins each one instead when that fails), and every client re-joins every thread it had
 joined from there; the missed events arrive before anything new. A re-follow's or re-join's `Joined`
 also arrives in `events()`, and when it says `truncated`, redraw from the latest page. A reconnect

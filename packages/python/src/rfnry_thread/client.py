@@ -74,6 +74,7 @@ BACKOFF = 0.5
 BACKOFF_CAP = 8.0
 RECONNECT = 0.5
 RECONNECT_CAP = 30.0
+HEALTHY = 30.0
 
 
 def unreadable_push(text: str) -> bool:
@@ -234,6 +235,8 @@ class Client:
         self._connected = asyncio.Event()
         self._reader: asyncio.Task[None] | None = None
         self._reconnector: asyncio.Task[None] | None = None
+        self._attempt = 0
+        self._since = 0.0
         self._closed = False
         self._status: Status = "open"
         self._failure: ThreadException | None = None
@@ -292,6 +295,7 @@ class Client:
                 raise TransportError(f"client: the hello reply is malformed: {exc}") from exc
             self.identity, self.scope = identity, scope
             self._connection = connection
+            self._since = asyncio.get_running_loop().time()
             self._reader = asyncio.get_running_loop().create_task(self._read(connection))
             self._connected.set()
             adopted = True
@@ -424,6 +428,8 @@ class Client:
             return
         self._connection = None
         self._connected.clear()
+        if asyncio.get_running_loop().time() - self._since >= HEALTHY:
+            self._attempt = 0
         for future in self._pending.values():
             if not future.done():
                 future.set_exception(TransportError("client: connection lost"))
@@ -434,11 +440,11 @@ class Client:
             self._reconnector = asyncio.get_running_loop().create_task(self._reconnect())
 
     async def _reconnect(self) -> None:
-        attempt = 0
         try:
             while not self._closed:
+                attempt = self._attempt
                 ceiling = min(RECONNECT_CAP, RECONNECT * 2 ** (attempt - 1)) if attempt else 0.0
-                attempt += 1
+                self._attempt += 1
                 await asyncio.sleep(random.random() * ceiling)
                 try:
                     await self._establish()

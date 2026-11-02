@@ -59,7 +59,6 @@ export type StepOptions = Omit<SendOptions, 'metadata'> & {
 const parts = (content: Content): Part[] =>
   typeof content === 'string' ? [{ type: 'text', text: content }] : content
 const newId = (): string => crypto.randomUUID().replaceAll('-', '')
-const sleep = (ms: number) => new Promise<void>((resolve) => setTimeout(resolve, ms))
 
 function open(url: string, protocols: Protocols | undefined): Promise<WebSocket> {
   return new Promise((resolve, reject) => {
@@ -243,6 +242,10 @@ export class Client {
   private readonly left = new Map<string, number>()
   private readonly made = new Map<string, string>()
   private stopped = false
+  private attempt = 0
+  private reconnecting = false
+  private nap: { timer: ReturnType<typeof setTimeout>; wake: () => void } | null = null
+  private since = 0
   private current: Status = 'open'
   private failure: ThreadException | null = null
   private waiting: Array<() => void> = []
@@ -289,6 +292,7 @@ export class Client {
     this.identity = reply.identity as Identity
     this.scope = String(reply.scope)
     this.socket = socket
+    this.since = Date.now()
     socket.onmessage = (message) => this.receive(String(message.data), socket)
     socket.onclose = () => this.lost(socket)
     for (const wake of this.waiting.splice(0)) wake()
@@ -444,19 +448,28 @@ export class Client {
   private lost(socket: WebSocket): void {
     if (this.socket !== socket) return
     this.socket = null
+    if (Date.now() - this.since >= timing.healthyMs) this.attempt = 0
     for (const waiter of this.pending.values())
       waiter.reject(new TransportError('client: connection lost'))
     this.pending.clear()
     if (this.stopped) return
     this.change('reconnecting')
-    void this.reconnect()
+    if (this.reconnecting) return
+    this.reconnecting = true
+    void this.reconnect().finally(() => {
+      this.reconnecting = false
+    })
   }
 
   private async reconnect(): Promise<void> {
-    for (let attempt = 0; !this.stopped; attempt++) {
+    while (!this.stopped) {
+      const attempt = this.attempt++
       const ceiling =
         attempt === 0 ? 0 : Math.min(timing.reconnectCapMs, timing.reconnectMs * 2 ** (attempt - 1))
-      await sleep(Math.random() * ceiling)
+      await new Promise<void>((wake) => {
+        this.nap = { timer: setTimeout(wake, Math.random() * ceiling), wake }
+      })
+      this.nap = null
       if (this.stopped) return
       try {
         await this.establish()
@@ -472,8 +485,10 @@ export class Client {
         continue
       }
       await this.rejoin()
-      if (this.socket) this.change('open')
-      return
+      if (this.socket) {
+        this.change('open')
+        return
+      }
     }
   }
 
@@ -908,6 +923,10 @@ export class Client {
   async close(): Promise<void> {
     if (this.stopped && this.socket === null) return
     this.stopped = true
+    if (this.nap) {
+      clearTimeout(this.nap.timer)
+      this.nap.wake()
+    }
     const socket = this.socket
     this.socket = null
     for (const waiter of this.pending.values())

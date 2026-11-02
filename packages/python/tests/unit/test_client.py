@@ -1,6 +1,7 @@
 import asyncio
 import contextlib
 import inspect
+import random
 from collections.abc import Sequence
 from typing import Any, cast
 
@@ -8,7 +9,8 @@ import pytest
 from pydantic import ValidationError
 from until import until
 
-from rfnry_thread.client import Client, Item
+from rfnry_thread import client as client_module
+from rfnry_thread.client import Client, Dial, Item
 from rfnry_thread.connection import Connection
 from rfnry_thread.errors import (
     ConfigurationError,
@@ -1383,3 +1385,75 @@ async def test_a_client_not_following_is_invited_when_added_again_behind_the_hub
     await storage.add_member("acme", added("t1", BRUNO, ANA))
     await ana.send("t1", "after")
     assert (await take(bruno, Invited, timeout=5)).thread_id == "t1"
+
+
+async def dials_that_drop(lives: list[float], dialled: list[float], keep: asyncio.Event) -> Dial:
+    loop = asyncio.get_running_loop()
+
+    async def serve(end: Connection, life: float | None) -> None:
+        await end.receive_text()
+        await end.send_text(hello_reply())
+        if life is None:
+            keep.set()
+            return
+        await asyncio.sleep(life)
+        await end.close()
+
+    async def dial() -> Connection:
+        dialled.append(loop.time())
+        ours, there = pipe()
+        index = len(dialled) - 1
+        asyncio.create_task(serve(there, lives[index] if index < len(lives) else None))
+        return ours
+
+    return dial
+
+
+async def test_a_connection_that_dies_right_after_its_hello_backs_off_before_the_next_dial(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(client_module, "RECONNECT", 0.05)
+    monkeypatch.setattr(random, "random", lambda: 1.0)
+    dialled: list[float] = []
+    keep = asyncio.Event()
+    dial = await dials_that_drop([0.0, 0.0, 0.0, 0.0], dialled, keep)
+    client = await Client._open(dial)
+    await asyncio.wait_for(keep.wait(), 3.0)
+    await client.close()
+    gaps = [later - earlier for earlier, later in zip(dialled, dialled[1:], strict=False)]
+    assert len(gaps) == 4
+    assert gaps[1] >= 0.045 and gaps[2] >= 0.095 and gaps[3] >= 0.195
+
+
+async def test_a_connection_that_stayed_open_past_the_healthy_window_redials_at_once(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(client_module, "RECONNECT", 3.0)
+    monkeypatch.setattr(client_module, "HEALTHY", 0.1)
+    monkeypatch.setattr(random, "random", lambda: 1.0)
+    dialled: list[float] = []
+    keep = asyncio.Event()
+    dial = await dials_that_drop([0.0, 0.15], dialled, keep)
+    client = await Client._open(dial)
+    await asyncio.wait_for(keep.wait(), 3.0)
+    await client.close()
+    gaps = [later - earlier for earlier, later in zip(dialled, dialled[1:], strict=False)]
+    assert len(gaps) == 2
+    assert 0.15 <= gaps[1] < 1.5
+
+
+async def test_close_while_backing_off_ends_the_reconnect_and_dials_no_more(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(client_module, "RECONNECT", 5.0)
+    monkeypatch.setattr(random, "random", lambda: 1.0)
+    dialled: list[float] = []
+    keep = asyncio.Event()
+    dial = await dials_that_drop([0.0, 0.0], dialled, keep)
+    client = await Client._open(dial)
+    await until(lambda: len(dialled) == 2 and client._attempt == 2)
+    reconnector = client._reconnector
+    await asyncio.wait_for(client.close(), 1.0)
+    assert reconnector is not None and reconnector.done()
+    await asyncio.sleep(0.05)
+    assert len(dialled) == 2

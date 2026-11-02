@@ -792,6 +792,96 @@ describe('client', () => {
     await client.close()
   })
 
+  async function dialGaps(
+    lives: number[],
+    healthyMs: number,
+    reconnectMs: number
+  ): Promise<number[]> {
+    Object.assign(timing, { reconnectMs, healthyMs })
+    vi.spyOn(Math, 'random').mockReturnValue(1)
+    const dialled: number[] = []
+    const receive = server.receive.bind(server)
+    server.receive = async (socket, frame) => {
+      await receive(socket, frame)
+      if (frame.type !== 'hello') return
+      dialled.push(performance.now())
+      const life = lives[dialled.length - 1]
+      if (life !== undefined) setTimeout(() => socket.close(1006), life)
+    }
+    const client = await connect({ url: 'ws://fake', protocols: ['thread', 'tok'] })
+    await vi.waitFor(() => expect(dialled).toHaveLength(lives.length + 1), { timeout: 3000 })
+    await vi.waitFor(() => expect(client.status).toBe('open'))
+    await client.close()
+    return dialled
+      .slice(1)
+      .map((at, index) => at - (dialled[index] as number) - (lives[index] as number))
+  }
+
+  it('backs off before the next dial when a connection dies right after its hello', async () => {
+    const gaps = await dialGaps([0, 0, 0, 0], 30_000, 40)
+    expect(gaps[1]).toBeGreaterThanOrEqual(35)
+    expect(gaps[2]).toBeGreaterThanOrEqual(75)
+    expect(gaps[3]).toBeGreaterThanOrEqual(155)
+  })
+
+  it('redials at once after a connection that stayed open past the healthy window', async () => {
+    const gaps = await dialGaps([0, 150], 100, 1000)
+    expect(gaps[1]).toBeLessThan(500)
+  })
+
+  it('closes while backing off without leaving the timer alive or dialling again', async () => {
+    Object.assign(timing, { reconnectMs: 5000 })
+    vi.spyOn(Math, 'random').mockReturnValue(1)
+    const long: Array<ReturnType<typeof setTimeout>> = []
+    const set = globalThis.setTimeout
+    vi.spyOn(globalThis, 'setTimeout').mockImplementation(((fn: () => void, ms?: number) => {
+      const handle = set(fn, ms)
+      if (ms === 5000) long.push(handle)
+      return handle
+    }) as typeof setTimeout)
+    const cleared = vi.spyOn(globalThis, 'clearTimeout')
+    const client = await connect({ url: 'ws://fake', protocols: ['thread', 'tok'] })
+    server.drop()
+    await vi.waitFor(() => expect(server.hellos).toHaveLength(2))
+    await vi.waitFor(() => expect(client.status).toBe('open'))
+    server.drop()
+    await vi.waitFor(() => expect(long).toHaveLength(1), { timeout: 3000 })
+    await client.close()
+    expect(cleared).toHaveBeenCalledWith(long[0])
+    await new Promise((resolve) => set(resolve, 50))
+    expect(server.hellos).toHaveLength(2)
+  })
+
+  it('runs one reconnect loop when a socket is lost while a rejoin is under way', async () => {
+    const { client, items } = await joined()
+    let joins = 0
+    server.handlers.set('thread.join', (payload) => {
+      joins += 1
+      if (joins === 1) server.current?.close(1006)
+      return {
+        thread: {
+          id: payload.thread_id,
+          scope: 'acme',
+          metadata: {},
+          created_at: '2026-01-01T12:00:00Z',
+        },
+        seq: server.seq,
+        truncated: false,
+      }
+    })
+    server.drop()
+    await vi.waitFor(() => expect(server.hellos.length).toBeGreaterThanOrEqual(3), {
+      timeout: 3000,
+    })
+    await vi.waitFor(() => expect(client.status).toBe('open'), { timeout: 3000 })
+    await new Promise((resolve) => setTimeout(resolve, 100))
+    expect(client.status).toBe('open')
+    expect(server.hellos).toHaveLength(3)
+    expect(server.current).toBeDefined()
+    expect(items.filter((item) => 'status' in item && item.status === 'open')).toHaveLength(1)
+    await client.close()
+  })
+
   it('closes a socket a reconnect opened after close()', async () => {
     let calls = 0
     let held = false
