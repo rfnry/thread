@@ -62,8 +62,8 @@ const parts = (content: Content): Part[] =>
 const newId = (): string => crypto.randomUUID().replaceAll('-', '')
 const gone = (error: unknown): boolean =>
   error instanceof NotFoundError || error instanceof ForbiddenError
-const refused = (error: unknown): boolean =>
-  gone(error) || error instanceof InputError || error instanceof ConfigurationError
+const wrong = (error: unknown): error is InputError | ConfigurationError =>
+  error instanceof InputError || error instanceof ConfigurationError
 
 function open(url: string, protocols: Protocols | undefined): Promise<WebSocket> {
   return new Promise((resolve, reject) => {
@@ -504,7 +504,8 @@ export class Client {
         await this.followFrom(true, Object.fromEntries(this.cursors), Object.fromEntries(this.left))
         followed = true
       } catch (error) {
-        if (!refused(error)) return this.abandon()
+        if (wrong(error)) return this.end(error)
+        if (!gone(error)) return this.abandon()
         this.following = false
       }
     }
@@ -514,11 +515,17 @@ export class Client {
       try {
         await this.rejoined(threadId, cursor)
       } catch (error) {
+        if (wrong(error)) return this.end(error)
         if (!gone(error)) return this.abandon()
         this.cursors.delete(threadId)
         this.held.delete(threadId)
       }
     }
+  }
+
+  private end(error: ThreadException): void {
+    this.fail(error)
+    this.abandon()
   }
 
   private abandon(): void {

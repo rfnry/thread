@@ -500,8 +500,9 @@ server's `replay_limit`, beyond which the latest and `truncated=True`. Following
 `Present` is announced, and the caller may still signal and receive signals in every thread. A
 thread the connection already receives is not handed again. After a dropped socket the client
 follows again from what it has seen, without the threads it had left unless it was added to them
-again since or they were deleted and made again; refused as a wrong request, it joins each thread
-instead and no longer follows until `follow()` is called again, and refused for anything else, a
+again since or they were deleted and made again; refused because a thread is gone or not the
+caller's, it joins each thread instead and no longer follows until `follow()` is called again,
+refused as a wrong request it stops the client with that error, and refused for anything else, a
 storage failure among them, it closes that connection and tries again on the next. Threads
 `authorize` refuses to `read` are left out.
 Raises `InputError` for a negative position.
@@ -765,8 +766,9 @@ event and signal of the threads joined, each `Invited`, each re-join's `Joined`,
 `StatusChanged` each time `status` changes; the caller's own are left out unless `include_own`.
 Items wait in the client until read, and the iterator ends when the client closes. Raises the error
 that stopped the client: `ForbiddenError` when a reconnect was refused with HTTP 401 or 403 or
-closed with 1008 before its hello was answered, the error that answered a refused hello, or the
-`ForbiddenError` or `ConfigurationError` the `headers` function raised.
+closed with 1008 before its hello was answered, the error that answered a refused hello, the
+`InputError` or `ConfigurationError` that refused a re-join or re-follow, or the `ForbiddenError` or
+`ConfigurationError` the `headers` function raised.
 
 ### `Client.status`
 
@@ -1770,7 +1772,8 @@ thread joined is joined again, and
 `'closed'` for good; listeners hear each change as a `StatusChanged`. `closed` resolves when the
 client stops for good: `null` after `close()`, or the error that stopped it, a `ForbiddenError` when
 a reconnect is closed with 1008 before its hello is answered, the error that answered a refused
-hello, or the `ForbiddenError` or `ConfigurationError` the `protocols` function throws on a reconnect; anything else it throws is a
+hello, the `InputError` or `ConfigurationError` that refused a re-join or re-follow, or the
+`ForbiddenError` or `ConfigurationError` the `protocols` function throws on a reconnect; anything else it throws is a
 failed attempt, retried with backoff. Every method that talks to the server raises `TransportError`
 when the client is closed or not connected, except those that write an event, which retry across
 reconnects and raise it when not acknowledged within a minute, and raises again, with its class and
@@ -1902,8 +1905,9 @@ server's `replay_limit`, beyond which the latest and `truncated: true`. Followin
 no `Present` is announced, and the caller may still signal and receive signals in every thread. A
 thread the connection already receives is not handed again. After a dropped socket the client
 follows again from what it has seen, without the threads it had left unless it was added to them
-again since or they were deleted and made again; refused as a wrong request, it joins each thread
-instead and no longer follows until `follow()` is called again, and refused for anything else, a
+again since or they were deleted and made again; refused because a thread is gone or not the
+caller's, it joins each thread instead and no longer follows until `follow()` is called again,
+refused as a wrong request it stops the client with that error, and refused for anything else, a
 storage failure among them, it closes that connection and tries again on the next. Threads
 `authorize` refuses to `read` are left out.
 Raises `InputError` for a negative position.

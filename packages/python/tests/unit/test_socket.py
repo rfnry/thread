@@ -692,7 +692,7 @@ async def test_a_follow_that_fails_leaves_the_client_not_following(live: Live) -
     assert ana._following is False
 
 
-async def test_a_refollow_refused_as_wrong_input_falls_back_to_joining_every_thread(
+async def test_a_refollow_refused_as_wrong_input_ends_the_client_and_joins_nothing(
     live: Live,
 ) -> None:
     ana_identity = Identity(role="user", id="ana", name="Ana")
@@ -721,13 +721,9 @@ async def test_a_refollow_refused_as_wrong_input_falls_back_to_joining_every_thr
     live.paused = True
     await live.drop()
     await until(lambda: ana.status == "reconnecting")
-    await bruno.send("t1", "away one")
     live.paused = False
-    await until(lambda: ana.status == "open", timeout=3.0)
-    said = [first_text(item) for item in await drain(ana) if isinstance(item, Message)]
-    assert said == ["away one"]
-    assert sent == ["thread.join away"]
-    assert await anas(bruno) == []
+    await until(lambda: ana.status == "closed", timeout=3.0)
+    assert sent == [] and ana._failure is not None and str(ana._failure) == "server: refused"
 
 
 async def test_a_refollow_into_a_thread_made_again_follows_it_from_the_new_head(
@@ -949,8 +945,12 @@ async def test_a_refused_refollow_is_not_retried_with_the_left_threads_merged_in
         return await request(method, payload)
 
     ana._request = record  # type: ignore[method-assign]
-    await drop_and_reopen(live, ana)
-    assert len(sent) == 1 and "left" in sent[0]
+    live.paused = True
+    await live.drop()
+    await until(lambda: ana.status == "reconnecting")
+    live.paused = False
+    await until(lambda: ana.status == "closed", timeout=3.0)
+    assert len(sent) == 1 and "left" in sent[0] and isinstance(ana._failure, InputError)
 
 
 async def test_a_left_thread_made_again_while_away_and_the_follower_added_is_delivered(
@@ -1040,7 +1040,7 @@ async def test_a_thread_left_open_away_stays_away_after_a_drop(live: Live, follo
     assert await anas(bruno) == ["present"]
 
 
-async def test_a_refused_away_rejoin_is_tried_again_with_away_until_it_is_taken(
+async def test_a_refused_away_rejoin_ends_the_client_and_is_never_sent_without_away(
     live: Live, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     class Refuses(server_module._Args):
@@ -1049,17 +1049,11 @@ async def test_a_refused_away_rejoin_is_tried_again_with_away_until_it_is_taken(
         resume: bool = False
         away: Literal[False] = False
 
-    joining = server_module._Join
-    ana, bruno, sent = await away_in_t1(live, False)
+    ana, _, sent = await away_in_t1(live, False)
     monkeypatch.setattr(server_module, "_Join", Refuses)
     live.paused = True
     await live.drop()
     await until(lambda: ana.status == "reconnecting")
     live.paused = False
-    await until(lambda: len(sent) >= 3, timeout=3.0)
-    assert ana.status == "reconnecting" and set(sent) == {"thread.join away"}
-    monkeypatch.setattr(server_module, "_Join", joining)
-    await until(lambda: ana.status == "open", timeout=3.0)
-    assert set(sent) == {"thread.join away"} and "t1" in ana._cursors
-    sent_after = await bruno.send("t1", "after the drop")
-    assert [m.id for m in await drain(ana) if isinstance(m, Message)] == [sent_after.id]
+    await until(lambda: ana.status == "closed", timeout=3.0)
+    assert sent == ["thread.join away"] and isinstance(ana._failure, InputError)

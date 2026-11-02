@@ -109,8 +109,8 @@ describe('client', () => {
     await client.close()
   })
 
-  it('keeps a thread present when the server refuses away, and retries a refused away join with away until it is taken', async () => {
-    const { client, items } = await joined()
+  it('keeps a thread present when the server refuses away, and ends when a re-join with away is refused as a wrong request', async () => {
+    const { client } = await joined()
     server.handlers.set('thread.away', () => {
       throw { code: 'input', message: "server: unknown method 'thread.away'" }
     })
@@ -133,30 +133,16 @@ describe('client', () => {
         }
       return join?.(payload) ?? {}
     })
-    items.length = 0
     server.drop()
-    await vi.waitFor(() => expect(server.sent('thread.join').length).toBeGreaterThanOrEqual(5))
-    expect(client.status).toBe('reconnecting')
-    server.handlers.set('thread.join', (payload) => join?.(payload) ?? {})
-    await vi.waitFor(() => expect(items).toContainEqual({ kind: 'status', status: 'open' }))
+    const reason = await client.closed
+    expect(reason).toBeInstanceOf(InputError)
+    expect(client.status).toBe('closed')
     expect(
-      new Set(
-        server
-          .sent('thread.join')
-          .slice(2)
-          .map((frame) => JSON.stringify(frame.payload))
-      )
-    ).toEqual(
-      new Set([
-        JSON.stringify({
-          thread_id: 't1',
-          since: 0,
-          away: true,
-          created_at: '2026-01-01T12:00:00Z',
-        }),
-      ])
-    )
-    await client.close()
+      server
+        .sent('thread.join')
+        .slice(2)
+        .map((frame) => frame.payload)
+    ).toEqual([{ thread_id: 't1', since: 0, away: true, created_at: '2026-01-01T12:00:00Z' }])
   })
 
   it('joins a thread it is away from again after a drop without presence', async () => {
@@ -1008,7 +994,7 @@ describe('client', () => {
     await client.close()
   })
 
-  it('falls back to joining the cursor threads and stops following when the re-follow is refused as wrong input', async () => {
+  it('ends with the error, joining nothing, when the re-follow is refused as a wrong request', async () => {
     let calls = 0
     server.handlers.set('thread.follow', () => {
       if (++calls > 1) throw { code: 'input', message: 'server: refused' }
@@ -1030,16 +1016,12 @@ describe('client', () => {
     const client = await connect({ url: 'ws://fake', protocols: ['thread', 'tok'] })
     await client.follow()
     server.drop()
-    await vi.waitFor(() => expect(server.sent('thread.join')).toHaveLength(1))
-    expect(server.sent('thread.join')[0]?.payload).toEqual({
-      thread_id: 't1',
-      since: 4,
-      away: true,
-      created_at: '2026-01-01T12:00:00Z',
-    })
-    await vi.waitFor(() => expect(client.status).toBe('open'))
-    expect((client as unknown as { following: boolean }).following).toBe(false)
-    await client.close()
+    const reason = await client.closed
+    expect(reason).toBeInstanceOf(InputError)
+    expect(reason?.message).toBe('server: refused')
+    expect(client.status).toBe('closed')
+    expect(server.sent('thread.join')).toEqual([])
+    expect(server.hellos).toHaveLength(2)
   })
 
   it('tries the re-follow again after a transport loss instead of joining', async () => {
@@ -1120,6 +1102,26 @@ describe('client', () => {
     expect(server.sent('thread.join')).toEqual([])
     expect((client as unknown as { following: boolean }).following).toBe(true)
     await client.close()
+  })
+
+  it('ends with the error when a re-join is refused as a wrong request', async () => {
+    for (const code of ['input', 'configuration'] as const) {
+      const { client } = await joined()
+      server.handlers.set('thread.join', () => {
+        throw {
+          code,
+          message: 'server: invalid thread.join payload: extra inputs are not permitted',
+        }
+      })
+      const hellos = server.hellos.length
+      server.drop()
+      const reason = await client.closed
+      expect(reason).toBeInstanceOf(code === 'input' ? InputError : ConfigurationError)
+      expect(client.status).toBe('closed')
+      expect(server.hellos.length - hellos).toBe(1)
+      server.handlers.delete('thread.join')
+      server.install()
+    }
   })
 
   it('marks, and hears its own marks from its other connections', async () => {
@@ -1376,7 +1378,7 @@ describe('client', () => {
     })
     items.length = 0
     server.drop()
-    await vi.waitFor(() => expect(items).toContainEqual({ kind: 'status', status: 'open' }))
+    expect(await client.closed).toBeInstanceOf(InputError)
     expect(server.sent('thread.follow').map((frame) => frame.payload)).toEqual([
       { resume: false, since: null },
       {
@@ -1385,7 +1387,6 @@ describe('client', () => {
         left: { t1: { seq: 4, created_at: '2026-01-01T12:00:00Z' } },
       },
     ])
-    await client.close()
   })
 
   it('forgets a leave once a re-follow hands that thread back after a new add', async () => {

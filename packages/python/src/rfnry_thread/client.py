@@ -467,8 +467,11 @@ class Client:
             try:
                 await self._follow(True, dict(self._cursors), dict(self._left))
                 followed = True
-            except InputError, ConfigurationError, ForbiddenError, NotFoundError:
+            except ForbiddenError, NotFoundError:
                 self._following = False
+            except (InputError, ConfigurationError) as error:
+                await self._end(error)
+                return
             except ThreadException:
                 await self._abandon()
                 return
@@ -481,9 +484,16 @@ class Client:
             except ForbiddenError, NotFoundError:
                 self._cursors.pop(thread_id, None)
                 self._present.discard(thread_id)
+            except (InputError, ConfigurationError) as error:
+                await self._end(error)
+                return
             except ThreadException:
                 await self._abandon()
                 return
+
+    async def _end(self, error: ThreadException) -> None:
+        self._fail(error)
+        await self._abandon()
 
     async def _abandon(self) -> None:
         connection = self._connection

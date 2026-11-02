@@ -450,10 +450,12 @@ drops the socket at once is redialled at once the first time and after a growing
 after, while a long-lived connection that drops is redialled at once; a following client follows again from the last `seq` it saw in each
 thread, and every client re-joins every thread it had joined from there; the missed events arrive
 before anything new. A re-join refused because the thread is gone or no longer yours (`NotFoundError`,
-`ForbiddenError`) forgets that thread; a re-follow refused as a wrong request (`InputError`,
-`ConfigurationError`, `ForbiddenError`, `NotFoundError`) joins each thread instead, and the client no
-longer follows until you call `follow()` again; any other refusal, a storage failure on the server
-among them, is a failed attempt: the client closes that connection and redials with the same backoff.
+`ForbiddenError`) forgets that thread, and a re-follow refused so joins each thread instead, the
+client no longer following until you call `follow()` again. A re-join or re-follow refused as a
+wrong request (`InputError`, `ConfigurationError`), as a server of another release refuses it, stops
+the client with that error, as a refused hello does. Any other refusal, a storage failure on the
+server among them, is a failed attempt: the client closes that connection and redials with the same
+backoff.
 A re-follow's or re-join's `Joined`
 also arrives in `events()`, and when it says `truncated`, redraw from the latest page. Each position
 a re-join or re-follow resumes from carries the `created_at` of the thread it was read in, so a

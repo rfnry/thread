@@ -18,6 +18,7 @@ from rfnry_thread.errors import (
     InputError,
     NotFoundError,
     StorageError,
+    ThreadException,
     TransportError,
 )
 from rfnry_thread.models import (
@@ -1533,30 +1534,49 @@ async def test_a_refollow_refused_by_a_storage_failure_redials_and_follows_again
     assert (await take(ana, Joined)).thread.id == "t2"
 
 
-async def test_a_refollow_refused_as_wrong_input_joins_each_thread_and_no_longer_follows(
-    storage: PostgresStorage, monkeypatch: pytest.MonkeyPatch
+async def ended(client: Client) -> ThreadException:
+    async def read() -> None:
+        async for _ in client.events():
+            pass
+
+    with pytest.raises(ThreadException) as raised:
+        await asyncio.wait_for(read(), 3.0)
+    assert client.status == "closed"
+    return raised.value
+
+
+@pytest.mark.parametrize("verb", ["join", "follow"])
+@pytest.mark.parametrize("refusal", [InputError, ConfigurationError])
+async def test_a_rejoin_or_refollow_refused_as_a_wrong_request_ends_the_client_with_that_error(
+    storage: PostgresStorage, monkeypatch: pytest.MonkeyPatch, verb: str, refusal: type[Exception]
 ) -> None:
+    monkeypatch.setattr(client_module, "RECONNECT", 0.01)
     server = Server(storage)
     ana = await server.connect(identity=ANA, scope="acme")
     bruno = await server.connect(identity=BRUNO, scope="acme")
     await bruno.create_thread(thread_id="t1")
     await bruno.add_member("t1", ANA)
-    await ana.follow()
+    await (ana.follow() if verb == "follow" else ana.join("t1"))
     await drain(ana)
-    follow = server._verbs.follow
-    armed = [True]
+    dials: list[int] = []
+    dial = ana._dial
+
+    async def counted() -> Connection:
+        dials.append(1)
+        return await dial()
 
     async def refused(*args: Any, **kwargs: Any) -> Any:
-        if armed:
-            armed.pop()
-            raise InputError("server: refused")
-        return await follow(*args, **kwargs)
+        raise refusal("server: invalid thread.join payload: extra inputs are not permitted")
 
-    monkeypatch.setattr(server._verbs, "follow", refused)
-    await dropped(ana)
-    assert not armed and not ana._following and "t1" in ana._cursors
-    sent = await bruno.send("t1", "after the reconnect")
-    assert (await take(ana, Message)).id == sent.id
+    ana._dial = counted
+    monkeypatch.setattr(server._verbs, verb, refused)
+    connection = ana._connection
+    assert connection is not None
+    await connection.close()
+    error = await ended(ana)
+    assert type(error) is refusal and str(error).startswith("server: invalid thread.join payload")
+    assert dials == [1] and ana._connection is None
+    await ana.close()
 
 
 async def remade_while_away(server: Server, follow: bool) -> tuple[Client, list[Item], list[int]]:
