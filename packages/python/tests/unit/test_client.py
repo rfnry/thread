@@ -46,7 +46,7 @@ from rfnry_thread.protocol import ErrorFrame, Failure, Push, Response, encode
 from rfnry_thread.resolve import resolve
 from rfnry_thread.server import Server
 
-from .factories import ANA, AT, BRUNO, HELPER, Lookalike, lookalike
+from .factories import ANA, AT, BRUNO, HELPER, Lookalike, added, lookalike, message, removed
 from .legacy import enroll
 
 
@@ -1288,3 +1288,39 @@ async def test_a_connection_that_ends_on_garbage_is_closed_and_the_client_reconn
     await until(lambda: client.status == "reconnecting")
     assert first.closed
     await client.close()
+
+
+async def test_a_follower_removed_and_added_again_behind_the_hub_gets_its_cursor_back(
+    storage: PostgresStorage,
+) -> None:
+    server = Server(storage)
+    ana = await server.connect(identity=ANA, scope="acme")
+    bruno = await server.connect(identity=BRUNO, scope="acme")
+    await ana.create_thread(thread_id="t1")
+    await ana.add_member("t1", BRUNO)
+    await bruno.follow()
+    await until(lambda: bruno._cursors.get("t1") is not None, timeout=5)
+    await storage.append_event("acme", message(90, "behind the hub"))
+    await storage.remove_member("acme", removed("t1", BRUNO, ANA))
+    await storage.append_event("acme", message(92, "while out"))
+    await storage.add_member("acme", added("t1", BRUNO, ANA))
+    sent = await ana.send("t1", "after")
+    await until(lambda: bruno._cursors.get("t1") == sent.seq, timeout=5)
+    live = await ana.send("t1", "live")
+    await until(lambda: bruno._cursors.get("t1") == live.seq, timeout=5)
+
+
+async def test_a_client_not_following_is_invited_when_added_again_behind_the_hub(
+    storage: PostgresStorage,
+) -> None:
+    server = Server(storage)
+    ana = await server.connect(identity=ANA, scope="acme")
+    bruno = await server.connect(identity=BRUNO, scope="acme")
+    await ana.create_thread(thread_id="t1")
+    await ana.add_member("t1", BRUNO)
+    await bruno.join("t1")
+    await storage.append_event("acme", message(90, "behind the hub"))
+    await storage.remove_member("acme", removed("t1", BRUNO, ANA))
+    await storage.add_member("acme", added("t1", BRUNO, ANA))
+    await ana.send("t1", "after")
+    assert (await take(bruno, Invited, timeout=5)).thread_id == "t1"

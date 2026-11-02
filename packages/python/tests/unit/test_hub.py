@@ -10,15 +10,18 @@ from rfnry_thread.errors import ForbiddenError, StorageError
 from rfnry_thread.hub import Hub
 from rfnry_thread.models import (
     SYSTEM,
+    Edit,
     Identity,
     Idle,
     Left,
     MemberRemoved,
     Present,
+    Retract,
     Signal,
     StreamDelta,
     StreamEnd,
     StreamStart,
+    Text,
     Thread,
     Working,
 )
@@ -140,6 +143,159 @@ async def test_a_removed_member_is_cut_off_after_the_event(storage: PostgresStor
         "left",
         "message",
     ]
+
+
+async def _bruno_in(
+    storage: PostgresStorage, history: Any = "since_added", following: bool = True
+) -> tuple[Hub, Any, Any]:
+    thread, _ = await storage.create_thread(
+        "acme", Thread(id="t1", scope="acme", created_at=AT, history=history)
+    )
+    await storage.add_member("acme", added("t1", ANA, ANA))
+    await storage.add_member("acme", added("t1", BRUNO, ANA))
+    hub = Hub(storage, 500)
+    bruno, recorder = open_session(BRUNO)
+    bruno.following = following
+    hub.sessions.add(bruno)
+    await asyncio.wait_for(hub.join(bruno, thread, None), 5)
+    await pushes(bruno, recorder)
+    return hub, bruno, recorder
+
+
+def _seqs(found: list[dict[str, Any]]) -> list[int]:
+    return [p["seq"] for p in found if "kind" in p]
+
+
+def _kinds(found: list[dict[str, Any]]) -> list[str]:
+    return [p.get("kind", "joined") for p in found]
+
+
+@pytest.mark.parametrize(("history", "floor"), [("all", 0), ("since_added", 5)])
+async def test_a_member_removed_and_added_again_inside_a_gap_is_handed_the_thread_again(
+    storage: PostgresStorage, history: Any, floor: int
+) -> None:
+    hub, bruno, recorder = await _bruno_in(storage, history)
+    await storage.append_event("acme", message(3, "before"))
+    await storage.remove_member("acme", removed("t1", BRUNO, ANA))
+    await storage.add_member("acme", added("t1", BRUNO, ANA))
+    last, _ = await storage.append_event("acme", message(6, "after"))
+    await asyncio.wait_for(hub.deliver("acme", last), 5)
+    found = await pushes(bruno, recorder)
+    assert _kinds(found) == ["message", "member_removed", "member_added", "message", "joined"]
+    assert _seqs(found) == [3, 4, 5, 6]
+    assert bruno.joined == {"t1": 6}
+    assert bruno.floors.get("t1", 0) == floor
+    later, _ = await storage.append_event("acme", message(7, "live"))
+    await asyncio.wait_for(hub.deliver("acme", later), 5)
+    assert _seqs(await pushes(bruno, recorder)) == [7]
+
+
+async def test_a_session_not_following_is_invited_after_the_gap_removed_it(
+    storage: PostgresStorage,
+) -> None:
+    hub, bruno, recorder = await _bruno_in(storage, "all", following=False)
+    await storage.append_event("acme", message(3, "before"))
+    await storage.remove_member("acme", removed("t1", BRUNO, ANA))
+    await storage.add_member("acme", added("t1", BRUNO, ANA))
+    last, _ = await storage.append_event("acme", message(6, "after"))
+    await asyncio.wait_for(hub.deliver("acme", last), 5)
+    found = await pushes(bruno, recorder)
+    assert _kinds(found) == ["message", "member_removed", "invited"]
+    assert "t1" not in bruno.joined
+
+
+async def test_two_sessions_of_one_identity_cut_by_a_gap_are_each_invited_once(
+    storage: PostgresStorage,
+) -> None:
+    hub, first, first_recorder = await _bruno_in(storage, "all", following=False)
+    thread = await storage.get_thread("acme", "t1")
+    assert thread is not None
+    second, second_recorder = open_session(BRUNO)
+    hub.sessions.add(second)
+    await asyncio.wait_for(hub.join(second, thread, None), 5)
+    await pushes(second, second_recorder)
+    await storage.append_event("acme", message(3, "before"))
+    await storage.remove_member("acme", removed("t1", BRUNO, ANA))
+    await storage.add_member("acme", added("t1", BRUNO, ANA))
+    last, _ = await storage.append_event("acme", message(6, "after"))
+    await asyncio.wait_for(hub.deliver("acme", last), 5)
+    for session, recorder in ((first, first_recorder), (second, second_recorder)):
+        assert _kinds(await pushes(session, recorder)).count("invited") == 1
+
+
+async def test_a_gap_that_ends_with_the_member_removed_is_not_handed_the_thread_again(
+    storage: PostgresStorage,
+) -> None:
+    hub, bruno, recorder = await _bruno_in(storage)
+    await storage.append_event("acme", message(3, "before"))
+    await storage.remove_member("acme", removed("t1", BRUNO, ANA))
+    await storage.append_event("acme", message(5, "while out"))
+    await storage.add_member("acme", added("t1", BRUNO, ANA))
+    await storage.append_event("acme", message(7, "back"))
+    await storage.remove_member("acme", removed("t1", BRUNO, ANA))
+    last, _ = await storage.append_event("acme", message(9, "after"))
+    await asyncio.wait_for(hub.deliver("acme", last), 5)
+    assert _seqs(await pushes(bruno, recorder)) == [3, 4]
+    assert "t1" not in bruno.joined
+
+
+async def test_a_re_add_already_followed_by_a_removal_in_storage_is_not_handed_again(
+    storage: PostgresStorage,
+) -> None:
+    hub, bruno, recorder = await _bruno_in(storage)
+    await storage.append_event("acme", message(3, "before"))
+    await storage.remove_member("acme", removed("t1", BRUNO, ANA))
+    await storage.append_event("acme", message(5, "while out"))
+    await storage.add_member("acme", added("t1", BRUNO, ANA))
+    live, _ = await storage.append_event("acme", message(7, "back"))
+    await storage.remove_member("acme", removed("t1", BRUNO, ANA))
+    await asyncio.wait_for(hub.deliver("acme", live), 5)
+    assert _seqs(await pushes(bruno, recorder)) == [3, 4]
+    assert "t1" not in bruno.joined
+
+
+@pytest.mark.parametrize("kind", ["edit", "retract"])
+async def test_a_change_to_what_the_new_floor_excludes_never_reaches_a_re_added_member(
+    storage: PostgresStorage, kind: str
+) -> None:
+    hub, bruno, recorder = await _bruno_in(storage)
+    old, _ = await storage.append_event("acme", message(3, "before"))
+    await storage.remove_member("acme", removed("t1", BRUNO, ANA))
+    await storage.add_member("acme", added("t1", BRUNO, ANA))
+    if kind == "edit":
+        change: Edit | Retract = Edit(
+            id="x6",
+            thread_id="t1",
+            author=ANA,
+            created_at=AT,
+            client_id="x6",
+            target=old.id,
+            content=[Text(text="secret")],
+        )
+    else:
+        change = Retract(
+            id="x6", thread_id="t1", author=ANA, created_at=AT, client_id="x6", target=old.id
+        )
+    await storage.append_event("acme", change)
+    last, _ = await storage.append_event("acme", message(7, "back"))
+    await asyncio.wait_for(hub.deliver("acme", last), 5)
+    assert _seqs(await pushes(bruno, recorder)) == [3, 4, 5, 7]
+    assert bruno.joined == {"t1": 7}
+
+
+async def test_a_re_add_that_is_the_live_event_hands_the_thread_again(
+    storage: PostgresStorage,
+) -> None:
+    hub, bruno, recorder = await _bruno_in(storage)
+    await storage.append_event("acme", message(3, "before"))
+    await storage.remove_member("acme", removed("t1", BRUNO, ANA))
+    _, live = await storage.add_member("acme", added("t1", BRUNO, ANA))
+    assert live is not None
+    await asyncio.wait_for(hub.deliver("acme", live), 5)
+    found = await pushes(bruno, recorder)
+    assert _seqs(found) == [3, 4, 5]
+    assert _kinds(found)[-1] == "joined"
+    assert bruno.joined == {"t1": 5}
 
 
 async def test_a_joining_session_first_receives_the_current_state(storage: PostgresStorage) -> None:

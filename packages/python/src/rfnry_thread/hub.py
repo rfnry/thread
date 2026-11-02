@@ -20,6 +20,7 @@ from rfnry_thread.models import (
     Joined,
     Left,
     Marked,
+    MemberAdded,
     MemberRemoved,
     Present,
     Retract,
@@ -70,6 +71,10 @@ class Session:
 
 def _removes(event: Event, session: Session) -> bool:
     return isinstance(event, MemberRemoved) and event.identity.id == session.identity.id
+
+
+def _adds(event: Event, session: Session) -> bool:
+    return isinstance(event, MemberAdded) and event.identity.id == session.identity.id
 
 
 def _size(payload: dict[str, Any]) -> int:
@@ -265,12 +270,16 @@ class Hub:
     async def deliver(self, scope: str, event: Event) -> None:
         self._touch(scope, event.thread_id)
         async with self._lock(scope, event.thread_id):
-            cut = await self._deliver(scope, event)
+            again: list[tuple[Session, MemberAdded]] = []
+            cut = await self._deliver(scope, event, again)
             parted = [s for s in cut if self._part(s, event.thread_id)]
         for session in parted:
             await self._parted(session, event.thread_id)
+        await self._reentered(scope, event.thread_id, [a for a in again if a[0] in parted])
 
-    async def _deliver(self, scope: str, event: Event) -> list[Session]:
+    async def _deliver(
+        self, scope: str, event: Event, again: list[tuple[Session, MemberAdded]]
+    ) -> list[Session]:
         payload = event.model_dump(mode="json")
         cut: list[Session] = []
         room = self._room(scope, event.thread_id)
@@ -300,6 +309,12 @@ class Hub:
                     )
                     continue
                 removed = next((e for e in missing if _removes(e, session)), None)
+                if removed is not None:
+                    last = [
+                        e for e in (*missing, event) if _removes(e, session) or _adds(e, session)
+                    ][-1]
+                    if isinstance(last, MemberAdded):
+                        again.append((session, last))
                 for earlier in missing:
                     session.push_event(earlier, earlier.model_dump(mode="json"))
                     if earlier is removed:
@@ -314,6 +329,30 @@ class Hub:
             if _removes(event, session):
                 cut.append(session)
         return cut
+
+    async def _reentered(
+        self, scope: str, thread_id: str, again: list[tuple[Session, MemberAdded]]
+    ) -> None:
+        latest: dict[str, tuple[Session, MemberAdded]] = {}
+        for session, add in again:
+            held = latest.get(session.identity.id)
+            if held is None or held[1].seq < add.seq:
+                latest[session.identity.id] = (session, add)
+        for session, add in latest.values():
+            try:
+                if not await self.storage.is_member(scope, thread_id, session.identity.id):
+                    continue
+                thread = await self.storage.get_thread(scope, thread_id)
+            except Exception as error:
+                logger.warning(
+                    "hub: handing thread %r to %r again failed: %s",
+                    thread_id,
+                    session.identity.id,
+                    error,
+                )
+                continue
+            if thread is not None:
+                await self._added_here(scope, thread, add.author, session.identity.id, add.seq)
 
     async def _target(self, scope: str, event: Event, room: list[Session]) -> int:
         if not isinstance(event, Edit | Retract):
@@ -334,10 +373,16 @@ class Hub:
         try:
             async with self._lock(scope, thread_id):
                 found = await self.storage.list_events(scope, thread_id, since=seq - 1, limit=1)
-                cut = await self._deliver(scope, found[0]) if found and found[0].seq == seq else []
+                again: list[tuple[Session, MemberAdded]] = []
+                cut = (
+                    await self._deliver(scope, found[0], again)
+                    if found and found[0].seq == seq
+                    else []
+                )
                 parted = [s for s in cut if self._part(s, thread_id)]
             for session in parted:
                 await self._parted(session, thread_id)
+            await self._reentered(scope, thread_id, [a for a in again if a[0] in parted])
         except ThreadException as error:
             logger.warning("hub: a notice for thread %r failed: %s", thread_id, error)
 
