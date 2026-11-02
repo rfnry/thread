@@ -109,7 +109,7 @@ describe('client', () => {
     await client.close()
   })
 
-  it('keeps a thread present when the server refuses away, and does not retry a refused away join without it', async () => {
+  it('keeps a thread present when the server refuses away, and retries a refused away join with away until it is taken', async () => {
     const { client, items } = await joined()
     server.handlers.set('thread.away', () => {
       throw { code: 'input', message: "server: unknown method 'thread.away'" }
@@ -131,14 +131,18 @@ describe('client', () => {
     })
     items.length = 0
     server.drop()
+    await vi.waitFor(() => expect(server.sent('thread.join').length).toBeGreaterThanOrEqual(5))
+    expect(client.status).toBe('reconnecting')
+    server.handlers.set('thread.join', (payload) => join?.(payload) ?? {})
     await vi.waitFor(() => expect(items).toContainEqual({ kind: 'status', status: 'open' }))
-    expect(server.sent('thread.join')).toHaveLength(3)
     expect(
-      server
-        .sent('thread.join')
-        .slice(2)
-        .map((frame) => frame.payload)
-    ).toEqual([{ thread_id: 't1', since: 0, away: true }])
+      new Set(
+        server
+          .sent('thread.join')
+          .slice(2)
+          .map((frame) => JSON.stringify(frame.payload))
+      )
+    ).toEqual(new Set([JSON.stringify({ thread_id: 't1', since: 0, away: true })]))
     await client.close()
   })
 
@@ -986,7 +990,7 @@ describe('client', () => {
     await client.close()
   })
 
-  it('falls back to joining the cursor threads when the re-follow fails', async () => {
+  it('falls back to joining the cursor threads and stops following when the re-follow is refused as wrong input', async () => {
     let calls = 0
     server.handlers.set('thread.follow', () => {
       if (++calls > 1) throw { code: 'input', message: 'server: refused' }
@@ -1014,6 +1018,8 @@ describe('client', () => {
       since: 4,
       away: true,
     })
+    await vi.waitFor(() => expect(client.status).toBe('open'))
+    expect((client as unknown as { following: boolean }).following).toBe(false)
     await client.close()
   })
 
@@ -1041,6 +1047,56 @@ describe('client', () => {
     await vi.waitFor(() => expect(client.status).toBe('open'))
     expect(server.sent('thread.join')).toEqual([])
     expect(server.sent('thread.follow').at(-1)?.payload).toEqual({ resume: true, since: { t1: 4 } })
+    await client.close()
+  })
+
+  it('redials and joins the thread again when a re-join meets a storage failure', async () => {
+    const { client, items } = await joined()
+    const join = server.handlers.get('thread.join')
+    let failing = true
+    server.handlers.set('thread.join', (payload) => {
+      if (failing) {
+        failing = false
+        throw { code: 'storage', message: 'server: storage failed' }
+      }
+      return join?.(payload) ?? {}
+    })
+    server.drop()
+    await vi.waitFor(() => expect(items).toContainEqual({ kind: 'status', status: 'open' }))
+    expect(server.sent('thread.join')).toHaveLength(3)
+    expect(server.hellos).toHaveLength(3)
+    expect([...(client as unknown as { cursors: Map<string, number> }).cursors.keys()]).toEqual([
+      't1',
+    ])
+    expect(
+      items.map((item) => ('status' in item ? item.status : 'truncated' in item ? 'joined' : 'x'))
+    ).toEqual(['reconnecting', 'joined', 'open'])
+    await client.close()
+  })
+
+  it('redials and follows again when a re-follow meets a storage failure', async () => {
+    let calls = 0
+    server.handlers.set('thread.follow', () => {
+      if (++calls === 2) throw { code: 'storage', message: 'server: storage failed' }
+      return {
+        joined: [
+          {
+            thread: { id: 't1', scope: 'acme', metadata: {}, created_at: '2026-01-01T12:00:00Z' },
+            seq: 4,
+            truncated: false,
+          },
+        ],
+      }
+    })
+    const client = await connect({ url: 'ws://fake', protocols: ['thread', 'tok'] })
+    const items: Item[] = []
+    client.subscribe((item) => items.push(item))
+    await client.follow()
+    server.drop()
+    await vi.waitFor(() => expect(items).toContainEqual({ kind: 'status', status: 'open' }))
+    expect(server.sent('thread.follow')).toHaveLength(3)
+    expect(server.sent('thread.join')).toEqual([])
+    expect((client as unknown as { following: boolean }).following).toBe(true)
     await client.close()
   })
 

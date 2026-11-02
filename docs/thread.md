@@ -447,8 +447,13 @@ backoff, with fresh `headers`, and the backoff carries over from one connection 
 over only once a connection has stayed open for 30 seconds, so a server that answers the hello and
 drops the socket at once is redialled at once the first time and after a growing delay each time
 after, while a long-lived connection that drops is redialled at once; a following client follows again from the last `seq` it saw in each
-thread (and joins each one instead when that fails), and every client re-joins every thread it had
-joined from there; the missed events arrive before anything new. A re-follow's or re-join's `Joined`
+thread, and every client re-joins every thread it had joined from there; the missed events arrive
+before anything new. A re-join refused because the thread is gone or no longer yours (`NotFoundError`,
+`ForbiddenError`) forgets that thread; a re-follow refused as a wrong request (`InputError`,
+`ConfigurationError`, `ForbiddenError`, `NotFoundError`) joins each thread instead, and the client no
+longer follows until you call `follow()` again; any other refusal, a storage failure on the server
+among them, is a failed attempt: the client closes that connection and redials with the same backoff.
+A re-follow's or re-join's `Joined`
 also arrives in `events()`, and when it says `truncated`, redraw from the latest page. A reconnect
 your endpoint refuses (HTTP 401 or 403 on the upgrade, or 1008 before the hello is answered), or
 whose `headers` function raises `ForbiddenError`, stops the client, and `events()` raises that

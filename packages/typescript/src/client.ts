@@ -2,6 +2,7 @@ import {
   ConfigurationError,
   ForbiddenError,
   InputError,
+  NotFoundError,
   raised,
   ThreadException,
   TransportError,
@@ -59,6 +60,10 @@ export type StepOptions = Omit<SendOptions, 'metadata'> & {
 const parts = (content: Content): Part[] =>
   typeof content === 'string' ? [{ type: 'text', text: content }] : content
 const newId = (): string => crypto.randomUUID().replaceAll('-', '')
+const gone = (error: unknown): boolean =>
+  error instanceof NotFoundError || error instanceof ForbiddenError
+const refused = (error: unknown): boolean =>
+  gone(error) || error instanceof InputError || error instanceof ConfigurationError
 
 function open(url: string, protocols: Protocols | undefined): Promise<WebSocket> {
   return new Promise((resolve, reject) => {
@@ -495,12 +500,12 @@ export class Client {
   private async rejoin(): Promise<void> {
     let followed = false
     if (this.following) {
-      const left = Object.fromEntries(this.left)
       try {
-        await this.followFrom(true, Object.fromEntries(this.cursors), left)
+        await this.followFrom(true, Object.fromEntries(this.cursors), Object.fromEntries(this.left))
         followed = true
       } catch (error) {
-        if (error instanceof TransportError) return
+        if (!refused(error)) return this.abandon()
+        this.following = false
       }
     }
     for (const threadId of [...this.cursors.keys()]) {
@@ -509,11 +514,18 @@ export class Client {
       try {
         await this.rejoined(threadId, cursor)
       } catch (error) {
-        if (error instanceof TransportError) return
+        if (!gone(error)) return this.abandon()
         this.cursors.delete(threadId)
         this.held.delete(threadId)
       }
     }
+  }
+
+  private abandon(): void {
+    const socket = this.socket
+    if (!socket) return
+    socket.close(1000, 'client: resume failed')
+    this.lost(socket)
   }
 
   private async rejoined(threadId: string, cursor: number): Promise<Joined> {

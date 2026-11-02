@@ -17,6 +17,7 @@ from rfnry_thread.errors import (
     ForbiddenError,
     InputError,
     NotFoundError,
+    StorageError,
     TransportError,
 )
 from rfnry_thread.models import (
@@ -27,6 +28,7 @@ from rfnry_thread.models import (
     Identity,
     Image,
     Invited,
+    Joined,
     Marked,
     MemberAdded,
     Message,
@@ -1457,3 +1459,93 @@ async def test_close_while_backing_off_ends_the_reconnect_and_dials_no_more(
     assert reconnector is not None and reconnector.done()
     await asyncio.sleep(0.05)
     assert len(dialled) == 2
+
+
+async def dropped(client: Client) -> list[Item]:
+    connection = client._connection
+    assert connection is not None
+    await connection.close()
+    await until(lambda: client.status == "open" and client._connection is not connection)
+    return await drain(client)
+
+
+def failing_once(
+    storage: PostgresStorage, monkeypatch: pytest.MonkeyPatch, name: str
+) -> list[bool]:
+    armed = [True]
+    real = getattr(storage, name)
+
+    async def flaky(*args: Any, **kwargs: Any) -> Any:
+        if armed:
+            armed.pop()
+            raise StorageError(f"postgres: storage rejected {name}: connection reset")
+        return await real(*args, **kwargs)
+
+    monkeypatch.setattr(storage, name, flaky)
+    return armed
+
+
+async def test_a_rejoin_refused_by_a_storage_failure_redials_and_joins_the_thread_again(
+    storage: PostgresStorage, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(client_module, "RECONNECT", 0.01)
+    server = Server(storage)
+    ana = await server.connect(identity=ANA, scope="acme")
+    bruno = await server.connect(identity=BRUNO, scope="acme")
+    await bruno.create_thread(thread_id="t1")
+    await bruno.add_member("t1", ANA)
+    await ana.join("t1")
+    await drain(ana)
+    armed = failing_once(storage, monkeypatch, "get_thread")
+    items = await dropped(ana)
+    assert not armed and "t1" in ana._cursors and "t1" in ana._present
+    told = [i.status if isinstance(i, StatusChanged) else type(i).__name__ for i in items]
+    assert told == ["reconnecting", "Present", "Joined", "open"]
+    sent = await bruno.send("t1", "after the reconnect")
+    assert (await take(ana, Message)).id == sent.id
+
+
+async def test_a_refollow_refused_by_a_storage_failure_redials_and_follows_again(
+    storage: PostgresStorage, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(client_module, "RECONNECT", 0.01)
+    server = Server(storage)
+    ana = await server.connect(identity=ANA, scope="acme")
+    bruno = await server.connect(identity=BRUNO, scope="acme")
+    await bruno.create_thread(thread_id="t1")
+    await bruno.add_member("t1", ANA)
+    await ana.follow()
+    await drain(ana)
+    armed = failing_once(storage, monkeypatch, "list_threads")
+    await dropped(ana)
+    assert not armed and ana._following
+    assert [s.following for s in server._hub.sessions if s.identity.id == ANA.id] == [True]
+    await bruno.create_thread(thread_id="t2")
+    await bruno.add_member("t2", ANA)
+    assert (await take(ana, Joined)).thread.id == "t2"
+
+
+async def test_a_refollow_refused_as_wrong_input_joins_each_thread_and_no_longer_follows(
+    storage: PostgresStorage, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    server = Server(storage)
+    ana = await server.connect(identity=ANA, scope="acme")
+    bruno = await server.connect(identity=BRUNO, scope="acme")
+    await bruno.create_thread(thread_id="t1")
+    await bruno.add_member("t1", ANA)
+    await ana.follow()
+    await drain(ana)
+    follow = server._verbs.follow
+    armed = [True]
+
+    async def refused(*args: Any, **kwargs: Any) -> Any:
+        if armed:
+            armed.pop()
+            raise InputError("server: refused")
+        return await follow(*args, **kwargs)
+
+    monkeypatch.setattr(server._verbs, "follow", refused)
+    await dropped(ana)
+    assert not armed and not ana._following and "t1" in ana._cursors
+    sent = await bruno.send("t1", "after the reconnect")
+    assert (await take(ana, Message)).id == sent.id

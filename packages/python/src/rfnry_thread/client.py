@@ -17,6 +17,7 @@ from rfnry_thread.errors import (
     ConfigurationError,
     ForbiddenError,
     InputError,
+    NotFoundError,
     ThreadException,
     TransportError,
     raised,
@@ -463,25 +464,34 @@ class Client:
     async def _rejoin(self) -> None:
         followed = False
         if self._following:
-            left = dict(self._left)
             try:
-                await self._follow(True, dict(self._cursors), left)
+                await self._follow(True, dict(self._cursors), dict(self._left))
                 followed = True
-            except TransportError:
-                return
+            except InputError, ConfigurationError, ForbiddenError, NotFoundError:
+                self._following = False
             except ThreadException:
-                pass
+                await self._abandon()
+                return
         for thread_id in list(self._cursors):
             cursor = self._cursors.get(thread_id)
             if cursor is None or (followed and thread_id not in self._present):
                 continue
             try:
                 await self._rejoined(thread_id, cursor)
-            except TransportError:
-                return
-            except ThreadException:
+            except ForbiddenError, NotFoundError:
                 self._cursors.pop(thread_id, None)
                 self._present.discard(thread_id)
+            except ThreadException:
+                await self._abandon()
+                return
+
+    async def _abandon(self) -> None:
+        connection = self._connection
+        if connection is None:
+            return
+        with contextlib.suppress(Exception):
+            await connection.close(1000, "client: resume failed")
+        self._lost(connection)
 
     async def _rejoined(self, thread_id: str, cursor: int) -> Joined:
         if thread_id in self._present:

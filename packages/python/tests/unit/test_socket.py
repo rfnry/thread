@@ -16,7 +16,6 @@ from rfnry_thread.errors import (
     ConfigurationError,
     ForbiddenError,
     InputError,
-    ThreadException,
     TransportError,
 )
 from rfnry_thread.models import (
@@ -692,7 +691,9 @@ async def test_a_follow_that_fails_leaves_the_client_not_following(live: Live) -
     assert ana._following is False
 
 
-async def test_a_failed_refollow_falls_back_to_joining_every_thread(live: Live) -> None:
+async def test_a_refollow_refused_as_wrong_input_falls_back_to_joining_every_thread(
+    live: Live,
+) -> None:
     ana_identity = Identity(role="user", id="ana", name="Ana")
     ana = await Client.connect(live.url, headers=ANA_HEADERS)
     bruno = await live.server.connect(identity=BRUNO, scope="acme")
@@ -712,7 +713,7 @@ async def test_a_failed_refollow_falls_back_to_joining_every_thread(live: Live) 
     async def refuse(
         resume: bool, since: dict[str, int] | None, left: dict[str, int] | None
     ) -> list[Joined]:
-        raise ThreadException("client: refused")
+        raise InputError("server: refused")
 
     ana._request = record  # type: ignore[method-assign]
     ana._follow = refuse  # type: ignore[method-assign]
@@ -1038,7 +1039,7 @@ async def test_a_thread_left_open_away_stays_away_after_a_drop(live: Live, follo
     assert await anas(bruno) == ["present"]
 
 
-async def test_a_refused_away_rejoin_is_not_retried_without_away(
+async def test_a_refused_away_rejoin_is_tried_again_with_away_until_it_is_taken(
     live: Live, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     class Refuses(server_module._Args):
@@ -1047,9 +1048,17 @@ async def test_a_refused_away_rejoin_is_not_retried_without_away(
         resume: bool = False
         away: Literal[False] = False
 
+    joining = server_module._Join
     ana, bruno, sent = await away_in_t1(live, False)
     monkeypatch.setattr(server_module, "_Join", Refuses)
-    await drop_and_reopen(live, ana)
-    assert sent == ["thread.join away"]
-    await bruno.send("t1", "after the drop")
-    assert [m for m in await drain(ana) if isinstance(m, Message)] == []
+    live.paused = True
+    await live.drop()
+    await until(lambda: ana.status == "reconnecting")
+    live.paused = False
+    await until(lambda: len(sent) >= 3, timeout=3.0)
+    assert ana.status == "reconnecting" and set(sent) == {"thread.join away"}
+    monkeypatch.setattr(server_module, "_Join", joining)
+    await until(lambda: ana.status == "open", timeout=3.0)
+    assert set(sent) == {"thread.join away"} and "t1" in ana._cursors
+    sent_after = await bruno.send("t1", "after the drop")
+    assert [m.id for m in await drain(ana) if isinstance(m, Message)] == [sent_after.id]

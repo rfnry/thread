@@ -497,7 +497,10 @@ server's `replay_limit`, beyond which the latest and `truncated=True`. Following
 `Present` is announced, and the caller may still signal and receive signals in every thread. A
 thread the connection already receives is not handed again. After a dropped socket the client
 follows again from what it has seen, without the threads it had left unless it was added to them
-again since or they were deleted and made again. Threads `authorize` refuses to `read` are left out.
+again since or they were deleted and made again; refused as a wrong request, it joins each thread
+instead and no longer follows until `follow()` is called again, and refused for anything else, a
+storage failure among them, it closes that connection and tries again on the next. Threads
+`authorize` refuses to `read` are left out.
 Raises `InputError` for a negative position.
 
 ### `Client.mark`
@@ -770,8 +773,8 @@ def status(self) -> Status: ...
 ```
 
 The connection's status, a `Status`, which is `Literal["open", "reconnecting", "closed"]`: `"open"`
-once connected, `"reconnecting"` from a dropped socket until it is back and every thread joined is
-joined again, and `"closed"` for good after `close()` or a refused reconnect. Each change arrives in
+once connected, `"reconnecting"` from a dropped socket until it is back, follows again if it was
+following, and every thread joined is joined again, and `"closed"` for good after `close()` or a refused reconnect. Each change arrives in
 `events()` as a `StatusChanged`.
 
 ### `Client.close`
@@ -1758,7 +1761,8 @@ class Client {
 
 A participant's connection, made by `connect`; the constructor alone opens no socket. `identity` and
 `scope` are as the server knows them. `status` is the connection's: `'open'` once connected,
-`'reconnecting'` from a dropped socket until it is back and every thread joined is joined again, and
+`'reconnecting'` from a dropped socket until it is back, follows again if it was following, and every
+thread joined is joined again, and
 `'closed'` for good; listeners hear each change as a `StatusChanged`. `closed` resolves when the
 client stops for good: `null` after `close()`, or the error that stopped it, a `ForbiddenError` when
 a reconnect is closed with 1008 before its hello is answered, the error that answered a refused
@@ -1893,7 +1897,10 @@ server's `replay_limit`, beyond which the latest and `truncated: true`. Followin
 no `Present` is announced, and the caller may still signal and receive signals in every thread. A
 thread the connection already receives is not handed again. After a dropped socket the client
 follows again from what it has seen, without the threads it had left unless it was added to them
-again since or they were deleted and made again. Threads `authorize` refuses to `read` are left out.
+again since or they were deleted and made again; refused as a wrong request, it joins each thread
+instead and no longer follows until `follow()` is called again, and refused for anything else, a
+storage failure among them, it closes that connection and tries again on the next. Threads
+`authorize` refuses to `read` are left out.
 Raises `InputError` for a negative position.
 
 ### `Client.mark`
