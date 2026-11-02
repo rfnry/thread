@@ -163,7 +163,9 @@ async def start(self) -> None: ...
 Links this server to the other replicas on the same storage: it listens for their events and signals
 and repeats its own presence, working and streams every ten seconds. When its listener drops, it
 listens again, checks every thread its connections have open against storage before anything more
-reaches them, and repeats its own state. Calling it again does nothing. Raises `StorageError` when the storage cannot listen.
+reaches them, and repeats its own state; started with connections already open, after `stop()` or
+before a first `start()`, it does the same before it returns, since it heard nothing meanwhile.
+Calling it again does nothing. Raises `StorageError` when the storage cannot listen.
 
 ### `Server.stop`
 

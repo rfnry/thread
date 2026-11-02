@@ -446,11 +446,14 @@ class Server:
     async def start(self) -> None:
         if self._stop is not None:
             return
+        doubted = self._hub.doubt()
         self._stop = await self._storage.listen(
             self._hub.on_event, self._hub.on_signal, self._hub.on_resume
         )
         self._hub.linked = True
         self._refresher = asyncio.get_running_loop().create_task(self._refresh())
+        if doubted:
+            await self._hub.resync()
 
     async def stop(self) -> None:
         if self._refresher is not None:

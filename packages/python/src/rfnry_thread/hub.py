@@ -699,10 +699,14 @@ class Hub:
         return {thread_id: items} if items else {}
 
     def on_resume(self) -> Awaitable[None]:
-        self._unchecked.update(self._rooms)
-        return self._resumed()
+        self.doubt()
+        return self.resync()
 
-    async def _resumed(self) -> None:
+    def doubt(self) -> bool:
+        self._unchecked.update(self._rooms)
+        return bool(self._rooms)
+
+    async def resync(self) -> None:
         await self.recheck()
         await self.announce()
 

@@ -561,7 +561,9 @@ until they reconnect or the thread is checked, and until then the events of a th
 under that id can reach them. A replica that misses an `invited` notice, a thread made again while
 it was not listening among them, gives no `Invited`, and a follower no `Joined`, until the
 connection follows again. `start()` holds one connection from the pool for `LISTEN`; `stop()`
-gives it back.
+gives it back. A replica started with connections already open, again after `stop()` or for the
+first time after it began serving, has heard nothing meanwhile and checks their threads the same way
+before `start()` returns.
 
 A replica that goes away ends, for the others' connections, what its own had announced, as if they
 had dropped: `StreamEnd` for each open stream, `Idle` for the work, and `Left` for each identity no

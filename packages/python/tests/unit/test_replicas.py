@@ -185,7 +185,6 @@ async def test_what_a_resumed_listener_hears_before_a_rooms_turn_waits_for_that_
         await far.add_member("acme", "t1", BRUNO)
         bruno = await Peer.open(far, BRUNO)
         await bruno.call("thread.join", thread_id="t1")
-        await far.start()
         real = storage.get_thread
 
         async def slow(scope: str, thread_id: str) -> Any:
@@ -197,6 +196,7 @@ async def test_what_a_resumed_listener_hears_before_a_rooms_turn_waits_for_that_
         resume = resumed[0]
         assert resume is not None
         walking = asyncio.ensure_future(resume())
+        await far.start()
         await bruno.call("signal.send", thread_id="t1", kind="stream.start", stream_id="s1")
         await bruno.call(
             "signal.send",
@@ -641,6 +641,7 @@ async def test_a_replica_that_never_lost_its_listener_reads_no_room_again(
     storage: PostgresStorage, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     near = Server(storage)
+    await near.start()
     ana = await Peer.open(near, ANA)
     await ana.call("thread.create", thread_id="t1")
     await ana.call("thread.join", thread_id="t1")
@@ -657,7 +658,6 @@ async def test_a_replica_that_never_lost_its_listener_reads_no_room_again(
 
     for name in ("get_thread", "list_events", "list_members", "is_member", "head"):
         monkeypatch.setattr(storage, name, counted(name))
-    await near.start()
     try:
         await near._hub.recheck()
         await near._hub.announce()
@@ -780,6 +780,38 @@ async def test_a_notice_landing_while_a_follower_enters_is_delivered_at_once(
             p["content"][0]["text"] for p in await helper.quiet(0.6) if p["kind"] == "message"
         ]
         assert pushed == ["one", "late"]
+    finally:
+        await near.stop()
+        await far.stop()
+
+
+async def test_a_replica_started_again_with_connections_open_checks_their_threads(
+    storage: PostgresStorage,
+) -> None:
+    near, far = Server(storage), Server(storage)
+    await near.start()
+    await far.start()
+    try:
+        ana = await Peer.open(near, ANA)
+        for thread_id in ("t1", "t2"):
+            await ana.call("thread.create", thread_id=thread_id)
+            await ana.call("thread.join", thread_id=thread_id)
+        await ana.call("member.add", thread_id="t2", identity=BRUNO.model_dump(mode="json"))
+        bruno = await Peer.open(far, BRUNO)
+        await bruno.call("thread.join", thread_id="t2")
+        await ana.quiet()
+        await bruno.quiet()
+        await near.stop()
+        await ana.quiet()
+        await far.delete_thread("acme", "t1")
+        await far.remove_member("acme", "t2", ANA)
+        await say(bruno, "t2", "ana must not hear this")
+        assert [p["kind"] for p in await ana.quiet()] == []
+        await near.start()
+        assert [p["kind"] for p in await ana.quiet()] == ["thread.deleted", "member_removed"]
+        assert near._hub._room("acme", "t1") == [] and near._hub._room("acme", "t2") == []
+        await bruno.call("signal.send", thread_id="t2", kind="working", label="private")
+        assert await ana.quiet(0.3) == []
     finally:
         await near.stop()
         await far.stop()
