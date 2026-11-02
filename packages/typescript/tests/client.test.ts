@@ -452,6 +452,19 @@ describe('client', () => {
     expect(client.status).toBe('closed')
   })
 
+  it('keeps reconnecting when a hello is refused for its deadline', async () => {
+    const client = await connect({ url: 'ws://fake', protocols: ['thread', 'tok'] })
+    server.helloReplies.push({
+      type: 'error',
+      id: 'hello',
+      error: { code: 'transport', message: 'server: no hello within 10 seconds' },
+    })
+    server.drop()
+    await vi.waitFor(() => expect(server.hellos).toHaveLength(3))
+    await vi.waitFor(() => expect(client.status).toBe('open'))
+    await client.close()
+  })
+
   it('closes a socket a reconnect opened after close()', async () => {
     let calls = 0
     let held = false

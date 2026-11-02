@@ -8,7 +8,13 @@ from pydantic import BaseModel, ConfigDict, Field, ValidationError
 
 from rfnry_thread.client import Client
 from rfnry_thread.connection import Connection
-from rfnry_thread.errors import ConfigurationError, InputError, StorageError, ThreadException
+from rfnry_thread.errors import (
+    ConfigurationError,
+    InputError,
+    StorageError,
+    ThreadException,
+    TransportError,
+)
 from rfnry_thread.hub import Hub, Session
 from rfnry_thread.models import (
     SYSTEM,
@@ -26,7 +32,7 @@ from rfnry_thread.pipe import End, pipe
 from rfnry_thread.protocol import (
     CLOSE_PROTOCOL,
     CLOSE_SLOW,
-    HELLO as HELLO_ID,
+    HELLO_ID,
     PROTOCOL,
     Hello,
     Notify,
@@ -198,7 +204,7 @@ class Server:
         try:
             text = await asyncio.wait_for(connection.receive_text(), HELLO)
         except TimeoutError:
-            await _refuse(connection, InputError(f"server: no hello within {HELLO:g} seconds"))
+            await _refuse(connection, TransportError(f"server: no hello within {HELLO:g} seconds"))
             return
         except Exception:
             return

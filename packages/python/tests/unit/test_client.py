@@ -806,6 +806,32 @@ async def test_a_push_the_client_cannot_read_is_skipped(server: Server) -> None:
     await bruno.close()
 
 
+async def test_a_push_whose_media_has_neither_data_nor_url_is_skipped(server: Server) -> None:
+    ana = await server.connect(identity=ANA, scope="acme")
+    bruno = await server.connect(identity=BRUNO, scope="acme")
+    await ana.create_thread(thread_id="t1")
+    await ana.add_member("t1", BRUNO)
+    await ana.join("t1")
+    await bruno.join("t1")
+    await drain(ana)
+    await drain(bruno)
+    session = next(s for s in server._hub.sessions if s.identity == ANA)
+    connection = ana._connection
+    unreadable = {
+        "kind": "message",
+        "thread_id": "t1",
+        "seq": 99,
+        "author": {"role": "user", "id": "bruno"},
+        "content": [{"type": "image", "media_type": "image/png"}],
+    }
+    session.outbound.put(Push(name="event", payload=unreadable))
+    await bruno.send("t1", "still here")
+    assert (await take(ana, Message)).content == [Text(text="still here")]
+    assert ana.status == "open" and ana._connection is connection
+    await ana.close()
+    await bruno.close()
+
+
 class Silent:
     def __init__(self) -> None:
         self.closed = False
@@ -886,6 +912,37 @@ async def test_a_hello_refused_on_reconnect_ends_the_client() -> None:
         await asyncio.wait_for(read(), 3.0)
     assert client.status == "closed" and dials == 2
     assert second.closed
+
+
+async def test_a_hello_refused_for_its_deadline_keeps_the_client_reconnecting() -> None:
+    first, theirs = pipe()
+    dials = 0
+    refused = encode(
+        ErrorFrame(
+            id="hello",
+            error=Failure(code="transport", message="server: no hello within 10 seconds"),
+        )
+    )
+
+    async def dial() -> Connection:
+        nonlocal dials
+        dials += 1
+        if dials == 1:
+            return first
+        ours, there = pipe()
+        asyncio.create_task(answer(there, refused if dials == 2 else hello_reply()))
+        return ours
+
+    async def answer(end: Connection, reply: str) -> None:
+        await end.receive_text()
+        await end.send_text(reply)
+
+    helper = asyncio.create_task(answer(theirs, hello_reply()))
+    client = await Client._open(dial)
+    await helper
+    await theirs.close()
+    await until(lambda: client.status == "open" and dials == 3)
+    await client.close()
 
 
 async def test_a_hello_reply_without_an_identity_keeps_the_client_reconnecting() -> None:

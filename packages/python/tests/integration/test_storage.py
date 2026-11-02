@@ -379,6 +379,57 @@ async def test_baseline_marks_set_the_last_seq_only_where_there_is_no_mark(
     assert (await storage.mark("acme", "t2", "ana", 0))[0] == 0
 
 
+async def test_baseline_marks_wait_out_a_removal_instead_of_failing_on_it(
+    storage: Storage, pool: Any
+) -> None:
+    await room(storage, "t1", "acme", ANA)
+    async with pool.acquire() as conn:
+        await conn.execute("DELETE FROM thread_marks WHERE thread_id = 't1'")
+    async with pool.acquire() as holder:
+        transaction = holder.transaction()
+        await transaction.start()
+        await holder.execute(
+            "SELECT 1 FROM thread_threads WHERE scope = 'acme' AND id = 't1' FOR UPDATE"
+        )
+        await holder.execute("DELETE FROM thread_members WHERE thread_id = 't1'")
+        baseline = asyncio.create_task(storage.baseline_marks("acme", "ana"))
+        await asyncio.sleep(0.3)
+        assert not baseline.done()
+        await transaction.commit()
+    assert await asyncio.wait_for(baseline, 5.0) == 0
+
+
+async def test_an_append_waits_out_a_removal_and_then_refuses_the_removed_author(
+    storage: Storage, pool: Any
+) -> None:
+    await room(storage, "t1", "acme", ANA, BRUNO)
+    async with pool.acquire() as holder:
+        transaction = holder.transaction()
+        await transaction.start()
+        await holder.execute(
+            "SELECT 1 FROM thread_threads WHERE scope = 'acme' AND id = 't1' FOR UPDATE"
+        )
+        await holder.execute(
+            "DELETE FROM thread_members WHERE thread_id = 't1' AND identity_id = 'bruno'"
+        )
+        await holder.execute("UPDATE thread_threads SET last_seq = last_seq + 1 WHERE id = 't1'")
+        append = asyncio.create_task(storage.append_event("acme", say("t1", "b1", author=BRUNO)))
+        await asyncio.sleep(0.3)
+        assert not append.done()
+        await transaction.commit()
+    with pytest.raises(ForbiddenError, match="is not a member of thread"):
+        await asyncio.wait_for(append, 5.0)
+
+
+async def test_a_creator_for_another_thread_is_refused_and_writes_nothing(
+    storage: Storage,
+) -> None:
+    with pytest.raises(StorageError, match="^postgres: the creator belongs to another thread$"):
+        await storage.create_thread("acme", thread("t1"), added("t2", ANA, ANA))
+    assert await storage.get_thread("acme", "t1") is None
+    assert await storage.list_events("acme", "t2") == []
+
+
 async def test_a_mark_is_read_for_one_membership_and_is_none_without_one(
     storage: Storage,
 ) -> None:

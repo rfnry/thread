@@ -147,6 +147,8 @@ class PostgresStorage:
     ) -> tuple[Thread, bool]:
         if thread.scope != scope:
             raise StorageError("postgres: row scope does not match the call scope")
+        if creator is not None and creator.thread_id != thread.id:
+            raise StorageError("postgres: the creator belongs to another thread")
         async with self._guard("create_thread"), self._pool.acquire() as conn, conn.transaction():
             row = await conn.fetchrow(
                 f"INSERT INTO thread_threads ({_THREAD}) VALUES ($1, $2, $3::jsonb, $4, $5) "
@@ -547,19 +549,26 @@ class PostgresStorage:
 
     async def append_event(self, scope: str, event: Event) -> tuple[Event, bool]:
         async with self._guard("append_event"), self._pool.acquire() as conn, conn.transaction():
-            last = await self._locked(conn, scope, event.thread_id)
-            if last is None:
-                raise NotFoundError(f"postgres: thread {event.thread_id!r} was not found")
-            if event.author.role != "system" and not await conn.fetchval(
-                "SELECT EXISTS (SELECT 1 FROM thread_members "
-                "WHERE scope = $1 AND thread_id = $2 AND identity_id = $3)",
-                scope,
-                event.thread_id,
-                event.author.id,
-            ):
-                raise ForbiddenError(
-                    f"postgres: {event.author.id!r} is not a member of thread {event.thread_id!r}"
+            last = None
+            if event.author.role != "system":
+                last = await conn.fetchval(
+                    "SELECT t.last_seq FROM thread_threads t JOIN thread_members m "
+                    "ON m.scope = t.scope AND m.thread_id = t.id "
+                    "WHERE t.scope = $1 AND t.id = $2 AND m.identity_id = $3 "
+                    "FOR UPDATE OF t FOR KEY SHARE OF m",
+                    scope,
+                    event.thread_id,
+                    event.author.id,
                 )
+            if last is None:
+                last = await self._locked(conn, scope, event.thread_id)
+                if last is None:
+                    raise NotFoundError(f"postgres: thread {event.thread_id!r} was not found")
+                if event.author.role != "system":
+                    raise ForbiddenError(
+                        f"postgres: {event.author.id!r} is not a member of thread "
+                        f"{event.thread_id!r}"
+                    )
             existing = await conn.fetchval(
                 "SELECT body FROM thread_events WHERE scope = $1 AND thread_id = $2 AND author_id = $3 AND client_id = $4",
                 scope,
@@ -728,7 +737,7 @@ class PostgresStorage:
                 "INSERT INTO thread_marks (scope, thread_id, identity_id, seq, at) "
                 "SELECT m.scope, m.thread_id, m.identity_id, t.last_seq, now() "
                 "FROM thread_members m JOIN thread_threads t ON t.scope = m.scope AND t.id = m.thread_id "
-                "WHERE m.scope = $1 AND m.identity_id = $2 "
+                "WHERE m.scope = $1 AND m.identity_id = $2 FOR KEY SHARE OF m "
                 "ON CONFLICT (scope, thread_id, identity_id) DO NOTHING",
                 scope,
                 identity_id,

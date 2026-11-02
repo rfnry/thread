@@ -1469,12 +1469,12 @@ append-only: an event is removed only with its thread or its scope. `check` only
 and its event are one write: `create_thread` given a `creator`, `add_member`, `remove_member` and
 `update_thread` take the event, and store the row, the event at the thread's next `seq` (taken under
 the thread's lock), the new member's mark and the notice in one transaction, so a failure leaves
-none of them. `create_thread` returns the thread and whether it is new; with a `creator`, a new
+none of them. `create_thread` raises `StorageError` when the `creator` belongs to another thread, and returns the thread and whether it is new; with a `creator`, a new
 thread's first event (`seq` 1) is that `MemberAdded`, its membership and its mark at 0, and an
 existing thread comes back with `False` and nothing else written. `add_member` returns the member
 and the event stored, `None` with the existing member when it already was one (nothing written);
-the member's `added_at` and `added_by` are the event's `created_at` and `author`, its floor is the
-event's `seq`, and its mark `seq - 1`. `remove_member` returns the event stored with the identity
+the member's `added_at` and `added_by` are the event's `created_at` and `author`, in a `since_added` thread its floor
+is the event's `seq`, and its mark `seq - 1`. `remove_member` returns the event stored with the identity
 the membership held, `None` when the identity was not a member (nothing written). `update_thread`
 returns the thread with its new metadata and the event stored, `None` when the thread is missing.
 `append_event` returns the event stored and whether it is new (an existing event of the same author

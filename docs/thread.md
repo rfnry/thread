@@ -921,8 +921,9 @@ sharing a schema do.
 row. The log is append-only: an event is never updated or deleted on its own, only with its thread
 or its scope. `create_thread` (with its creator), `add_member`, `remove_member` and `update_thread`
 take the event they log and write the row and the event in one transaction: a storage of your own
-must do the same, and its signatures changed from the earlier releases (a breaking change for it;
-`PostgresStorage` and `Server` are unaffected).
+must do the same, and its signatures changed from the earlier releases (a breaking change for it).
+Code that goes through `Server` is unaffected; code that calls `PostgresStorage` directly is
+affected by the new signatures and by `append_event` refusing an author who is not a member.
 
 ## Tenancy
 

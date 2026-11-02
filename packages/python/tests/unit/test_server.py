@@ -116,6 +116,7 @@ async def test_a_connection_without_a_hello_is_refused_after_the_deadline(
     task = asyncio.create_task(server.serve(theirs, identity=ANA, scope="acme"))
     reply = json.loads(await asyncio.wait_for(ours.receive_text(), 1.0))
     assert reply["type"] == "error"
+    assert reply["error"]["code"] == "transport"
     assert reply["error"]["message"] == "server: no hello within 0.05 seconds"
     await asyncio.wait_for(task, 1.0)
     assert ours.code == CLOSE_PROTOCOL

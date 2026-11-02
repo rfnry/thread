@@ -350,12 +350,12 @@ class Verbs:
         self, session: Session, thread_id: str, seq: int, back: bool = False
     ) -> tuple[int, int]:
         actor, scope = session.identity, session.scope
-        thread = await self.thread(actor, scope, thread_id, "read")
+        await self.thread(actor, scope, thread_id, "read")
         found = await self._storage.head(scope, thread_id, actor.id)
         if found is None:
             raise NotFoundError(f"server: {actor.id!r} is not a member of thread {thread_id!r}")
         head = found[0]
-        low = max(await self._floor(actor, scope, thread) - 1, 0)
+        low = 0 if actor.role == "system" else max(found[1] - 1, 0)
         if not low <= seq <= head:
             raise InputError(f"server: seq must be between {low} and {head}")
         stored, unread, moved = await self._storage.mark(scope, thread_id, actor.id, seq, back)

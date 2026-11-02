@@ -48,7 +48,7 @@ from rfnry_thread.models import (
     parts,
 )
 from rfnry_thread.protocol import (
-    HELLO,
+    HELLO_ID,
     PROTOCOL,
     ErrorFrame,
     Hello,
@@ -259,7 +259,7 @@ class Client:
                 raise TransportError(f"client: the hello was not answered: {exc}") from exc
             if isinstance(reply, ErrorFrame):
                 raise raised(reply.error.code, reply.error.message)
-            if not isinstance(reply, Response) or reply.id != HELLO:
+            if not isinstance(reply, Response) or reply.id != HELLO_ID:
                 raise TransportError("client: the server did not answer the hello")
             if self._closed:
                 raise TransportError("client: the client is closed")
@@ -293,7 +293,7 @@ class Client:
                     else:
                         future.set_result(frame.payload)
                 elif isinstance(frame, Push):
-                    with contextlib.suppress(ValidationError):
+                    with contextlib.suppress(ValidationError, InputError):
                         self._receive(frame)
         except asyncio.CancelledError:
             raise
