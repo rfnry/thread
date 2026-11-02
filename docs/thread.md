@@ -460,7 +460,7 @@ read is skipped, not fatal. Each change arrives in
 item that names no thread. It is how a person's page says it
 is reconnecting.
 
-A connection that cannot keep up — its outbound queue over its bound with no write finishing for
+A connection that cannot keep up — its outbound queue over its bound of 1000 frames with no write finishing for
 ten seconds — is closed, and its client resumes from its cursor. Stream deltas waiting for a slow
 connection are merged, never dropped.
 
@@ -527,6 +527,11 @@ replica that stops repeating — it crashed — is forgotten within thirty. A mi
 latency, never an event: resume reads from storage. A replica whose `LISTEN` connection drops takes
 another with jittered backoff, listens again and repeats its own state at once, so the others
 rebuild it. `start()` holds one connection from the pool for `LISTEN`; `stop()` gives it back.
+
+Notices are not signed: every database role that can connect hears every scope's notices — the live
+traffic of all tenants — and can send them. Give the database only to roles trusted with every
+tenant. The server checks what it can: an `invited` notice is acted on only for a current member;
+`thread.deleted` notices are not checked.
 
 #### One handler per thread
 
