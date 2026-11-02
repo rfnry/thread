@@ -747,6 +747,9 @@ class PostgresStorage:
     async def delete_scope(self, scope: str) -> int:
         async with self._guard("delete_scope"), self._pool.acquire() as conn, conn.transaction():
             removed = 0
+            await conn.execute(
+                "SELECT 1 FROM thread_threads WHERE scope = $1 ORDER BY id FOR UPDATE", scope
+            )
             texts = await conn.fetchrow(_TEXTS_TABLE)
             for table in (
                 *([texts["name"]] if texts["held"] else []),

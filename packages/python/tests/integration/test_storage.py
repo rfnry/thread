@@ -865,3 +865,25 @@ async def test_a_failed_metadata_write_after_the_event_leaves_no_event(schemas: 
     got = await storage.get_thread("acme", "t1")
     assert got is not None and got.metadata == old
     assert await storage.list_events("acme", "t1") == before
+
+
+async def test_deleting_a_scope_does_not_deadlock_with_an_append(
+    storage: Storage, pool: Any
+) -> None:
+    await room(storage, "t1", "acme", ANA, BRUNO)
+    async with pool.acquire() as holder:
+        tx = holder.transaction()
+        await tx.start()
+        await holder.execute(
+            "SELECT 1 FROM thread_threads WHERE scope = 'acme' AND id = 't1' FOR UPDATE"
+        )
+        appending = asyncio.create_task(storage.append_event("acme", say("t1", "c1", author=ANA)))
+        await asyncio.sleep(0.3)
+        wiping = asyncio.create_task(storage.delete_scope("acme"))
+        await asyncio.sleep(0.3)
+        await tx.commit()
+    done, pending = await asyncio.wait({appending, wiping}, timeout=10)
+    assert not pending
+    assert appending.exception() is None
+    assert wiping.exception() is None
+    assert await storage.verify_absent("acme")
