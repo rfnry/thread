@@ -8,8 +8,9 @@ from unit.factories import ANA, AT, BRUNO, HELPER, added, removed, updated
 from until import until
 
 from rfnry_thread import migrations
-from rfnry_thread.errors import NotFoundError, StorageError
+from rfnry_thread.errors import ForbiddenError, NotFoundError, StorageError
 from rfnry_thread.models import (
+    SYSTEM,
     Edit,
     Event,
     Message,
@@ -165,10 +166,20 @@ async def test_seq_is_thread_local_gapless_and_dedup_answers_with_the_stored_eve
         repeat == first and isinstance(repeat, Message) and repeat.content == [Text(text="hello")]
     )
     assert (first.seq, second.seq, other.seq) == (2, 3, 2)
+    await storage.add_member("acme", added("t1", BRUNO))
     bruno, _ = await storage.append_event("acme", say("t1", "c1", author=BRUNO))
-    assert bruno.seq == 4
+    assert bruno.seq == 5
     with pytest.raises(NotFoundError):
         await storage.append_event("acme", say("ghost", "c1"))
+
+
+async def test_the_log_refuses_an_author_who_is_not_a_member(storage: Storage) -> None:
+    await room(storage)
+    with pytest.raises(ForbiddenError, match=r"^postgres: 'bruno' is not a member of thread 't1'$"):
+        await storage.append_event("acme", say("t1", "c1", author=BRUNO))
+    stored, created = await storage.append_event("acme", say("t1", "c2", author=SYSTEM))
+    assert (created, stored.author.id) == (True, SYSTEM.id)
+    assert seqs(await storage.list_events("acme", "t1")) == [1, 2]
 
 
 async def test_a_message_keeps_its_metadata(storage: Storage) -> None:
@@ -605,6 +616,8 @@ async def test_a_member_listing_by_activity_filters_metadata_and_pages_together(
         )
         if thread_id != "b":
             await storage.add_member("acme", added(thread_id, ANA))
+        if thread_id == "a":
+            await storage.add_member("acme", added(thread_id, BRUNO))
     late = say("a", "late", author=BRUNO).model_copy(update={"created_at": AT + timedelta(hours=1)})
     await storage.append_event("acme", late)
     await storage.mark("acme", "a", "ana", 0)
@@ -721,6 +734,7 @@ async def test_a_failed_creator_event_leaves_no_thread_and_a_retry_makes_it(
 
 async def test_membership_reads_from_its_member_added_event(storage: Storage) -> None:
     await storage.create_thread("acme", thread("t1").model_copy(update={"history": "since_added"}))
+    await storage.add_member("acme", added("t1", ANA))
     await storage.append_event("acme", say("t1", "c1", "one"))
     await storage.append_event("acme", say("t1", "c2", "two"))
     _, event = await storage.add_member("acme", added("t1", BRUNO))

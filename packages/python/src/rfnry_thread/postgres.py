@@ -11,6 +11,7 @@ from typing import Any, cast
 from rfnry_thread import migrations
 from rfnry_thread.errors import (
     ConfigurationError,
+    ForbiddenError,
     InputError,
     NotFoundError,
     StorageError,
@@ -525,6 +526,16 @@ class PostgresStorage:
             last = await self._locked(conn, scope, event.thread_id)
             if last is None:
                 raise NotFoundError(f"postgres: thread {event.thread_id!r} was not found")
+            if event.author.role != "system" and not await conn.fetchval(
+                "SELECT EXISTS (SELECT 1 FROM thread_members "
+                "WHERE scope = $1 AND thread_id = $2 AND identity_id = $3)",
+                scope,
+                event.thread_id,
+                event.author.id,
+            ):
+                raise ForbiddenError(
+                    f"postgres: {event.author.id!r} is not a member of thread {event.thread_id!r}"
+                )
             existing = await conn.fetchval(
                 "SELECT body FROM thread_events WHERE scope = $1 AND thread_id = $2 AND author_id = $3 AND client_id = $4",
                 scope,

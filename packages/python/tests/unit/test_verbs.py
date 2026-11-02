@@ -414,6 +414,23 @@ async def test_a_member_removed_while_joining_is_refused_and_receives_nothing(po
     assert [p for p in await bruno.quiet() if p["kind"] == "message"] == []
 
 
+async def test_a_send_racing_its_authors_removal_never_lands_after_it(server: Server) -> None:
+    ana = await Peer.open(server, ANA)
+    bruno = await Peer.open(server, BRUNO)
+    for round_ in range(20):
+        thread_id = f"r{round_}"
+        await ana.call("thread.create", thread_id=thread_id)
+        await ana.call("member.add", thread_id=thread_id, identity=BRUNO.model_dump(mode="json"))
+        await asyncio.gather(
+            say(bruno, thread_id, "last words"),
+            ana.call("member.remove", thread_id=thread_id, identity_id="bruno"),
+            return_exceptions=True,
+        )
+        events = (await ana.call("thread.history", thread_id=thread_id))["events"]
+        gone = next(e["seq"] for e in events if e["kind"] == "member_removed")
+        assert [e for e in events if e["kind"] == "message" and e["seq"] > gone] == []
+
+
 async def test_nothing_crosses_scopes(server: Server) -> None:
     a = await Peer.open(server, ANA, scope="tenant-a")
     b = await Peer.open(server, ANA, scope="tenant-b")

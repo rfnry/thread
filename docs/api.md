@@ -1475,7 +1475,8 @@ event's `seq`, and its mark `seq - 1`. `remove_member` returns the event stored 
 the membership held, `None` when the identity was not a member (nothing written). `update_thread`
 returns the thread with its new metadata and the event stored, `None` when the thread is missing.
 `append_event` returns the event stored and whether it is new (an existing event of the same author
-and `client_id` comes back with `False`, and a new event gets the thread's next `seq`); the getters return `None` for what the scope does not hold, `list_threads` returns threads
+and `client_id` comes back with `False`, and a new event gets the thread's next `seq`; it raises
+`ForbiddenError` for an author who is not a member of the thread, unless the author is the system); the getters return `None` for what the scope does not hold, `list_threads` returns threads
 newest first and `list_events` events in `seq` order, with `since` the first after it and without it
 the latest. `order` is an `Order`, which is `Literal["created", "activity"]`: `"activity"` lists by
 the latest message instead, a thread without messages by its creation; `preview=True` fills each

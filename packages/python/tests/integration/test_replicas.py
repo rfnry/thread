@@ -7,7 +7,7 @@ import asyncpg
 import pytest
 from database import SCHEMA, URL, open_pool
 from unit.conftest import say
-from unit.factories import ANA, HELPER
+from unit.factories import ANA, HELPER, added
 from unit.peer import Peer
 from until import until
 
@@ -193,6 +193,7 @@ async def test_a_dropped_listener_listens_again_and_resumes(
     pool: Any, storage: PostgresStorage
 ) -> None:
     await storage.create_thread("acme", Thread(id="t1", scope="acme", created_at=datetime.now(UTC)))
+    await storage.add_member("acme", added("t1", ANA))
     seen: list[int] = []
     heard: list[dict[str, Any]] = []
     resumed = asyncio.Event()
@@ -222,7 +223,7 @@ async def test_a_dropped_listener_listens_again_and_resumes(
             content=[Text(text="back")],
         ),
     )
-    await until(lambda: heard == [{"kind": "idle"}] and seen == [1])
+    await until(lambda: heard == [{"kind": "idle"}] and seen == [2])
     await stop()
     assert await listeners(pool) == []
 
