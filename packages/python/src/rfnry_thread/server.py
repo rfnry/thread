@@ -249,10 +249,19 @@ class Server:
                     await _close(connection, CLOSE_PROTOCOL, "server: malformed frame")
                     break
                 if isinstance(frame, Request):
-                    if frame.method == "signal.send" or len(tasks) >= IN_FLIGHT:
-                        await self._answer(session, frame)
+                    ordered = frame.method in ORDERED
+                    if ordered:
+                        while len(tasks) >= IN_FLIGHT:
+                            await asyncio.wait(tasks, return_when=asyncio.FIRST_COMPLETED)
+                    elif frame.method == "signal.send" or len(tasks) >= IN_FLIGHT:
+                        await self._answer(session, frame, None)
                         continue
-                    task = asyncio.get_running_loop().create_task(self._answer(session, frame))
+                    after = session.last_ordered if ordered else None
+                    task = asyncio.get_running_loop().create_task(
+                        self._answer(session, frame, after)
+                    )
+                    if ordered:
+                        session.last_ordered = task
                     tasks.add(task)
                     task.add_done_callback(tasks.discard)
                 elif isinstance(frame, Notify):
@@ -274,13 +283,13 @@ class Server:
             await session.outbound.drain()
             await session.outbound.close()
 
-    async def _answer(self, session: Session, frame: Request) -> None:
+    async def _answer(
+        self, session: Session, frame: Request, after: asyncio.Task[None] | None
+    ) -> None:
         try:
-            if frame.method in ORDERED:
-                async with session.ordered:
-                    payload = await self._call(session, frame.method, frame.payload)
-            else:
-                payload = await self._call(session, frame.method, frame.payload)
+            if after is not None:
+                await asyncio.wait({after})
+            payload = await self._call(session, frame.method, frame.payload)
         except StorageError as error:
             logger.warning("server: %s failed: %s", frame.method, error)
             session.outbound.put(failure(frame.id, StorageError("server: storage failed")))

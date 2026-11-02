@@ -55,7 +55,7 @@ class Session:
     present: set[str] = field(default_factory=set)
     following: bool = False
     dropped: bool = False
-    ordered: asyncio.Lock = field(default_factory=asyncio.Lock)
+    last_ordered: asyncio.Task[None] | None = None
 
     def push_event(self, event: Event, payload: dict[str, Any]) -> None:
         self.joined[event.thread_id] = event.seq

@@ -591,6 +591,76 @@ async def test_a_leave_sent_right_after_a_join_leaves(storage: PostgresStorage) 
     await bruno.end.close(1000, "")
 
 
+async def test_a_leave_sent_behind_a_full_window_of_requests_still_follows_its_join(
+    storage: PostgresStorage,
+) -> None:
+    server = Server(storage)
+    await server.create_thread("acme", thread_id="t1")
+    await server.add_member("acme", "t1", ANA)
+    ana = await Peer.open(server, ANA)
+    for n in range(63):
+        await ana.end.send_text(
+            encode(Request(id=f"g{n}", method="thread.get", payload={"thread_id": "t1"}))
+        )
+    for name in ("join", "leave"):
+        await ana.end.send_text(
+            encode(Request(id=name, method=f"thread.{name}", payload={"thread_id": "t1"}))
+        )
+    answers: list[str] = []
+    while len(answers) < 65:
+        frame = await ana.frame()
+        if frame["type"] in ("response", "error") and frame["id"] in ("join", "leave"):
+            answers.append(frame["id"])
+        elif frame["type"] in ("response", "error"):
+            answers.append("get")
+    assert [a for a in answers if a != "get"] == ["join", "leave"]
+    session = next(iter(server._hub.sessions))
+    assert "t1" not in session.joined
+    assert "ana" not in [i.id for i in server._hub.state.present("acme", "t1")]
+    await ana.end.close(1000, "")
+
+
+async def test_a_flood_of_ordered_requests_never_has_more_than_the_window_in_flight(
+    storage: PostgresStorage,
+) -> None:
+    server = Server(storage)
+    await server.create_thread("acme", thread_id="t1")
+    await server.add_member("acme", "t1", ANA)
+    join = server._hub.join
+
+    async def slow_join(*args: Any, **kwargs: Any) -> Any:
+        await asyncio.sleep(0.005)
+        return await join(*args, **kwargs)
+
+    server._hub.join = slow_join  # type: ignore[method-assign]
+    answer = server._answer
+    running = peak = 0
+
+    async def counted(*args: Any, **kwargs: Any) -> None:
+        nonlocal running, peak
+        running += 1
+        peak = max(peak, running)
+        try:
+            await answer(*args, **kwargs)
+        finally:
+            running -= 1
+
+    server._answer = counted  # type: ignore[method-assign]
+    ana = await Peer.open(server, ANA)
+    total = 200
+    for n in range(total):
+        await ana.end.send_text(
+            encode(Request(id=f"j{n}", method="thread.join", payload={"thread_id": "t1"}))
+        )
+    answered = 0
+    while answered < total:
+        frame = await ana.frame(10)
+        if frame["type"] in ("response", "error"):
+            answered += 1
+    assert 1 < peak <= 64
+    await ana.end.close(1000, "")
+
+
 async def test_a_leave_during_a_gap_fill_stays_left(storage: PostgresStorage) -> None:
     hub, thread = await setup(storage, events=2)
     session, recorder = open_session(HELPER)
