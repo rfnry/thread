@@ -374,9 +374,11 @@ Leaving the block stores the text written as one message, with the stream's `met
 `finish(metadata=)` adds what is known only at the end, how far the run read, say, merged over the
 stream's. An
 exception inside the block, or a finishing message the server refuses, abandons the stream:
-`StreamEnd` arrives and nothing is stored. The finishing message always arrives before
-`StreamEnd`, so a `StreamEnd` with no message before it means the stream was abandoned. Only text
-streams; media arrives in the message.
+`StreamEnd` arrives and nothing is stored. The finishing message arrives before `StreamEnd`, so a
+`StreamEnd` with no message before it means the stream was abandoned — unless the sender's socket
+dropped: its stream ends then, and the finishing message, whose `client_id` is the stream's id, may
+still follow. A delta may arrive in several pieces that share its `index`: `index` orders a piece
+and never identifies it. Only text streams; media arrives in the message.
 
 ### Steps
 
@@ -528,7 +530,8 @@ what a repeat changes — a signal another replica missed — is told to that re
 missed event announcement costs latency, never an event: resume reads from storage. A missed
 `thread.deleted` or `scope.deleted` notice is not sent again: that replica's connections stay in the
 deleted threads' rooms, and are not handed a thread made again under the same id, until they
-reconnect. A replica whose `LISTEN` connection drops takes another with jittered backoff, listens
+reconnect. A replica that misses an `invited` notice gives no `Invited`, and a follower no `Joined`,
+until the connection follows again. A replica whose `LISTEN` connection drops takes another with jittered backoff, listens
 again and repeats its own state at once, so the others rebuild it. `start()` holds one connection
 from the pool for `LISTEN`; `stop()` gives it back.
 
@@ -962,7 +965,7 @@ reconnect.
 
 Everything the package exports, by role.
 
-- **Serve:** `Server`, with your `authorize` and `redact`; `Connection`; `CLOSE_REFUSED`.
+- **Serve:** `Server`, with your `authorize` and `redact`; `Connection`; `CLOSE_REFUSED`, `CLOSE_PROTOCOL`, `CLOSE_SLOW`.
 - **Take part:** `Client`, `Stream`, `Joined`, `StatusChanged`.
 - **Who and what:** `Identity`, `IdentityLike`, `Thread`, `Member`; parts `Text`, `Image`, `Audio`, `Document`, `Part`, `Content`.
 - **The log:** `Message`, `Step`, `Edit`, `Retract`, `Read`, `MemberAdded`, `MemberRemoved`, `ThreadUpdated`, `Custom`, `Event`; `resolve`.
@@ -972,7 +975,7 @@ Everything the package exports, by role.
 - **Fail loudly:** `ThreadException`, `NotFoundError`, `InputError`, `ConfigurationError`, `ForbiddenError`, `StorageError`, `TransportError`.
 
 The TypeScript package is a client: it exports `connect`, the `Client` and `Stream` classes,
-`resolve`, `CLOSE_REFUSED`, the same error classes, and the types of the identity, parts, events,
+`resolve`, `CLOSE_REFUSED`, `CLOSE_PROTOCOL`, `CLOSE_SLOW`, the same error classes, and the types of the identity, parts, events,
 signals and records above, and nothing of the server, the storage or the tools; `Item` is what a
 listener receives — an event, a signal, a re-join's `Joined` or a `StatusChanged` — `Status` is what
 `client.status` holds, and `ConnectOptions`, `Protocols`, `Listener`, `StreamOptions`,

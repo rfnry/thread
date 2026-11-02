@@ -39,7 +39,7 @@ from rfnry_thread.storage import Storage
 
 logger = logging.getLogger(__name__)
 
-NOTIFY_LIMIT = 7000
+MIRROR_BUDGET = 7000
 PIECE = 500
 
 
@@ -618,7 +618,7 @@ class Hub:
     ) -> None:
         batch: list[dict[str, Any]] = []
         for item in items:
-            if _size({"entries": [*batch, item]}) > NOTIFY_LIMIT and batch:
+            if _size({"entries": [*batch, item]}) > MIRROR_BUDGET and batch:
                 await self._publish(scope, thread_id, {"kind": "refresh", "n": n, "entries": batch})
                 batch = []
             batch.append(item)
@@ -629,7 +629,7 @@ class Hub:
         if not self.linked:
             return
         payload = {"n": n, **signal.model_dump(mode="json")}
-        if _size(payload) <= NOTIFY_LIMIT:
+        if _size(payload) <= MIRROR_BUDGET:
             await self._publish(scope, signal.thread_id, payload)
             return
         if not isinstance(signal, StreamDelta):
@@ -662,7 +662,7 @@ class Hub:
         n = next(self._sent)
         for scope, signal in self.state.own_ends():
             payload = {"n": n, **signal.model_dump(mode="json")}
-            if _size(payload) <= NOTIFY_LIMIT and not await self._notify(
+            if _size(payload) <= MIRROR_BUDGET and not await self._notify(
                 scope, signal.thread_id, payload
             ):
                 return

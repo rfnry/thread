@@ -757,8 +757,8 @@ event and signal of the threads joined, each `Invited`, each re-join's `Joined`,
 `StatusChanged` each time `status` changes; the caller's own are left out unless `include_own`.
 Items wait in the client until read, and the iterator ends when the client closes. Raises the error
 that stopped the client: `ForbiddenError` when a reconnect was refused with HTTP 401 or 403 or
-closed with 1008 before its hello was answered, or the `ForbiddenError` or `ConfigurationError` the
-`headers` function raised.
+closed with 1008 before its hello was answered, the error that answered a refused hello, or the
+`ForbiddenError` or `ConfigurationError` the `headers` function raised.
 
 ### `Client.status`
 
@@ -1074,7 +1074,8 @@ class StreamDelta(BaseModel):
     text: str
 ```
 
-The piece of text at `index` of stream `stream_id`.
+A piece of text of stream `stream_id`. A delta may arrive in several pieces that share its `index`:
+`index` orders a piece and never identifies it.
 
 ### `StreamEnd`
 
@@ -1086,8 +1087,9 @@ class StreamEnd(BaseModel):
     stream_id: str
 ```
 
-Stream `stream_id` ended. Its finishing message always arrives first, so a `StreamEnd` with no
-message before it means the stream was abandoned.
+Stream `stream_id` ended. Its finishing message arrives first, so a `StreamEnd` with no message
+before it means the stream was abandoned — unless the sender's socket dropped, when the finishing
+message, whose `client_id` is the stream's id, may still follow.
 
 ### `Cancel`
 
@@ -1756,8 +1758,8 @@ A participant's connection, made by `connect`; the constructor alone opens no so
 `'reconnecting'` from a dropped socket until it is back and every thread joined is joined again, and
 `'closed'` for good; listeners hear each change as a `StatusChanged`. `closed` resolves when the
 client stops for good: `null` after `close()`, or the error that stopped it, a `ForbiddenError` when
-a reconnect is closed with 1008 before its hello is answered, or the `ForbiddenError` or
-`ConfigurationError` the `protocols` function throws on a reconnect; anything else it throws is a
+a reconnect is closed with 1008 before its hello is answered, the error that answered a refused
+hello, or the `ForbiddenError` or `ConfigurationError` the `protocols` function throws on a reconnect; anything else it throws is a
 failed attempt, retried with backoff. Every method that talks to the server raises `TransportError`
 when the client is closed or not connected, except those that write an event, which retry across
 reconnects and raise it when not acknowledged within a minute, and raises again, with its class and
@@ -2493,7 +2495,8 @@ type StreamDelta = {
 }
 ```
 
-The piece of text at `index` of stream `stream_id`.
+A piece of text of stream `stream_id`. A delta may arrive in several pieces that share its `index`:
+`index` orders a piece and never identifies it.
 
 ### `StreamEnd`
 
@@ -2501,8 +2504,9 @@ The piece of text at `index` of stream `stream_id`.
 type StreamEnd = { thread_id: string; sender: Identity; kind: 'stream.end'; stream_id: string }
 ```
 
-Stream `stream_id` ended. Its finishing message always arrives first, so a `StreamEnd` with no
-message before it means the stream was abandoned.
+Stream `stream_id` ended. Its finishing message arrives first, so a `StreamEnd` with no message
+before it means the stream was abandoned — unless the sender's socket dropped, when the finishing
+message, whose `client_id` is the stream's id, may still follow.
 
 ### `Cancel`
 

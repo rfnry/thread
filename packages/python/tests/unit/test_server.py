@@ -48,9 +48,27 @@ async def test_serve_refuses_the_system_role_and_an_empty_scope_before_reading(
     with pytest.raises(InputError, match="^server: a scope is required$"):
         await server.serve(theirs, identity=ANA, scope="")
     with pytest.raises(ConfigurationError, match="^server: 'system' is the library's role"):
-        server._attach(SYSTEM, "acme")
+        await server.connect(identity=SYSTEM, scope="acme")
     with pytest.raises(InputError, match="^server: a scope is required$"):
-        server._attach(ANA, " ")
+        await server.connect(identity=ANA, scope=" ")
+
+
+async def test_attach_trusts_the_identity_connect_already_checked(
+    server: Server, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    checked: list[str] = []
+    original = server_module._identity
+
+    def counting(value: object) -> object:
+        checked.append("identity")
+        return original(value)  # type: ignore[arg-type]
+
+    monkeypatch.setattr(server_module, "_identity", counting)
+    client = await server.connect(identity=ANA, scope="acme")
+    try:
+        assert checked == ["identity", "identity"]
+    finally:
+        await client.close()
 
 
 @pytest.mark.parametrize(

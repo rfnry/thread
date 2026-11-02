@@ -901,3 +901,14 @@ async def test_an_anchor_object_without_last_seq_is_refused(server: Server) -> N
         await ana.call("thread.list", before=anchor, limit=50)
     listed = await ana.call("thread.list", before={**anchor, "last_seq": 0}, limit=50)
     assert listed["threads"] == []
+
+
+async def test_an_anchor_without_last_seq_is_refused_naming_the_missing_field(
+    server: Server,
+) -> None:
+    ana = await room(server)
+    anchor = {"id": "t1", "created_at": "2026-01-01T00:00:00Z"}
+    with pytest.raises(
+        InputError, match="^server: invalid thread.list payload: field required: last_seq$"
+    ):
+        await ana.call("thread.list", before=anchor)

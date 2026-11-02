@@ -74,7 +74,7 @@ class _Anchor(_Args):
 
 
 class _List(_Args):
-    before: str | _Anchor | None = None
+    before: _Anchor | str | None = None
     limit: int = 50
     order: Order = "created"
     preview: bool = False
@@ -141,9 +141,11 @@ def _args[T: _Args](model: type[T], method: str, payload: dict[str, Any]) -> T:
     try:
         return model.model_validate(payload)
     except ValidationError as exc:
-        raise InputError(
-            f"server: invalid {method} payload: {exc.errors(include_url=False)[0]['msg'].lower()}"
-        ) from exc
+        first = exc.errors(include_url=False)[0]
+        reason = str(first["msg"]).lower()
+        if first["type"] == "missing":
+            reason = f"{reason}: {first['loc'][-1]}"
+        raise InputError(f"server: invalid {method} payload: {reason}") from exc
 
 
 def _dump(model: BaseModel) -> dict[str, Any]:
@@ -218,11 +220,11 @@ class Server:
             return
         await self._run(connection, who, scope)
 
-    def _attach(self, identity: IdentityLike, scope: str) -> End:
-        who = _identity(identity)
-        _scope(scope)
+    def _attach(self, identity: Identity, scope: str) -> End:
         ours, theirs = pipe()
-        task = asyncio.get_running_loop().create_task(self.serve(theirs, identity=who, scope=scope))
+        task = asyncio.get_running_loop().create_task(
+            self.serve(theirs, identity=identity, scope=scope)
+        )
         self._tasks.add(task)
         task.add_done_callback(self._tasks.discard)
         return ours
