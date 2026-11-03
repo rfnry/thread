@@ -9,7 +9,7 @@ from contextlib import asynccontextmanager, contextmanager
 from dataclasses import dataclass, field
 from typing import Any
 
-from rfnry_thread.errors import ForbiddenError, NotFoundError, ThreadException
+from rfnry_thread.errors import ForbiddenError, NotFoundError
 from rfnry_thread.models import (
     SIGNALS,
     SYSTEM,
@@ -121,6 +121,7 @@ class Hub:
         self._watching: list[set[tuple[str, str | None]]] = []
         self._sent = itertools.count(1)
         self._shielded: set[asyncio.Future[None]] = set()
+        self._sending: set[asyncio.Task[None]] = set()
 
     async def shielded(self, work: Coroutine[Any, Any, None]) -> None:
         await asyncio.shield(self._started(work))
@@ -130,6 +131,16 @@ class Hub:
         self._shielded.add(task)
         task.add_done_callback(self._shielded.discard)
         return task
+
+    def _queued(self, send: Coroutine[Any, Any, None]) -> asyncio.Task[None]:
+        task = asyncio.Task(send, loop=asyncio.get_running_loop(), eager_start=True)
+        self._sending.add(task)
+        task.add_done_callback(self._sending.discard)
+        return task
+
+    async def drain(self) -> None:
+        if self._sending:
+            await asyncio.wait(list(self._sending))
 
     def _lock(self, scope: str, thread_id: str) -> asyncio.Lock:
         lock = self._locks.get((scope, thread_id))
@@ -183,12 +194,7 @@ class Hub:
                 or (head is not None and _level(room, thread_id, *head))
             ):
                 continue
-            try:
-                await self._catch_up(scope, thread_id)
-            except Exception as error:
-                logger.warning(
-                    "hub: catching thread %r up from storage failed: %s", thread_id, error
-                )
+            await self._catch_up(scope, thread_id)
 
     async def _catch_up(self, scope: str, thread_id: str, gone_by: Identity = SYSTEM) -> None:
         async with self._locked(scope, thread_id) as after:
@@ -429,7 +435,16 @@ class Hub:
             await self._depart(session, thread_id)
 
     async def deliver(self, scope: str, event: Event, epoch: int) -> None:
-        await self._heard(scope, event.thread_id, event.seq, epoch, event)
+        try:
+            await self._heard(scope, event.thread_id, event.seq, epoch, event)
+        finally:
+            self._queued(self._hint(scope, event, epoch))
+
+    async def _hint(self, scope: str, event: Event, epoch: int) -> None:
+        try:
+            await self.storage.hint(scope, event.thread_id, event.seq, epoch)
+        except Exception as error:
+            logger.warning("hub: hinting other replicas failed: %s", error)
 
     async def on_event(self, scope: str, thread_id: str, seq: int, epoch: int) -> None:
         try:
@@ -493,7 +508,7 @@ class Hub:
             ):
                 return
             n = self._said(session, signal)
-        await self._mirror(session.scope, signal, n)
+        self._mirror(session.scope, signal, n)
 
     def _said(self, session: Session, signal: Signal) -> int:
         key = (signal.thread_id, getattr(signal, "stream_id", ""))
@@ -578,7 +593,7 @@ class Hub:
             if self._local[key] > 1:
                 return
             n = self._said(session, present)
-        await self._mirror(session.scope, present, n)
+        self._mirror(session.scope, present, n)
 
     async def _depart(self, session: Session, thread_id: str) -> None:
         key = (session.scope, thread_id, session.identity.id)
@@ -592,7 +607,7 @@ class Hub:
     async def added(
         self, scope: str, thread: Thread, sender: Identity, identity: Identity, seq: int
     ) -> None:
-        await self._publish(
+        self._publish(
             scope,
             thread.id,
             {
@@ -663,7 +678,7 @@ class Hub:
 
     async def deleted(self, scope: str, thread_id: str, epoch: int, sender: Identity) -> None:
         signal = ThreadDeleted(thread_id=thread_id, sender=sender)
-        await self._publish(
+        self._publish(
             scope, thread_id, {"n": next(self._sent), "e": epoch, **signal.model_dump(mode="json")}
         )
         await self._gone(scope, signal, epoch)
@@ -676,7 +691,7 @@ class Hub:
                 after.emptied.update(self._wipe(scope, signal))
 
     async def scope_deleted(self, scope: str, sender: Identity) -> None:
-        await self._publish(
+        self._publish(
             scope, "", {"kind": "scope.deleted", "sender": sender.model_dump(mode="json")}
         )
         await self._scope_gone(scope, sender)
@@ -710,7 +725,7 @@ class Hub:
     async def _emptied(self, scope: str, emptied: dict[str, list[dict[str, Any]]]) -> None:
         head = {"kind": "refresh", "n": next(self._sent)}
         for thread_id, items in emptied.items():
-            await self._repeat(scope, thread_id, head, items)
+            self._repeat(scope, thread_id, head, items)
 
     async def drop(self, session: Session) -> None:
         session.dropped = True
@@ -722,26 +737,26 @@ class Hub:
         n = next(self._sent)
         for (scope, thread_id), items in self.state.own().items():
             head = self._stamped(scope, thread_id, {"kind": "refresh", "n": n})
-            await self._repeat(scope, thread_id, head, items)
+            self._repeat(scope, thread_id, head, items)
 
-    async def _repeat(
+    def _repeat(
         self, scope: str, thread_id: str, head: dict[str, Any], items: list[dict[str, Any]]
     ) -> None:
         batch: list[dict[str, Any]] = []
         for item in items:
             if _size({"entries": [*batch, item]}) > MIRROR_BUDGET and batch:
-                await self._publish(scope, thread_id, {**head, "entries": batch})
+                self._publish(scope, thread_id, {**head, "entries": batch})
                 batch = []
             batch.append(item)
         if batch:
-            await self._publish(scope, thread_id, {**head, "entries": batch})
+            self._publish(scope, thread_id, {**head, "entries": batch})
 
-    async def _mirror(self, scope: str, signal: Signal, n: int) -> None:
+    def _mirror(self, scope: str, signal: Signal, n: int) -> None:
         if not self.linked:
             return
         payload = self._stamped(scope, signal.thread_id, {"n": n, **signal.model_dump(mode="json")})
         if _size(payload) <= MIRROR_BUDGET:
-            await self._publish(scope, signal.thread_id, payload)
+            self._publish(scope, signal.thread_id, payload)
             return
         if not isinstance(signal, StreamDelta):
             logger.warning(
@@ -749,12 +764,12 @@ class Hub:
             )
             return
         for start in range(0, len(signal.text), PIECE):
-            piece = {**payload, "text": signal.text[start : start + PIECE]}
-            await self._publish(scope, signal.thread_id, piece)
+            piece = {**payload, "n": next(self._sent), "text": signal.text[start : start + PIECE]}
+            self._publish(scope, signal.thread_id, piece)
 
     async def marked(self, origin: Session, signal: Marked) -> None:
         self._marked_here(origin.scope, signal, origin)
-        await self._publish(origin.scope, signal.thread_id, signal.model_dump(mode="json"))
+        self._publish(origin.scope, signal.thread_id, signal.model_dump(mode="json"))
 
     def _marked_here(self, scope: str, signal: Marked, origin: Session | None = None) -> None:
         payload = signal.model_dump(mode="json")
@@ -771,24 +786,22 @@ class Hub:
             return
         self.linked = False
         n = next(self._sent)
+        ends: list[asyncio.Task[None]] = []
         for scope, signal in self.state.own_ends():
             payload = {"n": n, **signal.model_dump(mode="json")}
-            if _size(payload) <= MIRROR_BUDGET and not await self._notify(
-                scope, signal.thread_id, payload
-            ):
-                return
+            if _size(payload) <= MIRROR_BUDGET:
+                ends.append(self._queued(self._notify(scope, signal.thread_id, payload)))
+        await asyncio.gather(*ends)
 
-    async def _publish(self, scope: str, thread_id: str, payload: dict[str, Any]) -> None:
+    def _publish(self, scope: str, thread_id: str, payload: dict[str, Any]) -> None:
         if self.linked:
-            await self._notify(scope, thread_id, payload)
+            self._queued(self._notify(scope, thread_id, payload))
 
-    async def _notify(self, scope: str, thread_id: str, payload: dict[str, Any]) -> bool:
+    async def _notify(self, scope: str, thread_id: str, payload: dict[str, Any]) -> None:
         try:
             await self.storage.publish(scope, thread_id, {"o": self.origin, **payload})
-        except ThreadException as error:
+        except Exception as error:
             logger.warning("hub: mirroring to other replicas failed: %s", error)
-            return False
-        return True
 
     async def on_signal(self, scope: str, thread_id: str, payload: dict[str, Any]) -> None:
         origin = payload.pop("o", None)

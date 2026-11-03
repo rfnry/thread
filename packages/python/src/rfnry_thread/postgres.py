@@ -6,7 +6,7 @@ import random
 from collections.abc import AsyncIterator, Awaitable, Callable, Sequence
 from contextlib import asynccontextmanager
 from datetime import datetime
-from typing import Any, cast
+from typing import Any, Literal, cast
 
 from rfnry_thread import migrations
 from rfnry_thread.errors import (
@@ -36,10 +36,13 @@ from rfnry_thread.storage import PREVIEW_DEPTH, UNREAD_CAP, OnEvent, OnResume, O
 EVENTS_PREFIX = "thread_events_"
 SIGNALS_PREFIX = "thread_signals_"
 NOTIFY_LIMIT = 7900
+NOTIFY_TIMEOUT = 10.0
 RELISTEN = 0.5
 RELISTEN_CAP = 30.0
 _THREAD = "scope, id, metadata, created_at, history, epoch"
 _MAKE = "scope, id, metadata, created_at, history"
+_Channel = Literal["events", "signals"]
+_Notice = tuple[_Channel, str, asyncio.Future[None]]
 
 
 def _json(value: Any) -> Any:
@@ -120,13 +123,12 @@ class PostgresStorage:
         self._pool = pool
         self._names: tuple[str, str] | None = None
         self._texts: str | None = None
+        self._outgoing: list[_Notice] = []
+        self._flushing: asyncio.Task[None] | None = None
 
-    async def _channels(self, conn: Any = None) -> tuple[str, str]:
+    async def _channels(self) -> tuple[str, str]:
         if self._names is None:
-            if conn is None:
-                async with self._guard("channels"), self._pool.acquire() as held:
-                    schema = await held.fetchval("SELECT current_schema()")
-            else:
+            async with self._guard("channels"), self._pool.acquire() as conn:
                 schema = await conn.fetchval("SELECT current_schema()")
             if schema is None:
                 raise StorageError("postgres: no schema on the search_path exists")
@@ -168,9 +170,7 @@ class PostgresStorage:
                 thread.history,
             )
             if row["created"] and creator is not None:
-                stored = await self._append(
-                    conn, scope, creator, int(row["last_seq"]), int(row["epoch"])
-                )
+                stored = await self._append(conn, scope, creator, int(row["last_seq"]))
                 await self._admitted(conn, scope, creator.created_at, stored)
         return _thread(row), bool(row["created"])
 
@@ -440,7 +440,7 @@ class PostgresStorage:
             if locked is None:
                 return None
             _unchanged(updated.thread_id, locked, epoch)
-            stored = await self._append(conn, scope, updated, *locked)
+            stored = await self._append(conn, scope, updated, locked[0])
             row = await conn.fetchrow(
                 "UPDATE thread_threads SET metadata = $3::jsonb WHERE scope = $1 AND id = $2 "
                 f"RETURNING {_THREAD}",
@@ -476,7 +476,7 @@ class PostgresStorage:
             )
             if existing is not None:
                 return Member.model_validate(_json(existing)), None
-            stored = await self._append(conn, scope, added, *locked)
+            stored = await self._append(conn, scope, added, locked[0])
             member = await self._admitted(conn, scope, added.created_at, stored)
         return member, stored
 
@@ -499,7 +499,7 @@ class PostgresStorage:
                 return None
             member = Member.model_validate(_json(body))
             stamped = removed.model_copy(update={"identity": member.identity})
-            stored = await self._append(conn, scope, stamped, *locked)
+            stored = await self._append(conn, scope, stamped, locked[0])
         return stored
 
     async def _locked(self, conn: Any, scope: str, thread_id: str) -> tuple[int, int] | None:
@@ -620,10 +620,9 @@ class PostgresStorage:
             )
             if existing is not None:
                 return _event(existing), False
-            return await self._append(conn, scope, event, *locked), True
+            return await self._append(conn, scope, event, locked[0]), True
 
-    async def _append[E: Event](self, conn: Any, scope: str, event: E, last: int, epoch: int) -> E:
-        events_channel, _ = await self._channels(conn)
+    async def _append[E: Event](self, conn: Any, scope: str, event: E, last: int) -> E:
         stored = cast(E, event.model_copy(update={"seq": last + 1}))
         await conn.execute(
             "INSERT INTO thread_events (scope, thread_id, seq, id, kind, author_id, client_id, body) "
@@ -653,11 +652,6 @@ class PostgresStorage:
                 stored.thread_id,
                 stored.seq,
             )
-        await conn.execute(
-            "SELECT pg_notify($1, $2)",
-            events_channel,
-            json.dumps({"s": scope, "t": stored.thread_id, "q": stored.seq, "e": epoch}),
-        )
         return stored
 
     async def list_events(
@@ -945,6 +939,52 @@ class PostgresStorage:
             raise StorageError(
                 f"postgres: a notification is at most {NOTIFY_LIMIT} bytes; this one is {size}"
             )
-        _, signals_channel = await self._channels()
-        async with self._guard("publish"), self._pool.acquire() as conn:
-            await conn.execute("SELECT pg_notify($1, $2)", signals_channel, text)
+        await self._send("signals", text)
+
+    async def hint(self, scope: str, thread_id: str, seq: int, epoch: int) -> None:
+        await self._send("events", json.dumps({"s": scope, "t": thread_id, "q": seq, "e": epoch}))
+
+    async def _send(self, channel: _Channel, text: str) -> None:
+        loop = asyncio.get_running_loop()
+        sent = loop.create_future()
+        self._outgoing.append((channel, text, sent))
+        if self._flushing is None or self._flushing.done():
+            self._flushing = asyncio.Task(self._flush(), loop=loop, eager_start=True)
+        await sent
+
+    async def _flush(self) -> None:
+        batch: list[_Notice] = []
+        try:
+            while self._outgoing:
+                batch, self._outgoing = self._outgoing, []
+                failed = await self._group(batch)
+                for _, _, sent in batch:
+                    if sent.done():
+                        continue
+                    if failed is None:
+                        sent.set_result(None)
+                    else:
+                        sent.set_exception(failed)
+        except BaseException:
+            for _, _, sent in [*batch, *self._outgoing]:
+                sent.cancel()
+            self._outgoing = []
+            raise
+
+    async def _group(self, batch: list[_Notice]) -> Exception | None:
+        try:
+            async with asyncio.timeout(NOTIFY_TIMEOUT):
+                events, signals = await self._channels()
+                names = {"events": events, "signals": signals}
+                async with self._guard("publish"), self._pool.acquire() as conn, conn.transaction():
+                    await conn.executemany(
+                        "SELECT pg_notify($1, $2)",
+                        [(names[channel], text) for channel, text, _ in batch],
+                    )
+        except TimeoutError:
+            return StorageError(
+                f"postgres: storage rejected publish: no answer within {NOTIFY_TIMEOUT:g} s"
+            )
+        except Exception as error:
+            return error
+        return None

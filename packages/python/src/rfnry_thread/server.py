@@ -460,10 +460,11 @@ class Server:
             with contextlib.suppress(asyncio.CancelledError):
                 await self._refresher
             self._refresher = None
-        if self._stop is not None:
-            try:
-                await self._hub.unlink()
-            finally:
+        try:
+            await self._hub.unlink()
+            await self._hub.drain()
+        finally:
+            if self._stop is not None:
                 await self._stop()
                 self._stop = None
                 await self._hub.sweep(forget=True)
@@ -472,13 +473,17 @@ class Server:
         while True:
             await asyncio.sleep(REFRESH)
             try:
-                await asyncio.wait_for(self._hub.catch_up(), REFRESH)
-            except TimeoutError:
-                logger.warning(
-                    "server: a catch-up pass took longer than %g s and was stopped", REFRESH
-                )
-            await self._hub.announce()
-            await self._hub.sweep()
+                await self._tick()
+            except Exception as error:
+                logger.warning("server: a refresh pass failed: %s", error)
+
+    async def _tick(self) -> None:
+        try:
+            await asyncio.wait_for(self._hub.catch_up(), REFRESH)
+        except TimeoutError:
+            logger.warning("server: a catch-up pass took longer than %g s and was stopped", REFRESH)
+        await self._hub.announce()
+        await self._hub.sweep()
 
     async def create_thread(
         self,

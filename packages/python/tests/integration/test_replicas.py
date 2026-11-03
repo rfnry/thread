@@ -1,5 +1,6 @@
 import asyncio
 import contextlib
+import logging
 from collections.abc import AsyncIterator, Awaitable, Callable
 from datetime import UTC, datetime
 from typing import Any
@@ -10,12 +11,13 @@ from database import SCHEMA, URL, open_pool
 from unit.conftest import say
 from unit.factories import ANA, BRUNO, HELPER, added
 from unit.peer import Peer
-from unit.writes import admit, append
+from unit.writes import admit, epoch
 from until import until
 
+from integration.pools import Stalling
 from rfnry_thread import postgres, server as server_module, state
 from rfnry_thread.errors import StorageError
-from rfnry_thread.models import Identity, Message, Part, Text, Thread
+from rfnry_thread.models import Identity, Part, Text, Thread
 from rfnry_thread.postgres import PostgresStorage
 from rfnry_thread.server import Server
 
@@ -500,6 +502,180 @@ async def test_a_second_replica_receives_only_the_redacted_form(storage: Postgre
         await far_pool.close()
 
 
+class Unhinted(PostgresStorage):
+    def __init__(self, pool: Any) -> None:
+        super().__init__(pool)
+        self.tried: list[tuple[str, str, int, int]] = []
+
+    async def hint(self, scope: str, thread_id: str, seq: int, epoch: int) -> None:
+        self.tried.append((scope, thread_id, seq, epoch))
+        raise StorageError("postgres: storage rejected publish: the notification queue is full")
+
+
+async def test_a_write_succeeds_when_its_hint_cannot_be_sent(
+    storage: PostgresStorage, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    monkeypatch.setattr(server_module, "REFRESH", 0.3)
+    near_pool = await open_pool()
+    unhinted = Unhinted(near_pool)
+    near, far = Server(unhinted), Server(storage)
+    await near.start()
+    await far.start()
+    try:
+        ana, helper = await room(near, far)
+        unhinted.tried.clear()
+        with caplog.at_level(logging.WARNING):
+            sent = await say(ana, "t1", "unhinted")
+            assert (await ana.push("message", timeout=1.0))["id"] == sent["id"]
+            pushed = await helper.push("message", timeout=2.0)
+        assert pushed["id"] == sent["id"] and pushed["seq"] == sent["seq"]
+        thread = await storage.get_thread("acme", "t1")
+        assert thread is not None
+        assert unhinted.tried == [("acme", "t1", sent["seq"], thread.epoch)]
+        assert (
+            "hub: hinting other replicas failed: postgres: storage rejected publish: "
+            "the notification queue is full"
+        ) in caplog.text
+    finally:
+        await near.stop()
+        await far.stop()
+        await asyncio.wait_for(near_pool.close(), 5)
+
+
+async def test_a_write_is_answered_while_its_hint_cannot_be_sent(
+    pool: Any, storage: PostgresStorage
+) -> None:
+    stalling = Stalling(pool)
+    near, far = Server(PostgresStorage(stalling)), Server(storage)
+    await near.start()
+    await far.start()
+    try:
+        ana, helper = await room(near, far)
+        stalling.stall()
+        sent = await asyncio.wait_for(say(ana, "t1", "answered"), 1.0)
+        assert (await ana.push("message", timeout=1.0))["id"] == sent["id"]
+        await until(lambda: stalling.holding)
+        assert await helper.quiet(0.3) == []
+        stalling.resume()
+        assert (await helper.push("message", timeout=1.0))["id"] == sent["id"]
+    finally:
+        stalling.resume()
+        await near.stop()
+        await far.stop()
+
+
+async def test_no_request_waits_on_a_notice(pool: Any, storage: PostgresStorage) -> None:
+    stalling = Stalling(pool)
+    near, far = Server(PostgresStorage(stalling)), Server(storage)
+    await near.start()
+    await far.start()
+    try:
+        ana, helper = await room(near, far)
+        stalling.stall()
+        sent = await asyncio.wait_for(say(ana, "t1", "first"), 1.0)
+        await until(lambda: stalling.holding)
+        for step in (
+            {"method": "thread.create", "thread_id": "t2"},
+            {"method": "member.add", "thread_id": "t2", "identity": BRUNO.model_dump(mode="json")},
+            {"method": "thread.update", "thread_id": "t2", "metadata": {"n": 1}},
+            {"method": "member.remove", "thread_id": "t2", "identity_id": "bruno"},
+            {"method": "signal.send", "thread_id": "t1", "kind": "working", "label": "Busy"},
+            {"method": "thread.mark", "thread_id": "t1", "seq": sent["seq"]},
+            {"method": "thread.leave", "thread_id": "t1"},
+            {"method": "thread.delete", "thread_id": "t2"},
+        ):
+            await asyncio.wait_for(ana.call(**step), 1.0)
+        assert stalling.holding
+        stalling.resume()
+        assert (await helper.push("message", timeout=1.0))["id"] == sent["id"]
+        assert (await helper.push("left", timeout=1.0))["sender"]["id"] == "ana"
+    finally:
+        stalling.resume()
+        await near.stop()
+        await far.stop()
+
+
+async def test_a_stop_right_after_a_write_still_hints_it(storage: PostgresStorage) -> None:
+    near_pool = await open_pool()
+    stalling = Stalling(near_pool)
+    near, far = Server(PostgresStorage(stalling)), Server(storage)
+    await near.start()
+    await far.start()
+    try:
+        helper = await Peer.open(far, HELPER)
+        await near.create_thread("acme", "t1")
+        await near.add_member("acme", "t1", HELPER)
+        await helper.call("thread.join", thread_id="t1")
+        await helper.quiet()
+        stalling.stall()
+        await near.update_thread("acme", "t1", {"last": True})
+        stopping = asyncio.ensure_future(near.stop())
+        await until(lambda: stalling.holding)
+        await asyncio.sleep(0.1)
+        assert not stopping.done()
+        stalling.resume()
+        await asyncio.wait_for(stopping, 2.0)
+        await asyncio.wait_for(near_pool.close(), 5)
+        assert (await helper.push("thread_updated", timeout=1.0))["metadata"] == {"last": True}
+    finally:
+        stalling.resume()
+        await near.stop()
+        await far.stop()
+        await asyncio.wait_for(near_pool.close(), 5)
+
+
+async def test_a_stop_while_writes_go_on_and_groups_stall_returns_within_its_bound(
+    pool: Any, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(postgres, "NOTIFY_TIMEOUT", 0.3)
+    stalling = Stalling(pool)
+    near = Server(PostgresStorage(stalling))
+    await near.start()
+    writing = asyncio.Event()
+    writing.set()
+
+    async def writer(thread_id: str) -> None:
+        while writing.is_set():
+            stalling.stall()
+            await near.update_thread("acme", thread_id, {"at": thread_id})
+
+    for n in range(4):
+        await near.create_thread("acme", f"w{n}")
+    writers = [asyncio.ensure_future(writer(f"w{n}")) for n in range(4)]
+    try:
+        await asyncio.sleep(0.2)
+        loop = asyncio.get_running_loop()
+        started = loop.time()
+        await asyncio.wait_for(near.stop(), 3.0)
+        assert loop.time() - started < 2 * 0.3 + 0.3
+        assert writers and not any(task.done() for task in writers)
+    finally:
+        writing.clear()
+        await asyncio.gather(*writers)
+        stalling.resume()
+        await near.stop()
+
+
+async def test_a_server_never_started_still_hints_its_writes(storage: PostgresStorage) -> None:
+    writer_pool = await open_pool()
+    near, writer = Server(storage), Server(PostgresStorage(writer_pool))
+    await near.start()
+    try:
+        ana = await Peer.open(near, ANA)
+        await ana.call("thread.create", thread_id="t1")
+        await ana.call("member.add", thread_id="t1", identity=HELPER.model_dump(mode="json"))
+        await ana.call("thread.join", thread_id="t1")
+        await ana.quiet()
+        helper = await Peer.open(writer, HELPER)
+        sent = await say(helper, "t1", "from a writer")
+        assert (await ana.push("message", timeout=1.0))["id"] == sent["id"]
+        await writer.update_thread("acme", "t1", {"written": True})
+        assert (await ana.push("thread_updated", timeout=1.0))["metadata"] == {"written": True}
+    finally:
+        await near.stop()
+        await asyncio.wait_for(writer_pool.close(), 5)
+
+
 async def test_signals_are_mirrored_through_notify(replicas: tuple[Server, Server]) -> None:
     ana, helper = await room(*replicas)
     await helper.call("signal.send", thread_id="t1", kind="working", label="Reading")
@@ -579,18 +755,7 @@ async def test_a_dropped_listener_listens_again_and_resumes(
     await relistened(pool, killed, 1)
     await asyncio.wait_for(resumed.wait(), 5.0)
     await storage.publish("acme", "t1", {"kind": "idle"})
-    await append(
-        storage,
-        "acme",
-        Message(
-            id="m1",
-            thread_id="t1",
-            author=ANA,
-            created_at=datetime.now(UTC),
-            client_id="c1",
-            content=[Text(text="back")],
-        ),
-    )
+    await storage.hint("acme", "t1", 2, await epoch(storage, "acme", "t1"))
     await until(lambda: heard == [{"kind": "idle"}] and seen == [2])
     await stop()
     assert await listeners(pool) == []
@@ -633,18 +798,7 @@ async def test_what_a_listener_hears_while_listening_again_is_passed_on_after_on
         relistening.set()
         await terminate(pool, 1)
         await asyncio.wait_for(halfway.wait(), 5.0)
-        await append(
-            storage,
-            "acme",
-            Message(
-                id="m1",
-                thread_id="t1",
-                author=ANA,
-                created_at=datetime.now(UTC),
-                client_id="c1",
-                content=[Text(text="while listening again")],
-            ),
-        )
+        await storage.hint("acme", "t1", 2, await epoch(storage, "acme", "t1"))
         await asyncio.sleep(0.3)
         heard.set()
         await until(lambda: len(order) == 2, timeout=5.0)

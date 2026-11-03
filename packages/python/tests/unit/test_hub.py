@@ -897,7 +897,7 @@ async def test_the_ends_a_silent_replica_sends_late_are_told_once(
     assert told == [[("stream.end", "helper"), ("idle", "helper"), ("left", "helper")], [], []]
 
 
-async def test_unlinking_stops_at_the_first_failed_publish(
+async def test_unlinking_sends_every_end_at_once_and_logs_each_that_fails(
     storage: PostgresStorage, caplog: pytest.LogCaptureFixture
 ) -> None:
     hub, thread = await setup(storage)
@@ -905,16 +905,26 @@ async def test_unlinking_stops_at_the_first_failed_publish(
         session, _ = open_session(identity)
         await hub.join(session, thread, None)
     attempts: list[dict[str, Any]] = []
+    closed = asyncio.Event()
 
     async def closing(scope: str, thread_id: str, payload: dict[str, Any]) -> None:
         attempts.append(payload)
+        await closed.wait()
         raise StorageError("postgres: storage rejected publish: pool is closing")
 
     storage.publish = closing  # type: ignore[method-assign]
     hub.linked = True
     with caplog.at_level(logging.WARNING, logger="rfnry_thread.hub"):
-        await hub.unlink()
-    assert len(attempts) == 1 and len(caplog.records) == 1 and not hub.linked
+        unlinking = asyncio.ensure_future(hub.unlink())
+        await until(lambda: len(attempts) == 3)
+        assert not unlinking.done() and not hub.linked
+        closed.set()
+        await asyncio.wait_for(unlinking, 2.0)
+    assert sorted(p["sender"]["id"] for p in attempts) == ["ana", "bruno", "helper"]
+    assert [r.getMessage() for r in caplog.records] == [
+        "hub: mirroring to other replicas failed: postgres: storage rejected publish: "
+        "pool is closing"
+    ] * 3
 
 
 async def test_a_leave_sent_right_after_a_join_leaves(storage: PostgresStorage) -> None:

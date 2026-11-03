@@ -543,11 +543,19 @@ await server.start()
 await server.stop()
 ```
 
-An event is stored and announced in one transaction; every replica with a connection in that
-thread reads it by `seq`. Signals are delivered on the sender's replica and mirrored to the others.
-Each replica keeps who is present, working and streaming, and repeats its own every ten seconds;
-what a repeat changes — a signal another replica missed — is told to that replica's connections. A
-missed event announcement costs latency, never an event: resume reads from storage.
+An event is stored, handed to the connections of the replica that stored it, and then hinted to the
+others once its write has committed; every replica with a connection in that thread reads it from
+storage by `seq`. The hint stays out of the write, so a write never holds Postgres's notification
+lock through its commit and never fails because the notification queue is full: a hint that cannot
+be sent is logged, the write stands, and the others catch the thread up at their next tick. No write
+and no request waits on a notice: hints, mirrored signals, invitations, marks and deletions are
+queued to go out, and the caller is answered at once. Each replica sends its hints and mirrored
+signals in groups, one transaction per group, in the order it sent them: at rest each goes out at
+once, and under load the groups grow. A group not sent within ten seconds fails, and the next one
+goes out. Signals are delivered on the sender's replica and mirrored to the others. Each replica
+keeps who is present, working and streaming, and repeats its own every ten seconds; what a repeat
+changes — a signal another replica missed — is told to that replica's connections. A missed hint
+costs latency, never an event: resume reads from storage.
 
 A notice about a thread carries its epoch, and every replica catches each thread its connections
 have open up from storage: on a notice for it, every ten seconds for all of them in one read, on
@@ -560,11 +568,11 @@ is dropped. Otherwise they are sent what they missed, and a member removed meanw
 `MemberRemoved` and leaves. A lost notice costs at most ten seconds, never an event; the
 `thread.deleted` and `scope.deleted` notices only act sooner. A read that fails is tried again by
 whatever next reaches the thread, a ten-second pass leaves a thread still busy with a catch-up, a
-join or a write to the next one, and a pass still running after ten seconds is stopped and started
-over at the next. Give the pool a `command_timeout`, so a read the database never
-answers ends. A replica that misses an `invited` notice gives no `Invited`, and a follower no
-`Joined`, until the connection follows again. `start()` holds one connection from the pool for
-`LISTEN`; `stop()` gives it back.
+join or a write to the next one, a pass still running after ten seconds is stopped and started
+over at the next, and a pass that fails is logged and the next one runs. Give the pool a
+`command_timeout`, so a read the database never answers ends. A replica that misses an `invited`
+notice gives no `Invited`, and a follower no `Joined`, until the connection follows again. `start()`
+holds one connection from the pool for `LISTEN`; `stop()` gives it back.
 
 A replica that goes away ends, for the others' connections, what its own had announced, as if they
 had dropped: `StreamEnd` for each open stream, `Idle` for the work, and `Left` for each identity no
@@ -972,8 +980,13 @@ row. The log is append-only: an event is never updated or deleted on its own, on
 or its scope. `create_thread` (with its creator), `add_member`, `remove_member` and `update_thread`
 take the event they log and write the row and the event in one transaction: a storage of your own
 must do the same, and its signatures changed from the earlier releases (a breaking change for it).
-Code that goes through `Server` is unaffected; code that calls `PostgresStorage` directly is
-affected by the new signatures and by `append_event` refusing an author who is not a member.
+It implements `hint` too, which the server calls once a write has committed, and its writes announce
+nothing themselves. The server never waits for one notice before it sends the next, so `hint` and
+`publish` must take their place in the storage's order at the moment they are called, before they
+first wait, as `PostgresStorage`'s do: otherwise a deletion's notice can reach the other replicas
+after the refresh that follows it. Code that goes through `Server` is unaffected; code that calls
+`PostgresStorage` directly is affected by the new signatures, by `append_event` refusing an author
+who is not a member, and by its writes no longer telling the other replicas: `hint` does.
 
 ## Tenancy
 
@@ -1045,4 +1058,4 @@ module that raised it, then says what went wrong in lowercase: `server: thread '
 found`, `server: 'bruno' is not a member of thread 'support-ana'`, `server: inline media is 300000
 bytes; the cap is 262144 — upload it and send a url`. The library logs only warnings, for what no
 caller is there to receive: an unexpected failure inside `serve`, a failure between replicas —
-mirroring to them or handling their notices — and a signal too large to mirror.
+hinting or mirroring to them, or handling their notices — and a signal too large to mirror.

@@ -9,7 +9,8 @@ from unit.factories import ANA, AT, BRUNO, HELPER, added, removed, updated
 from unit.writes import admit, append, expel, revise
 from until import until
 
-from rfnry_thread import migrations
+from integration.pools import Counting, Refusing, Stalling
+from rfnry_thread import migrations, postgres
 from rfnry_thread.errors import ForbiddenError, NotFoundError, StorageError
 from rfnry_thread.models import (
     SYSTEM,
@@ -312,8 +313,7 @@ async def test_the_same_thread_id_in_two_scopes_is_two_threads(storage: Storage)
     assert not await storage.verify_absent("tenant-b")
 
 
-async def test_listeners_hear_new_events_and_published_signals(storage: Storage) -> None:
-    await room(storage)
+async def test_listeners_hear_hints_and_published_signals(storage: Storage) -> None:
     events: list[tuple[str, str, int, int]] = []
     signals: list[tuple[str, str, dict[str, Any]]] = []
 
@@ -324,16 +324,235 @@ async def test_listeners_hear_new_events_and_published_signals(storage: Storage)
         signals.append((scope, thread_id, payload))
 
     stop = await storage.listen(on_event, on_signal)
-    await append(storage, "acme", say("t1", "c1"))
-    await append(storage, "acme", say("t1", "c1"))
+    await storage.hint("acme", "t1", 2, 7)
     await storage.publish("acme", "t1", {"o": "r1", "kind": "idle"})
     await until(lambda: len(events) == 1 and len(signals) == 1)
-    assert events == [("acme", "t1", 2, await epoch_of(storage))]
+    assert events == [("acme", "t1", 2, 7)]
     assert signals == [("acme", "t1", {"o": "r1", "kind": "idle"})]
     await stop()
-    await append(storage, "acme", say("t1", "c2"))
+    await storage.hint("acme", "t1", 3, 7)
+    await storage.publish("acme", "t1", {"o": "r1", "kind": "working"})
     await asyncio.sleep(0.1)
-    assert len(events) == 1
+    assert (len(events), len(signals)) == (1, 1)
+
+
+async def hearing(storage: Storage) -> tuple[list[Any], Callable[[], Awaitable[None]]]:
+    heard: list[Any] = []
+
+    async def on_event(scope: str, thread_id: str, seq: int, epoch: int) -> None:
+        heard.append((thread_id, seq, epoch))
+
+    async def on_signal(scope: str, thread_id: str, payload: dict[str, Any]) -> None:
+        heard.append(payload)
+
+    return heard, await storage.listen(on_event, on_signal)
+
+
+async def test_a_write_commits_no_notice(storage: Storage) -> None:
+    heard, stop = await hearing(storage)
+    try:
+        await storage.create_thread("acme", thread("t1"), added("t1", ANA))
+        await admit(storage, "acme", added("t1", BRUNO))
+        await append(storage, "acme", say("t1", "c1"))
+        await revise(storage, "acme", updated("t1", {"topic": "refunds"}))
+        await expel(storage, "acme", removed("t1", BRUNO))
+        assert seqs(await storage.list_events("acme", "t1", since=0)) == [1, 2, 3, 4, 5]
+        await asyncio.sleep(0.3)
+        assert heard == []
+        epoch = await epoch_of(storage)
+        await storage.hint("acme", "t1", 5, epoch)
+        await until(lambda: heard == [("t1", 5, epoch)])
+    finally:
+        await stop()
+
+
+async def waves(sender: Storage, count: int, size: int = 10) -> None:
+    sent: list[asyncio.Future[None]] = []
+    for n in range(count):
+        if n and n % size == 0:
+            await asyncio.sleep(0)
+        sent.append(asyncio.ensure_future(sender.publish("acme", "t1", {"n": n})))
+    await asyncio.wait_for(asyncio.gather(*sent), 5.0)
+
+
+async def warmed(pool: Any, storage: Storage) -> tuple[Counting, PostgresStorage, list[Any], Any]:
+    heard, stop = await hearing(storage)
+    counting = Counting(pool)
+    sender = PostgresStorage(counting)
+    await sender.publish("acme", "t1", {"n": -1})
+    await until(lambda: heard == [{"n": -1}])
+    heard.clear()
+    counting.acquired = 0
+    return counting, sender, heard, stop
+
+
+async def test_concurrent_notices_share_transactions(pool: Any, storage: Storage) -> None:
+    counting, sender, heard, stop = await warmed(pool, storage)
+    try:
+        await waves(sender, 50)
+        assert 1 < counting.acquired < 10
+        await until(lambda: len(heard) == 50)
+        assert sorted(p["n"] for p in heard) == list(range(50))
+    finally:
+        await stop()
+
+
+async def test_one_replicas_notices_arrive_in_the_order_sent(pool: Any, storage: Storage) -> None:
+    counting, sender, heard, stop = await warmed(pool, storage)
+    try:
+        await waves(sender, 100)
+        assert counting.acquired > 1
+        await until(lambda: len(heard) == 100)
+        assert [p["n"] for p in heard] == list(range(100))
+    finally:
+        await stop()
+
+
+async def test_the_first_notices_of_a_storage_arrive_in_the_order_sent(
+    pool: Any, storage: Storage
+) -> None:
+    heard: list[int] = []
+
+    async def on_event(scope: str, thread_id: str, seq: int, epoch: int) -> None:
+        heard.append(seq)
+
+    async def on_signal(scope: str, thread_id: str, payload: dict[str, Any]) -> None:
+        heard.append(payload["n"])
+
+    stop = await storage.listen(on_event, on_signal)
+    counting = Counting(pool)
+    sender = PostgresStorage(counting)
+    try:
+        sent = [
+            asyncio.ensure_future(
+                sender.hint("acme", "t1", n, 1) if n % 2 else sender.publish("acme", "t1", {"n": n})
+            )
+            for n in range(40)
+        ]
+        await asyncio.wait_for(asyncio.gather(*sent), 5.0)
+        await until(lambda: len(heard) == 40)
+        assert heard == list(range(40))
+        assert counting.acquired < 10
+    finally:
+        await stop()
+
+
+async def test_a_stuck_group_fails_and_the_next_one_is_sent(
+    pool: Any, storage: Storage, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(postgres, "NOTIFY_TIMEOUT", 0.2)
+    heard, stop = await hearing(storage)
+    stalling = Stalling(pool)
+    sender = PostgresStorage(stalling)
+    try:
+        await sender.publish("acme", "t1", {"n": -1})
+        await until(lambda: heard == [{"n": -1}])
+        stalling.stall()
+        first = asyncio.ensure_future(sender.publish("acme", "t1", {"n": 0}))
+        await until(lambda: stalling.holding)
+        stalling.stall()
+        pair = [asyncio.ensure_future(sender.publish("acme", "t1", {"n": n})) for n in (1, 2)]
+        failed = await asyncio.wait_for(asyncio.gather(first, *pair, return_exceptions=True), 2.0)
+        assert [type(error) for error in failed] == [StorageError] * 3
+        assert {str(error) for error in failed} == {
+            "postgres: storage rejected publish: no answer within 0.2 s"
+        }
+        await asyncio.wait_for(sender.publish("acme", "t1", {"n": 3}), 2.0)
+        await until(lambda: len(heard) == 2)
+        assert heard == [{"n": -1}, {"n": 3}]
+    finally:
+        stalling.resume()
+        await stop()
+
+
+async def test_a_cancelled_flush_leaves_no_notice_waiting(pool: Any, storage: Storage) -> None:
+    heard, stop = await hearing(storage)
+    stalling = Stalling(pool)
+    sender = PostgresStorage(stalling)
+    try:
+        await sender.publish("acme", "t1", {"n": -1})
+        await until(lambda: heard == [{"n": -1}])
+        stalling.stall()
+        taken = asyncio.ensure_future(sender.publish("acme", "t1", {"n": 0}))
+        await until(lambda: stalling.holding)
+        queued = asyncio.ensure_future(sender.publish("acme", "t1", {"n": 1}))
+        await asyncio.sleep(0)
+        assert sender._flushing is not None
+        sender._flushing.cancel()
+        ended = await asyncio.wait_for(asyncio.gather(taken, queued, return_exceptions=True), 2.0)
+        assert [type(error) for error in ended] == [asyncio.CancelledError] * 2
+        await sender.publish("acme", "t1", {"n": 2})
+        await until(lambda: len(heard) == 2)
+        assert heard == [{"n": -1}, {"n": 2}]
+    finally:
+        stalling.resume()
+        await stop()
+
+
+async def test_a_flush_cancelled_before_its_first_step_leaves_no_notice_waiting(
+    pool: Any, storage: Storage
+) -> None:
+    heard, stop = await hearing(storage)
+    sender = PostgresStorage(pool)
+    try:
+        await sender.publish("acme", "t1", {"n": -1})
+        await until(lambda: heard == [{"n": -1}])
+        caller = asyncio.ensure_future(sender.publish("acme", "t1", {"n": 0}))
+        await asyncio.sleep(0)
+        assert sender._flushing is not None
+        sender._flushing.cancel()
+        ended = await asyncio.wait_for(asyncio.gather(caller, return_exceptions=True), 1.0)
+        assert [type(error) for error in ended] == [asyncio.CancelledError]
+        await sender.publish("acme", "t1", {"n": 1})
+        await until(lambda: len(heard) == 2)
+        assert heard == [{"n": -1}, {"n": 1}]
+    finally:
+        await stop()
+
+
+async def test_a_notice_sent_while_the_channel_names_are_read_keeps_its_place(
+    pool: Any, storage: Storage
+) -> None:
+    heard, stop = await hearing(storage)
+    sender = PostgresStorage(pool)
+
+    async def latecomer() -> None:
+        while sender._names is None:
+            await asyncio.sleep(0)
+        await sender.publish("acme", "t1", {"n": 3})
+
+    try:
+        first = [asyncio.ensure_future(sender.publish("acme", "t1", {"n": n})) for n in range(3)]
+        await asyncio.sleep(0)
+        await asyncio.wait_for(asyncio.gather(*first, latecomer()), 5.0)
+        await until(lambda: len(heard) == 4)
+        assert [p["n"] for p in heard] == [0, 1, 2, 3]
+    finally:
+        await stop()
+
+
+async def test_a_send_refused_at_once_on_an_eager_loop_leaves_the_next_one_free(
+    pool: Any, storage: Storage
+) -> None:
+    heard, stop = await hearing(storage)
+    refusing = Refusing(pool)
+    sender = PostgresStorage(refusing)
+    loop = asyncio.get_running_loop()
+    loop.set_task_factory(asyncio.eager_task_factory)
+    try:
+        await sender.publish("acme", "t1", {"n": -1})
+        await until(lambda: heard == [{"n": -1}])
+        refusing.refuse = True
+        with pytest.raises(
+            StorageError, match="^postgres: storage rejected publish: the pool is closed$"
+        ):
+            await sender.publish("acme", "t1", {"n": 0})
+        await asyncio.wait_for(sender.publish("acme", "t1", {"n": 1}), 2.0)
+        await until(lambda: len(heard) == 2)
+        assert heard == [{"n": -1}, {"n": 1}]
+    finally:
+        loop.set_task_factory(None)
+        await stop()
 
 
 def test_it_is_a_storage(storage: Storage) -> None:
@@ -1051,19 +1270,15 @@ async def test_head_returns_the_epoch(storage: Storage) -> None:
 
 async def test_the_event_hint_carries_the_epoch(storage: Storage) -> None:
     await room(storage)
-    heard: list[int] = []
-
-    async def on_event(scope: str, thread_id: str, seq: int, epoch: int) -> None:
-        heard.append(epoch)
-
-    async def on_signal(scope: str, thread_id: str, payload: dict[str, Any]) -> None:
-        pass
-
-    stop = await storage.listen(on_event, on_signal)
-    await append(storage, "acme", say("t1", "c1"))
-    await until(lambda: len(heard) == 1)
-    assert heard == [await epoch_of(storage)]
-    await stop()
+    stored, _ = await append(storage, "acme", say("t1", "c1"))
+    epoch = await epoch_of(storage)
+    heard, stop = await hearing(storage)
+    try:
+        await storage.hint("acme", "t1", stored.seq, epoch)
+        await until(lambda: len(heard) == 1)
+        assert heard == [("t1", stored.seq, epoch)]
+    finally:
+        await stop()
 
 
 async def test_a_thread_made_again_has_a_larger_epoch(storage: Storage) -> None:

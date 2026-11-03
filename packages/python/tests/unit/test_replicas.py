@@ -1,9 +1,9 @@
 import asyncio
 import inspect
 import logging
-from collections.abc import AsyncIterator, Awaitable, Callable
+from collections.abc import AsyncIterator, Awaitable, Callable, Sequence
 from datetime import UTC, datetime
-from typing import Any
+from typing import Any, cast
 
 import pytest
 from until import until
@@ -392,7 +392,7 @@ async def test_a_room_whose_catch_up_failed_is_caught_up_on_the_next_tick(
         await near.stop()
 
 
-async def test_an_unexpected_error_catching_one_room_up_is_logged_and_the_rest_are_caught_up(
+async def test_a_publish_that_breaks_while_rooms_are_caught_up_is_logged_and_all_are_caught_up(
     storage: PostgresStorage,
     monkeypatch: pytest.MonkeyPatch,
     caplog: pytest.LogCaptureFixture,
@@ -418,9 +418,7 @@ async def test_an_unexpected_error_catching_one_room_up_is_logged_and_the_rest_a
             await near._hub.on_resume()
         deleted = [(p["kind"], p["thread_id"]) for p in await ana.quiet()]
         assert deleted == [("thread.deleted", "t1"), ("thread.deleted", "t2")]
-        assert "hub: catching thread 't1' up from storage failed: storage: publish broke" in (
-            caplog.text
-        )
+        assert "hub: mirroring to other replicas failed: storage: publish broke" in caplog.text
     finally:
         await near.stop()
 
@@ -967,6 +965,47 @@ async def test_a_hung_storage_read_does_not_stop_the_tick(
         assert pushed["content"][0]["text"] == "late"
         assert hung == []
         assert "a catch-up pass took longer than 0.2 s and was stopped" in caplog.text
+    finally:
+        await near.stop()
+
+
+class Unsteady(Muffled):
+    def __init__(self, pool: Any) -> None:
+        super().__init__(pool, lambda notice: notice.seq is not None)
+        self.faults: list[str] = []
+
+    async def heads(
+        self, keys: Sequence[tuple[str, str]]
+    ) -> dict[tuple[str, str], tuple[int, int]]:
+        fault = self.faults.pop(0) if self.faults else None
+        if fault == "raise":
+            raise RuntimeError("storage: heads broke")
+        if fault == "broken":
+            return cast(dict[tuple[str, str], tuple[int, int]], [])
+        return await super().heads(keys)
+
+
+async def test_a_tick_that_fails_is_logged_and_the_next_one_catches_up(
+    pool: Any, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    monkeypatch.setattr(server_module, "REFRESH", 0.2)
+    storage = Unsteady(pool)
+    near, far = Server(storage), Server(PostgresStorage(pool))
+    await near.start()
+    try:
+        ana = await Peer.open(near, ANA)
+        await ana.call("thread.create", thread_id="t1")
+        await ana.call("thread.join", thread_id="t1")
+        await ana.quiet()
+        storage.faults = ["raise", "broken"]
+        elsewhere = await Peer.open(far, ANA)
+        with caplog.at_level(logging.WARNING):
+            await say(elsewhere, "t1", "late")
+            pushed = await ana.push("message", timeout=3.0)
+        assert pushed["content"][0]["text"] == "late"
+        assert storage.faults == []
+        assert "hub: reading the heads of 1 threads failed: storage: heads broke" in caplog.text
+        assert "server: a refresh pass failed: 'list' object has no attribute 'get'" in caplog.text
     finally:
         await near.stop()
 

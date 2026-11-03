@@ -160,11 +160,12 @@ does not fit or the scope is empty.
 async def start(self) -> None: ...
 ```
 
-Links this server to the other replicas on the same storage: it listens for their events and signals,
-repeats its own presence, working and streams every ten seconds, and catches every thread its
-connections have open up from storage on each notice for it, every ten seconds, before it returns
-and when a dropped listener is back, then repeats its own state. Calling it again does nothing.
-Raises `StorageError` when the storage cannot listen.
+Links this server to the other replicas on the same storage: it listens for their events and
+signals, mirrors its own signals to them, repeats its own presence, working and streams every ten
+seconds, and catches every thread its connections have open up from storage on each notice for it,
+every ten seconds, before it returns and when a dropped listener is back, then repeats its own
+state. Every server hints the others of each event it stores, started or not. Calling it again does
+nothing. Raises `StorageError` when the storage cannot listen.
 
 ### `Server.stop`
 
@@ -173,9 +174,11 @@ async def stop(self) -> None: ...
 ```
 
 Sends the other replicas the end of what this server's connections announced — `StreamEnd`, `Idle`
-and `Left` — then stops listening to them, gives the listening connection back, and ends their state
-for this server's connections. Call it before the pool closes: ends it cannot send reach the others
-only when they forget this server, within forty seconds.
+and `Left` — together, waits for every notice this server had still to send when it was called,
+hints of its last writes among them, then stops listening to them, gives the listening connection
+back, and ends their state for this server's connections. Each group of notices is bounded by ten
+seconds. Call it before the pool closes: ends it cannot send reach the others only when they forget
+this server, within forty seconds.
 
 ### `Server.create_thread`
 
@@ -1494,6 +1497,8 @@ class Storage(Protocol):
         self, on_event: OnEvent, on_signal: OnSignal, on_resume: OnResume | None = None
     ) -> Stop: ...
 
+    async def hint(self, scope: str, thread_id: str, seq: int, epoch: int) -> None: ...
+
     async def publish(self, scope: str, thread_id: str, payload: dict[str, Any]) -> None: ...
 ```
 
@@ -1503,9 +1508,9 @@ append-only: an event is removed only with its thread or its scope. `check` only
 `ConfigurationError` when the storage does not fit this version. A membership or metadata change
 and its event are one write: `create_thread` given a `creator`, `add_member`, `remove_member` and
 `update_thread` take the event, and store the row, the event at the thread's next `seq` (taken under
-the thread's lock), the new member's mark and the notice in one transaction, so a failure leaves
-none of them. `add_member`, `remove_member`, `update_thread` and `append_event` take the `epoch` the
-caller read the thread at, and raise `NotFoundError` when the thread's row holds another, so a
+the thread's lock) and the new member's mark in one transaction, so a failure leaves none of them;
+no write tells the other replicas anything. `add_member`, `remove_member`, `update_thread` and
+`append_event` take the `epoch` the caller read the thread at, and raise `NotFoundError` when the thread's row holds another, so a
 write meant for one incarnation of a thread never lands in one made again under its id. `create_thread` raises `StorageError` when the `creator` belongs to another thread, and returns the thread and whether it is new; with a `creator`, a new
 thread's first event (`seq` 1) is that `MemberAdded`, its membership and its mark at 0, and an
 existing thread comes back with `False` and nothing else written. `add_member` returns the member
@@ -1541,9 +1546,15 @@ that last `seq` and left out below `floor` the same way, in `seq` order and all 
 so the events are always of the epoch it returns; `None` when the scope holds no such thread.
 `heads` returns the last `seq` and the `epoch` of each listed thread that exists, in one read.
 `delete_thread` returns the `epoch` of the thread it removed, `None` when there was none.
-`listen` takes an `OnEvent`, `on_event(scope, thread_id, seq, epoch)`, and an `OnSignal`,
-`on_signal(scope, thread_id, payload)`, called for what any server on the storage appends or
-publishes, and an `OnResume`, `on_resume()`, called once a dropped listener is back and before
+`hint` tells every listener on the storage that the event at `seq` of the thread at `epoch` is
+stored, and `publish` hands them `payload`. A server calls `hint` once a write has committed and its
+own connections have the event, and `publish` for what it mirrors; no write and no request waits on
+either, and one that fails is logged and never fails the write or the request. Since the server
+never waits for one notice before it sends the next, both take their place in the storage's order at
+the moment they are called, before they first wait, and the storage sends them in that order.
+`listen` takes an `OnEvent`, `on_event(scope, thread_id, seq, epoch)`, called for each `hint`, and
+an `OnSignal`, `on_signal(scope, thread_id, payload)`, called for each `publish`, by any server on
+the storage, and an `OnResume`, `on_resume()`, called once a dropped listener is back and before
 anything it heard since is passed on; it returns a
 `Stop`, `stop()`, that ends it, and all four are async functions returning `None`. Raises
 `NotFoundError`, from `add_member`, `remove_member`, `append_event` and `list_threads` with a `before` id or a `Thread` without `last_seq`, when the
@@ -1573,11 +1584,14 @@ the pool's role cannot use, or holds a search half set up. With search set up by
 thread's metadata strings under `seq` 0 — in step with every append and every change of metadata,
 and `query` and `search` read its trigram index in the pool's schema, each planned for its own words
 and read with its messages in one snapshot; without it they raise `ConfigurationError` naming the
-command. An event is stored and announced with `NOTIFY` in one transaction, on two channels named
-for the connection's current schema, so deployments in different schemas of one database do not hear
-each other and replicas sharing a schema do; `listen` holds one connection from the pool, taking
-another with jittered backoff when it drops. Raises `StorageError` when the database fails, and from
-`publish`, when a notification is over 7900 bytes.
+command. `hint` and `publish` each send a `NOTIFY`, on two channels named for the connection's
+current schema, so deployments in different schemas of one database do not hear each other and
+replicas sharing a schema do. A write sends none. The notices waiting when one goes out are sent
+together in one transaction, in the order they were sent, so one storage's notices arrive in order
+and a busy one sends them in groups; a group the database does not take within ten seconds fails
+each of its notices with `StorageError`, and the next group goes out. `listen` holds one connection
+from the pool, taking another with jittered backoff when it drops. Raises `StorageError` when the
+database fails, and from `publish`, when a notification is over 7900 bytes.
 
 ## Errors
 
