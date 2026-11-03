@@ -181,7 +181,8 @@ class LatestState:
             told = stream is not None and not stream.gapped
             if stream is not None and not stream.gapped:
                 stream.text, stream.index = stream.text + signal.text, signal.index
-                stream.d += d is not None
+                if d is not None:
+                    stream.d += 1
         else:
             told = held.streams.pop(signal.stream_id, None) is not None
         self._settle(key, origin, found)

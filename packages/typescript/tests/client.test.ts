@@ -1133,6 +1133,42 @@ describe('client', () => {
     ])
   })
 
+  it('does not re-join a present thread left during the re-join of an earlier thread', async () => {
+    const followed = (...ids: string[]) => ({
+      joined: ids.map((id) => ({ thread: { ...epoch(1), id }, seq: 4, truncated: false })),
+    })
+    server.handlers.set('thread.follow', () => followed('t1', 't0'))
+    const client = await connect({ url: 'ws://fake' })
+    await client.follow()
+    await client.join('t1')
+    await client.join('t0')
+    const state = client as unknown as {
+      cursors: Map<string, number>
+      held: Set<string>
+      left: Map<string, number>
+    }
+    const [first, second] = [...state.cursors.keys()] as [string, string]
+    const join = server.handlers.get('thread.join')
+    let left: Promise<void> | undefined
+    server.handlers.set('thread.join', (payload) => {
+      if (!left && server.hellos.length === 2) left = client.leave(second)
+      return join?.(payload) as never
+    })
+    const before = server.sent().length
+    server.drop()
+    await vi.waitFor(() => expect(server.hellos).toHaveLength(2))
+    await vi.waitFor(() => expect(client.status).toBe('open'))
+    await left
+    expect(
+      server
+        .sent()
+        .slice(before)
+        .map((frame) => `${frame.method}:${frame.payload.thread_id ?? ''}`)
+    ).toEqual(['thread.follow:', `thread.join:${first}`, `thread.leave:${second}`])
+    expect([...state.cursors.keys()]).toEqual([first])
+    expect([...state.left.keys()]).toEqual([second])
+  })
+
   it('sends an away called behind two joins of a thread after both, and ends not present', async () => {
     const client = await connect({ url: 'ws://fake' })
     await Promise.all([client.join('t1'), client.join('t1'), client.away('t1')])

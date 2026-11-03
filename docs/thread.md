@@ -459,7 +459,7 @@ before anything new. A re-join refused because the thread is gone or no longer y
 `ForbiddenError`) forgets that thread, as does a re-follow that no longer hands back a thread only
 followed, so the thread arrives whole if it is made again; a re-follow refused so joins each thread instead, the
 client no longer following until you call `follow()` again. A re-join or re-follow refused as a
-wrong request (`InputError`, `ConfigurationError`), as a server of another release refuses it, stops
+wrong request (`InputError`, `ConfigurationError`) stops
 the client with that error, as a refused hello does. Any other refusal, a storage failure or an
 `authorize` that raised among them, holds no other thread back: the client keeps that thread's
 cursor, re-joins the rest, and tries it again on the same connection with the same backoff until it
@@ -488,7 +488,7 @@ even while a thread or the follow is still being tried again; `"closed"` once it
 or a refused reconnect — an expired session, a hello the server answers with an error such as
 another protocol version, or a re-join or re-follow refused as a wrong request. A push the client cannot
 read, one with a name it does not know included, is skipped, not fatal. A client needs a server of its own
-release: a 0.1.5 client needs a 0.1.5 server. Each change arrives in
+release: a 0.1.6 client needs a 0.1.6 server, and every replica of one database is of one release. Each change arrives in
 `events()` as a `StatusChanged` — `"open"` after the `Joined` of the re-follow and the re-joins it took — the one
 item that names no thread. It is how a person's page says it
 is reconnecting.
@@ -567,8 +567,8 @@ keeps who is present, working and streaming, and every ten seconds sends the oth
 its own, whole, for each thread and its epoch: a newer snapshot replaces what they held from that
 replica, anything older than what they hold is dropped, and what the replacement changes — a signal
 they missed — is told to their connections. A stream a replica never heard start begins there with
-the next snapshot, without the text written before it. A preview there that misses a piece stays as it was
-until the finishing message settles the text. A replica that starts, or listens again, asks
+the next snapshot, without the text written before it. A preview there that misses a piece stays as
+it was until the finishing message settles the text. A replica that starts, or listens again, asks
 the others to send theirs at once. A missed hint costs latency, never an event: resume reads from
 storage.
 
@@ -588,6 +588,11 @@ after ten seconds is stopped and started over at the next, and a pass that fails
 next one runs. Give the pool a `command_timeout`, so a read the database never answers ends. A
 replica that misses an `invited` notice gives no `Invited`, and a follower no `Joined`, until the
 connection follows again.
+
+The tick's one read took 1.1 ms in the database for 1,000 threads open on a replica and 10.9 ms for
+10,000 (Postgres 18, median of five). On Postgres 18 on one machine, a write that sends a `NOTIFY` in
+its transaction topped out near 900 per second from 8 clients up, against about 3,800 without one.
+thread's writes send none, and its notices go out in groups after the commit.
 
 `start()` holds one connection from the pool for `LISTEN`; `stop()` gives it back, or closes it when
 it does not answer within ten seconds. That connection can drop, or stay open and stop delivering,

@@ -495,7 +495,8 @@ async def away(self, thread_id: str) -> None: ...
 Ends the caller's presence in a thread it joined while the thread keeps arriving: `Left` goes out
 when it was the identity's last connection present there, and joining the thread again is presence
 again. Streams and `Working` are untouched. The thread stays away across dropped sockets. Away from
-a thread not joined, or already away, does nothing.
+a thread not joined, or already away, does nothing. An away called while a join of the same thread
+is in flight is sent once every such join is answered.
 
 ### `Client.follow`
 
@@ -1946,7 +1947,8 @@ async away(threadId: string): Promise<void>
 Ends the caller's presence in a thread it joined while the thread keeps arriving: `Left` goes out
 when it was the identity's last connection present there, and joining the thread again is presence
 again. Streams and `Working` are untouched. The thread stays away across dropped sockets. Away from
-a thread not joined, or already away, does nothing.
+a thread not joined, or already away, does nothing. An away called while a join of the same thread
+is in flight is sent once every such join is answered.
 
 ### `Client.follow`
 
