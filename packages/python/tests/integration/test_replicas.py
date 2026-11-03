@@ -217,6 +217,40 @@ async def test_a_replica_heard_from_again_is_announced_again_and_ends_once(
         assert await ana.quiet(1.0) == []
 
 
+async def test_a_replica_stopped_and_started_again_with_its_connections_open_is_announced_again_and_ends_once(
+    storage: PostgresStorage, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    async with briefly(storage, monkeypatch) as (near, far):
+        ana, helper = await room(near, far)
+        try:
+            await busy(ana, helper)
+            await far.stop()
+            assert await arrived(ana, 3, 2.0) == [
+                ("stream.end", "helper"),
+                ("idle", "helper"),
+                ("left", "helper"),
+            ]
+            await far.start()
+            assert await arrived(ana, 3, 2.0) == [
+                ("present", "helper"),
+                ("working", "helper"),
+                ("stream.start", "helper"),
+            ]
+            assert await present(ana) == ["ana", "helper"]
+            await helper.call("signal.send", thread_id="t1", kind="stream.end", stream_id="s1")
+            await helper.call("signal.send", thread_id="t1", kind="idle")
+            await helper.call("thread.leave", thread_id="t1")
+            assert await arrived(ana, 3, 2.0) == [
+                ("stream.end", "helper"),
+                ("idle", "helper"),
+                ("left", "helper"),
+            ]
+            assert await ana.quiet(1.0) == []
+        finally:
+            await ana.close()
+            await helper.close()
+
+
 async def test_a_stopped_replica_ends_the_others_state_for_its_own_connections(
     replicas: tuple[Server, Server],
 ) -> None:

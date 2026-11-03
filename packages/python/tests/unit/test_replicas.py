@@ -1,4 +1,5 @@
 import asyncio
+import inspect
 import logging
 from collections.abc import AsyncIterator, Callable
 from datetime import UTC, datetime, timedelta
@@ -815,3 +816,56 @@ async def test_a_replica_started_again_with_connections_open_checks_their_thread
     finally:
         await near.stop()
         await far.stop()
+
+
+class Outage(PostgresStorage):
+    down = False
+
+    def __getattribute__(self, name: str) -> Any:
+        found = super().__getattribute__(name)
+        if (
+            name == "listen"
+            or name.startswith("_")
+            or not inspect.iscoroutinefunction(found)
+            or not super().__getattribute__("down")
+        ):
+            return found
+
+        async def refused(*args: Any, **kwargs: Any) -> Any:
+            raise StorageError(f"postgres: storage rejected {name}: connection reset")
+
+        return refused
+
+
+async def test_a_replica_started_while_storage_fails_starts_and_catches_its_rooms_up_once_it_answers(
+    pool: Any, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(server_module, "REFRESH", 0.2)
+    storage = Outage(pool)
+    near = Server(storage)
+    ana = await Peer.open(near, ANA)
+    for thread_id in ("t1", "t2"):
+        await ana.call("thread.create", thread_id=thread_id)
+        await ana.call("thread.join", thread_id=thread_id)
+    await ana.call("member.add", thread_id="t2", identity=BRUNO.model_dump(mode="json"))
+    await ana.quiet()
+    bruno = await Peer.open(near, BRUNO)
+    await storage.delete_thread("acme", "t1")
+    storage.down = True
+    try:
+        await asyncio.wait_for(near.start(), 2.0)
+        assert await ana.quiet(0.6) == []
+        storage.down = False
+        assert (await ana.push("thread.deleted", timeout=2.0))["thread_id"] == "t1"
+        await bruno.call("thread.join", thread_id="t2")
+        await say(bruno, "t2", "after storage is back")
+        told = [
+            (p["kind"], p["thread_id"])
+            for p in await ana.quiet()
+            if p["kind"] in ("thread.deleted", "message")
+        ]
+        assert told == [("message", "t2")]
+    finally:
+        await ana.close()
+        await bruno.close()
+        await near.stop()

@@ -13,6 +13,7 @@ from rfnry_thread.models import (
     SYSTEM,
     Edit,
     Event,
+    Identity,
     Message,
     Read,
     Retract,
@@ -63,6 +64,24 @@ async def test_create_is_get_or_create(storage: Storage) -> None:
     assert again == first
     assert await storage.get_thread("acme", "t1") == first
     assert await storage.get_thread("acme", "ghost") is None
+
+
+async def test_concurrent_creates_of_one_thread_make_it_once_with_one_creator(
+    storage: Storage,
+) -> None:
+    people = [Identity(role="user", id=f"p{n}") for n in range(8)]
+    ids = [f"t{n}" for n in range(5)]
+    results = await asyncio.gather(
+        *(storage.create_thread("acme", thread(t), added(t, who)) for t in ids for who in people)
+    )
+    for n, thread_id in enumerate(ids):
+        mine = results[n * len(people) : (n + 1) * len(people)]
+        [winner] = [who for (_, created), who in zip(mine, people, strict=True) if created]
+        stored = await storage.get_thread("acme", thread_id)
+        assert all(found == stored for found, _ in mine)
+        members = await storage.list_members("acme", thread_id)
+        assert [m.identity.id for m in members] == [winner.id]
+        assert seqs(await storage.list_events("acme", thread_id)) == [1]
 
 
 async def test_threads_are_listed_for_a_member_newest_first_in_pages(storage: Storage) -> None:
