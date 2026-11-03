@@ -120,7 +120,7 @@ describe('client', () => {
     expect(server.sent('thread.join')[1]?.payload).toEqual({
       thread_id: 't1',
       since: 0,
-      created_at: '2026-01-01T12:00:00Z',
+      epoch: 1,
     })
     server.handlers.delete('thread.away')
     await client.away('t1')
@@ -142,7 +142,7 @@ describe('client', () => {
         .sent('thread.join')
         .slice(2)
         .map((frame) => frame.payload)
-    ).toEqual([{ thread_id: 't1', since: 0, away: true, created_at: '2026-01-01T12:00:00Z' }])
+    ).toEqual([{ thread_id: 't1', since: 0, away: true, epoch: 1 }])
   })
 
   it('joins a thread it is away from again after a drop without presence', async () => {
@@ -154,7 +154,7 @@ describe('client', () => {
       thread_id: 't1',
       since: 0,
       away: true,
-      created_at: '2026-01-01T12:00:00Z',
+      epoch: 1,
     })
     await client.join('t1')
     expect(server.sent('thread.join')[2]?.payload).toEqual({ thread_id: 't1', since: null })
@@ -163,7 +163,7 @@ describe('client', () => {
     expect(server.sent('thread.join')[3]?.payload).toEqual({
       thread_id: 't1',
       since: 0,
-      created_at: '2026-01-01T12:00:00Z',
+      epoch: 1,
     })
     await client.close()
   })
@@ -381,6 +381,7 @@ describe('client', () => {
         scope: 'acme',
         metadata: {},
         created_at: '2026-02-01T00:00:00Z',
+        epoch: 2,
       },
       seq: 2,
       truncated: true,
@@ -406,6 +407,7 @@ describe('client', () => {
           scope: 'acme',
           metadata: {},
           created_at: '2026-02-01T00:00:00Z',
+          epoch: 2,
         },
         seq: 3,
         truncated: true,
@@ -430,6 +432,7 @@ describe('client', () => {
             scope: 'acme',
             metadata: {},
             created_at: seq === 3 ? '2026-02-01T00:00:00Z' : '2026-01-01T12:00:00Z',
+            epoch: seq === 3 ? 2 : 1,
           },
           seq,
           truncated: seq === 3,
@@ -469,6 +472,7 @@ describe('client', () => {
           scope: 'acme',
           metadata: {},
           created_at: '2026-02-01T00:00:00Z',
+          epoch: 2,
         },
         seq: 3,
         truncated: true,
@@ -505,6 +509,7 @@ describe('client', () => {
       scope: 'acme',
       metadata: {},
       created_at: '2026-02-01T00:00:00Z',
+      epoch: 2,
     })
     server.handlers.set('thread.join', async (payload) => {
       if (payload.since === 40) {
@@ -546,6 +551,7 @@ describe('client', () => {
           scope: 'acme',
           metadata: {},
           created_at: '2026-02-01T00:00:00Z',
+          epoch: 2,
         },
         seq: 3,
         truncated: true,
@@ -572,6 +578,7 @@ describe('client', () => {
       scope: 'acme',
       metadata: {},
       created_at: '2026-02-01T00:00:00Z',
+      epoch: 2,
     })
     server.handlers.set('thread.join', async (payload) => {
       if (payload.since === null) {
@@ -604,6 +611,7 @@ describe('client', () => {
       scope: 'acme',
       metadata: {},
       created_at: '2026-01-01T12:00:00Z',
+      epoch: 1,
     })
     server.handlers.set('thread.join', async (payload) => {
       if (payload.since === 2) {
@@ -665,6 +673,7 @@ describe('client', () => {
             scope: 'acme',
             metadata: {},
             created_at: '2026-01-01T12:00:00Z',
+            epoch: 1,
           },
           seq: calls === 1 ? 3 : 4,
           truncated: calls === 1,
@@ -872,6 +881,7 @@ describe('client', () => {
           scope: 'acme',
           metadata: {},
           created_at: '2026-01-01T12:00:00Z',
+          epoch: 1,
         },
         seq: server.seq,
         truncated: false,
@@ -938,7 +948,13 @@ describe('client', () => {
     server.handlers.set('thread.follow', () => ({
       joined: [
         {
-          thread: { id: 't1', scope: 'acme', metadata: {}, created_at: '2026-01-01T12:00:00Z' },
+          thread: {
+            id: 't1',
+            scope: 'acme',
+            metadata: {},
+            created_at: '2026-01-01T12:00:00Z',
+            epoch: 1,
+          },
           seq: 4,
           truncated: false,
         },
@@ -955,7 +971,7 @@ describe('client', () => {
     await vi.waitFor(() => expect(server.sent('thread.follow')).toHaveLength(2))
     expect(server.sent('thread.follow').map((frame) => frame.payload)).toEqual([
       { resume: true, since: null },
-      { resume: true, since: { t1: { seq: 5, created_at: '2026-01-01T12:00:00Z' } } },
+      { resume: true, since: { t1: { seq: 5, epoch: 1 } } },
     ])
     expect(server.sent('thread.join')).toEqual([])
     await client.close()
@@ -968,7 +984,13 @@ describe('client', () => {
     client.subscribe((item) => items.push(item))
     await client.follow()
     server.push('joined', {
-      thread: { id: 't1', scope: 'acme', metadata: {}, created_at: '2026-01-01T12:00:00Z' },
+      thread: {
+        id: 't1',
+        scope: 'acme',
+        metadata: {},
+        created_at: '2026-01-01T12:00:00Z',
+        epoch: 1,
+      },
       seq: 6,
       truncated: false,
     })
@@ -1001,7 +1023,13 @@ describe('client', () => {
       return {
         joined: [
           {
-            thread: { id: 't1', scope: 'acme', metadata: {}, created_at: '2026-01-01T12:00:00Z' },
+            thread: {
+              id: 't1',
+              scope: 'acme',
+              metadata: {},
+              created_at: '2026-01-01T12:00:00Z',
+              epoch: 1,
+            },
             seq: 4,
             truncated: false,
           },
@@ -1009,7 +1037,13 @@ describe('client', () => {
       }
     })
     server.handlers.set('thread.join', () => ({
-      thread: { id: 't1', scope: 'acme', metadata: {}, created_at: '2026-01-01T12:00:00Z' },
+      thread: {
+        id: 't1',
+        scope: 'acme',
+        metadata: {},
+        created_at: '2026-01-01T12:00:00Z',
+        epoch: 1,
+      },
       seq: 4,
       truncated: false,
     }))
@@ -1034,7 +1068,13 @@ describe('client', () => {
       return {
         joined: [
           {
-            thread: { id: 't1', scope: 'acme', metadata: {}, created_at: '2026-01-01T12:00:00Z' },
+            thread: {
+              id: 't1',
+              scope: 'acme',
+              metadata: {},
+              created_at: '2026-01-01T12:00:00Z',
+              epoch: 1,
+            },
             seq: 4,
             truncated: false,
           },
@@ -1049,7 +1089,7 @@ describe('client', () => {
     expect(server.sent('thread.join')).toEqual([])
     expect(server.sent('thread.follow').at(-1)?.payload).toEqual({
       resume: true,
-      since: { t1: { seq: 4, created_at: '2026-01-01T12:00:00Z' } },
+      since: { t1: { seq: 4, epoch: 1 } },
     })
     await client.close()
   })
@@ -1118,7 +1158,13 @@ describe('client', () => {
       return {
         joined: [
           {
-            thread: { id: 't1', scope: 'acme', metadata: {}, created_at: '2026-01-01T12:00:00Z' },
+            thread: {
+              id: 't1',
+              scope: 'acme',
+              metadata: {},
+              created_at: '2026-01-01T12:00:00Z',
+              epoch: 1,
+            },
             seq: 4,
             truncated: false,
           },
@@ -1133,7 +1179,7 @@ describe('client', () => {
     await vi.waitFor(() => expect(server.sent('thread.follow')).toHaveLength(3))
     expect(items).toContainEqual({ kind: 'status', status: 'open' })
     expect(server.sent('thread.join').map((frame) => frame.payload)).toEqual([
-      { thread_id: 't1', since: 4, away: true, created_at: '2026-01-01T12:00:00Z' },
+      { thread_id: 't1', since: 4, away: true, epoch: 1 },
     ])
     expect(server.hellos).toHaveLength(2)
     expect((client as unknown as { following: boolean }).following).toBe(true)
@@ -1216,6 +1262,7 @@ describe('client', () => {
       scope: 'acme',
       metadata: {},
       created_at: '2026-01-01T00:00:00Z',
+      epoch: 1,
       last_message_at: '2026-01-02T00:00:00Z',
       last_seq: 4,
     } as Thread
@@ -1224,6 +1271,7 @@ describe('client', () => {
       scope: 'acme',
       metadata: {},
       created_at: '2026-01-01T00:00:00Z',
+      epoch: 1,
     } as Thread
     await client.listThreads({ order: 'activity', before: anchor })
     await client.listThreads({ before: 't8' })
@@ -1290,7 +1338,8 @@ describe('client', () => {
             id: 't1',
             scope: 'acme',
             metadata: {},
-            created_at: ++calls === 1 ? '2026-01-01T12:00:00Z' : '2026-02-01T00:00:00Z',
+            created_at: '2026-01-01T12:00:00Z',
+            epoch: ++calls === 1 ? 1 : 2,
           },
           seq: calls === 1 ? 4 : 2,
           truncated: calls > 1,
@@ -1307,7 +1356,7 @@ describe('client', () => {
     await vi.waitFor(() => expect(items).toContainEqual({ kind: 'status', status: 'open' }))
     expect(server.sent('thread.follow').at(-1)?.payload).toEqual({
       resume: true,
-      since: { t1: { seq: 8, created_at: '2026-01-01T12:00:00Z' } },
+      since: { t1: { seq: 8, epoch: 1 } },
     })
     server.push('event', message(3, 'new'))
     await vi.waitFor(() => expect(items.at(-1)).toMatchObject({ seq: 3 }))
@@ -1317,7 +1366,7 @@ describe('client', () => {
   it('keeps a followed thread it left left after a drop, until it joins it', async () => {
     const followed = (...ids: string[]) => ({
       joined: ids.map((id) => ({
-        thread: { id, scope: 'acme', metadata: {}, created_at: '2026-01-01T12:00:00Z' },
+        thread: { id, scope: 'acme', metadata: {}, created_at: '2026-01-01T12:00:00Z', epoch: 1 },
         seq: 4,
         truncated: false,
       })),
@@ -1339,8 +1388,8 @@ describe('client', () => {
     ])
     expect(server.sent('thread.follow').at(-1)?.payload).toEqual({
       resume: true,
-      since: { t2: { seq: 4, created_at: '2026-01-01T12:00:00Z' } },
-      left: { t1: { seq: 4, created_at: '2026-01-01T12:00:00Z' } },
+      since: { t2: { seq: 4, epoch: 1 } },
+      left: { t1: { seq: 4, epoch: 1 } },
     })
     expect(items.flatMap((item) => ('truncated' in item ? [item.thread.id] : []))).toEqual(['t2'])
     await client.join('t1')
@@ -1352,7 +1401,7 @@ describe('client', () => {
 
   const followed = (...ids: string[]) => ({
     joined: ids.map((id) => ({
-      thread: { id, scope: 'acme', metadata: {}, created_at: '2026-01-01T12:00:00Z' },
+      thread: { id, scope: 'acme', metadata: {}, created_at: '2026-01-01T12:00:00Z', epoch: 1 },
       seq: 4,
       truncated: false,
     })),
@@ -1368,7 +1417,7 @@ describe('client', () => {
     server.drop()
     await vi.waitFor(() => expect(server.sent('thread.follow')).toHaveLength(2))
     expect(server.sent('thread.follow').at(-1)?.payload.left).toEqual({
-      t1: { seq: 4, created_at: '2026-01-01T12:00:00Z' },
+      t1: { seq: 4, epoch: 1 },
     })
     await client.close()
   })
@@ -1392,7 +1441,7 @@ describe('client', () => {
     server.drop()
     await vi.waitFor(() => expect(server.sent('thread.follow')).toHaveLength(3))
     expect(server.sent('thread.follow').at(-1)?.payload.left).toEqual({
-      t1: { seq: 4, created_at: '2026-01-01T12:00:00Z' },
+      t1: { seq: 4, epoch: 1 },
     })
     await client.close()
   })
@@ -1419,14 +1468,20 @@ describe('client', () => {
       { resume: false, since: null },
       {
         resume: true,
-        since: { t2: { seq: 4, created_at: '2026-01-01T12:00:00Z' } },
-        left: { t1: { seq: 4, created_at: '2026-01-01T12:00:00Z' } },
+        since: { t2: { seq: 4, epoch: 1 } },
+        left: { t1: { seq: 4, epoch: 1 } },
       },
     ])
   })
 
   it('forgets a leave once a re-follow hands that thread back after a new add', async () => {
-    const t1 = { id: 't1', scope: 'acme', metadata: {}, created_at: '2026-01-01T12:00:00Z' }
+    const t1 = {
+      id: 't1',
+      scope: 'acme',
+      metadata: {},
+      created_at: '2026-01-01T12:00:00Z',
+      epoch: 1,
+    }
     server.handlers.set('thread.follow', () => ({
       joined: [{ thread: t1, seq: 4, truncated: false }],
     }))
@@ -1443,14 +1498,20 @@ describe('client', () => {
     await vi.waitFor(() => expect(server.sent('thread.follow')).toHaveLength(3))
     expect(server.sent('thread.follow').at(-1)?.payload).toEqual({
       resume: true,
-      since: { t1: { seq: 4, created_at: '2026-01-01T12:00:00Z' } },
+      since: { t1: { seq: 4, epoch: 1 } },
     })
     await client.close()
   })
 
   for (const gone of ['removed', 'deleted'] as const) {
     it(`does not open again after a drop a thread it had open before it was ${gone}`, async () => {
-      const t1 = { id: 't1', scope: 'acme', metadata: {}, created_at: '2026-01-01T12:00:00Z' }
+      const t1 = {
+        id: 't1',
+        scope: 'acme',
+        metadata: {},
+        created_at: '2026-01-01T12:00:00Z',
+        epoch: 1,
+      }
       server.handlers.set('thread.follow', () => ({
         joined: [{ thread: t1, seq: 4, truncated: false }],
       }))
@@ -1486,6 +1547,7 @@ describe('client', () => {
       scope: 'acme',
       metadata: {},
       created_at: '2026-01-01T12:00:00Z',
+      epoch: 1,
     })
     server.handlers.set('thread.follow', () => ({
       joined: ['t1', 't2'].map((id) => ({ thread: thread(id), seq: 4, truncated: false })),
@@ -1502,7 +1564,13 @@ describe('client', () => {
   })
 
   it('hands a follow replay for a thread without a cursor once, before its Joined', async () => {
-    const t1 = { id: 't1', scope: 'acme', metadata: {}, created_at: '2026-01-01T12:00:00Z' }
+    const t1 = {
+      id: 't1',
+      scope: 'acme',
+      metadata: {},
+      created_at: '2026-01-01T12:00:00Z',
+      epoch: 1,
+    }
     server.handlers.set('thread.follow', () => {
       server.push('event', message(3, 'one'))
       server.push('event', message(4, 'two'))
@@ -1531,6 +1599,7 @@ describe('client', () => {
       scope: 'acme',
       metadata: {},
       created_at: '2026-01-01T12:00:00Z',
+      epoch: 1,
     })
     server.handlers.set('thread.follow', () => ({
       joined: ['t1', 't2'].map((id) => ({ thread: thread(id), seq: 4, truncated: false })),
@@ -1571,7 +1640,13 @@ describe('client', () => {
 
   it('hands a followed thread joined since a seq its history once while a live event lands', async () => {
     const log = [1, 2, 3].map((seq) => message(seq, `m${seq}`))
-    const t1 = { id: 't1', scope: 'acme', metadata: {}, created_at: '2026-01-01T12:00:00Z' }
+    const t1 = {
+      id: 't1',
+      scope: 'acme',
+      metadata: {},
+      created_at: '2026-01-01T12:00:00Z',
+      epoch: 1,
+    }
     server.handlers.set('thread.follow', () => ({
       joined: [{ thread: t1, seq: 3, truncated: false }],
     }))
@@ -1600,7 +1675,13 @@ describe('client', () => {
 
   it('replays each overlapping join since a followed thread its own window once', async () => {
     const log = Array.from({ length: 20 }, (_, n) => message(n + 1, `m${n + 1}`))
-    const t1 = { id: 't1', scope: 'acme', metadata: {}, created_at: '2026-01-01T12:00:00Z' }
+    const t1 = {
+      id: 't1',
+      scope: 'acme',
+      metadata: {},
+      created_at: '2026-01-01T12:00:00Z',
+      epoch: 1,
+    }
     server.handlers.set('thread.follow', () => ({
       joined: [{ thread: t1, seq: 20, truncated: false }],
     }))
@@ -1640,6 +1721,7 @@ describe('client', () => {
       scope: 'acme',
       metadata: {},
       created_at: '2026-01-01T12:00:00Z',
+      epoch: 1,
     })
     server.handlers.set('thread.follow', () => ({
       joined: [{ thread: thread('t1'), seq: 3, truncated: false }],
@@ -1673,6 +1755,7 @@ describe('client', () => {
         scope: 'acme',
         metadata: {},
         created_at: '2026-01-01T12:00:00Z',
+        epoch: 1,
       }
       return {
         thread: resume ? { ...thread, marked: 3 } : thread,
@@ -1706,6 +1789,7 @@ describe('client', () => {
           scope: 'acme',
           metadata: {},
           created_at: '2026-01-01T12:00:00Z',
+          epoch: 1,
           marked: 2,
         },
         seq: 10,
@@ -1725,7 +1809,13 @@ describe('client', () => {
 
   it('hands a followed thread joined with resume its history from the mark once while a live event lands', async () => {
     const log = [1, 2, 3].map((seq) => message(seq, `m${seq}`))
-    const t1 = { id: 't1', scope: 'acme', metadata: {}, created_at: '2026-01-01T12:00:00Z' }
+    const t1 = {
+      id: 't1',
+      scope: 'acme',
+      metadata: {},
+      created_at: '2026-01-01T12:00:00Z',
+      epoch: 1,
+    }
     server.handlers.set('thread.follow', () => ({
       joined: [{ thread: t1, seq: 3, truncated: false }],
     }))
@@ -1764,7 +1854,13 @@ describe('client', () => {
   })
 
   it('forgets a leave once the server delivers that thread again from a new add', async () => {
-    const t1 = { id: 't1', scope: 'acme', metadata: {}, created_at: '2026-01-01T12:00:00Z' }
+    const t1 = {
+      id: 't1',
+      scope: 'acme',
+      metadata: {},
+      created_at: '2026-01-01T12:00:00Z',
+      epoch: 1,
+    }
     server.handlers.set('thread.follow', () => ({
       joined: [{ thread: t1, seq: 4, truncated: false }],
     }))
@@ -1780,7 +1876,7 @@ describe('client', () => {
     expect(server.sent('thread.leave')).toHaveLength(1)
     expect(server.sent('thread.follow').at(-1)?.payload).toEqual({
       resume: true,
-      since: { t1: { seq: 6, created_at: '2026-01-01T12:00:00Z' } },
+      since: { t1: { seq: 6, epoch: 1 } },
     })
     server.push('event', message(7, 'still delivered'))
     await vi.waitFor(() => expect(items.at(-1)).toMatchObject({ seq: 7 }))

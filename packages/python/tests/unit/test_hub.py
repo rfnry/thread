@@ -114,9 +114,9 @@ async def test_a_notice_is_read_only_when_a_session_is_behind(storage: PostgresS
     await pushes(session, recorder)
     storage.list_events = counted  # type: ignore[method-assign]
     stored, _ = await storage.append_event("acme", message(1, "hi"))
-    await hub.on_event("acme", "t1", stored.seq)
-    await hub.on_event("acme", "t1", stored.seq)
-    await hub.on_event("acme", "other-thread", 1)
+    await hub.on_event("acme", "t1", stored.seq, 1)
+    await hub.on_event("acme", "t1", stored.seq, 1)
+    await hub.on_event("acme", "other-thread", 1, 1)
     assert [p["seq"] for p in await pushes(session, recorder)] == [1]
     assert len(reads) == 1
 
@@ -568,7 +568,7 @@ async def test_an_invitation_crossing_the_deletion_of_its_scope_is_handed_over_a
     checked: list[str] = []
     release = asyncio.Event()
 
-    async def held(scope: str, thread_id: str, identity_id: str) -> tuple[int, int] | None:
+    async def held(scope: str, thread_id: str, identity_id: str) -> tuple[int, int, int] | None:
         found = await head(scope, thread_id, identity_id)
         if thread_id == "t0":
             reading.append(thread_id)
@@ -631,7 +631,7 @@ async def test_joins_and_a_signal_crossing_the_deletion_of_their_scope_leave_not
     reading: list[str] = []
     release = asyncio.Event()
 
-    async def held(scope: str, thread_id: str, identity_id: str) -> tuple[int, int] | None:
+    async def held(scope: str, thread_id: str, identity_id: str) -> tuple[int, int, int] | None:
         found = await head(scope, thread_id, identity_id)
         reading.append(thread_id)
         await release.wait()

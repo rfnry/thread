@@ -70,10 +70,14 @@ _HISTORY = (
 _KINDS = ("CREATE INDEX ix_thread_events_kind ON thread_events (scope, thread_id, kind, seq)",)
 
 
+_EPOCH = ("ALTER TABLE thread_threads ADD COLUMN epoch BIGINT GENERATED ALWAYS AS IDENTITY",)
+
+
 MIGRATIONS = [
     Migration(1, "create", _CREATE),
     Migration(2, "history", _HISTORY),
     Migration(3, "kinds", _KINDS),
+    Migration(4, "epoch", _EPOCH),
 ]
 
 

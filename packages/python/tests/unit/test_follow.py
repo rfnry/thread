@@ -103,14 +103,14 @@ async def test_a_refollow_skips_a_left_thread_unless_the_follower_was_added_to_i
     two = (await say(ana, "t2", "two"))["seq"]
     await ana.call("member.remove", thread_id="t2", identity_id="helper")
     await ana.call("member.add", thread_id="t2", identity=who(HELPER))
-    made = {t: await created_at(ana, t) for t in ("t1", "t2")}
+    made = {t: await epoch_of(ana, t) for t in ("t1", "t2")}
     helper = await Peer.open(server, HELPER)
     reply = await helper.call(
         "thread.follow",
         resume=True,
         left={
-            "t1": {"seq": one, "created_at": made["t1"]},
-            "t2": {"seq": two, "created_at": made["t2"]},
+            "t1": {"seq": one, "epoch": made["t1"]},
+            "t2": {"seq": two, "epoch": made["t2"]},
         },
     )
     assert sorted(j["thread"]["id"] for j in reply["joined"]) == ["t2", "t3"]
@@ -121,8 +121,8 @@ async def test_a_refollow_skips_a_left_thread_unless_the_follower_was_added_to_i
         await helper.call("thread.follow", left={"t1": {"seq": -1}})
 
 
-async def created_at(ana: Peer, thread_id: str) -> str:
-    return str((await ana.call("thread.get", thread_id=thread_id))["thread"]["created_at"])
+async def epoch_of(ana: Peer, thread_id: str) -> int:
+    return int((await ana.call("thread.get", thread_id=thread_id))["thread"]["epoch"])
 
 
 async def test_a_refollow_follows_a_left_thread_made_again_however_long_its_new_log(
@@ -131,7 +131,7 @@ async def test_a_refollow_follows_a_left_thread_made_again_however_long_its_new_
     ana = await threads(server, "t1")
     for n in range(2):
         await say(ana, "t1", f"old {n}")
-    made = await created_at(ana, "t1")
+    made = await epoch_of(ana, "t1")
     await ana.call("thread.delete", thread_id="t1")
     await threads(server, "t1")
     for n in range(3):
@@ -140,7 +140,7 @@ async def test_a_refollow_follows_a_left_thread_made_again_however_long_its_new_
     unknown = await helper.call("thread.follow", left={"t1": {"seq": 2}})
     assert unknown["joined"] == []
     again = await Peer.open(server, HELPER)
-    reply = await again.call("thread.follow", left={"t1": {"seq": 2, "created_at": made}})
+    reply = await again.call("thread.follow", left={"t1": {"seq": 2, "epoch": made}})
     assert [j["thread"]["id"] for j in reply["joined"]] == ["t1"]
 
 
@@ -428,7 +428,7 @@ async def test_an_add_survives_a_follower_whose_membership_is_gone_and_is_still_
         await ana.call("thread.create", thread_id="t1")
         real = storage.head
 
-        async def head(scope: str, thread_id: str, identity_id: str) -> tuple[int, int] | None:
+        async def head(scope: str, thread_id: str, identity_id: str) -> tuple[int, int, int] | None:
             return None if identity_id == "helper" else await real(scope, thread_id, identity_id)
 
         monkeypatch.setattr(storage, "head", head)
@@ -472,7 +472,7 @@ async def test_a_session_dropped_inside_the_storage_reads_of_an_enter_is_not_lef
     await server.create_thread("acme", "t1")
     real = storage.head
 
-    async def head(scope: str, thread_id: str, identity_id: str) -> tuple[int, int] | None:
+    async def head(scope: str, thread_id: str, identity_id: str) -> tuple[int, int, int] | None:
         if identity_id == "helper":
             await server._hub.drop(session)
         return await real(scope, thread_id, identity_id)
@@ -884,18 +884,18 @@ async def test_a_failed_follow_leaves_the_connection_to_be_invited(
     assert helper.joined == []
 
 
-async def remade(server: Server) -> tuple[Peer, str, str]:
+async def remade(server: Server) -> tuple[Peer, int, int]:
     ana = await threads(server, "t1")
     for n in range(3):
         await say(ana, "t1", f"old {n}")
-    old = await created_at(ana, "t1")
+    old = await epoch_of(ana, "t1")
     await ana.call("thread.delete", thread_id="t1")
     await ana.call("thread.create", thread_id="t1", history="since_added")
     await say(ana, "t1", "before the add")
     await ana.call("member.add", thread_id="t1", identity=who(HELPER))
     for n in range(2):
         await say(ana, "t1", f"new {n}")
-    return ana, old, await created_at(ana, "t1")
+    return ana, old, await epoch_of(ana, "t1")
 
 
 async def test_a_join_since_a_position_in_the_thread_before_it_was_made_again_replays_it_from_the_add(
@@ -903,13 +903,13 @@ async def test_a_join_since_a_position_in_the_thread_before_it_was_made_again_re
 ) -> None:
     _, old, new = await remade(server)
     helper = await Peer.open(server, HELPER)
-    joined = await helper.call("thread.join", thread_id="t1", since=5, created_at=old)
+    joined = await helper.call("thread.join", thread_id="t1", since=5, epoch=old)
     assert (joined["seq"], joined["truncated"]) == (5, True)
     pushes = await helper.quiet()
     assert [p["kind"] for p in pushes if "seq" in p] == ["member_added", "message", "message"]
     assert texts(pushes) == ["new 0", "new 1"]
     again = await Peer.open(server, HELPER)
-    joined = await again.call("thread.join", thread_id="t1", since=4, created_at=new)
+    joined = await again.call("thread.join", thread_id="t1", since=4, epoch=new)
     assert (joined["seq"], joined["truncated"]) == (5, False)
     assert texts(await again.quiet()) == ["new 1"]
 
@@ -919,11 +919,11 @@ async def test_a_follow_since_a_position_in_the_thread_before_it_was_made_again_
 ) -> None:
     _, old, new = await remade(server)
     helper = await Peer.open(server, HELPER)
-    reply = await helper.call("thread.follow", since={"t1": {"seq": 5, "created_at": old}})
+    reply = await helper.call("thread.follow", since={"t1": {"seq": 5, "epoch": old}})
     assert [(j["seq"], j["truncated"]) for j in reply["joined"]] == [(5, True)]
     assert texts(await helper.quiet()) == ["new 0", "new 1"]
     again = await Peer.open(server, HELPER)
-    reply = await again.call("thread.follow", since={"t1": {"seq": 4, "created_at": new}})
+    reply = await again.call("thread.follow", since={"t1": {"seq": 4, "epoch": new}})
     assert [(j["seq"], j["truncated"]) for j in reply["joined"]] == [(5, False)]
     assert texts(await again.quiet()) == ["new 1"]
 

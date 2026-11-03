@@ -38,7 +38,8 @@ SIGNALS_PREFIX = "thread_signals_"
 NOTIFY_LIMIT = 7900
 RELISTEN = 0.5
 RELISTEN_CAP = 30.0
-_THREAD = "scope, id, metadata, created_at, history"
+_THREAD = "scope, id, metadata, created_at, history, epoch"
+_MAKE = "scope, id, metadata, created_at, history"
 
 
 def _json(value: Any) -> Any:
@@ -52,6 +53,7 @@ def _thread(row: Any) -> Thread:
         metadata=_json(row["metadata"]),
         created_at=row["created_at"],
         history=row["history"],
+        epoch=int(row["epoch"]),
     )
 
 
@@ -151,7 +153,7 @@ class PostgresStorage:
             raise StorageError("postgres: the creator belongs to another thread")
         async with self._guard("create_thread"), self._pool.acquire() as conn, conn.transaction():
             row = await conn.fetchrow(
-                f"INSERT INTO thread_threads ({_THREAD}) VALUES ($1, $2, $3::jsonb, $4, $5) "
+                f"INSERT INTO thread_threads ({_MAKE}) VALUES ($1, $2, $3::jsonb, $4, $5) "
                 "ON CONFLICT (scope, id) DO UPDATE SET scope = EXCLUDED.scope "
                 f"RETURNING {_THREAD}, last_seq, (xmax = 0) AS created",
                 scope,
@@ -161,7 +163,9 @@ class PostgresStorage:
                 thread.history,
             )
             if row["created"] and creator is not None:
-                stored = await self._append(conn, scope, creator, int(row["last_seq"]))
+                stored = await self._append(
+                    conn, scope, creator, int(row["last_seq"]), int(row["epoch"])
+                )
                 await self._admitted(conn, scope, creator.created_at, stored)
         return _thread(row), bool(row["created"])
 
@@ -247,7 +251,7 @@ class PostgresStorage:
             args.append(max(limit, 0))
             size = f"${len(args)}"
             columns = (
-                "t.scope, t.id, t.metadata, t.created_at, t.history, t.last_seq, "
+                "t.scope, t.id, t.metadata, t.created_at, t.history, t.epoch, t.last_seq, "
                 f"t.last_message_at, {marks}"
             )
             ordered = f"ORDER BY {key} DESC, t.id DESC LIMIT {size}"
@@ -427,10 +431,10 @@ class PostgresStorage:
         self, scope: str, updated: ThreadUpdated
     ) -> tuple[Thread, ThreadUpdated] | None:
         async with self._guard("update_thread"), self._pool.acquire() as conn, conn.transaction():
-            last = await self._locked(conn, scope, updated.thread_id)
-            if last is None:
+            locked = await self._locked(conn, scope, updated.thread_id)
+            if locked is None:
                 return None
-            stored = await self._append(conn, scope, updated, last)
+            stored = await self._append(conn, scope, updated, *locked)
             row = await conn.fetchrow(
                 "UPDATE thread_threads SET metadata = $3::jsonb WHERE scope = $1 AND id = $2 "
                 f"RETURNING {_THREAD}",
@@ -449,8 +453,8 @@ class PostgresStorage:
 
     async def add_member(self, scope: str, added: MemberAdded) -> tuple[Member, MemberAdded | None]:
         async with self._guard("add_member"), self._pool.acquire() as conn, conn.transaction():
-            last = await self._locked(conn, scope, added.thread_id)
-            if last is None:
+            locked = await self._locked(conn, scope, added.thread_id)
+            if locked is None:
                 raise NotFoundError(f"postgres: thread {added.thread_id!r} was not found")
             existing = await conn.fetchval(
                 "SELECT body FROM thread_members "
@@ -461,14 +465,14 @@ class PostgresStorage:
             )
             if existing is not None:
                 return Member.model_validate(_json(existing)), None
-            stored = await self._append(conn, scope, added, last)
+            stored = await self._append(conn, scope, added, *locked)
             member = await self._admitted(conn, scope, added.created_at, stored)
         return member, stored
 
     async def remove_member(self, scope: str, removed: MemberRemoved) -> MemberRemoved | None:
         async with self._guard("remove_member"), self._pool.acquire() as conn, conn.transaction():
-            last = await self._locked(conn, scope, removed.thread_id)
-            if last is None:
+            locked = await self._locked(conn, scope, removed.thread_id)
+            if locked is None:
                 raise NotFoundError(f"postgres: thread {removed.thread_id!r} was not found")
             body = await conn.fetchval(
                 "DELETE FROM thread_members WHERE scope = $1 AND thread_id = $2 "
@@ -481,16 +485,16 @@ class PostgresStorage:
                 return None
             member = Member.model_validate(_json(body))
             stamped = removed.model_copy(update={"identity": member.identity})
-            stored = await self._append(conn, scope, stamped, last)
+            stored = await self._append(conn, scope, stamped, *locked)
         return stored
 
-    async def _locked(self, conn: Any, scope: str, thread_id: str) -> int | None:
-        last = await conn.fetchval(
-            "SELECT last_seq FROM thread_threads WHERE scope = $1 AND id = $2 FOR UPDATE",
+    async def _locked(self, conn: Any, scope: str, thread_id: str) -> tuple[int, int] | None:
+        row = await conn.fetchrow(
+            "SELECT last_seq, epoch FROM thread_threads WHERE scope = $1 AND id = $2 FOR UPDATE",
             scope,
             thread_id,
         )
-        return None if last is None else int(last)
+        return None if row is None else (int(row["last_seq"]), int(row["epoch"]))
 
     async def _admitted(self, conn: Any, scope: str, at: datetime, added: MemberAdded) -> Member:
         member = Member(
@@ -528,10 +532,12 @@ class PostgresStorage:
             )
         return [Member.model_validate(_json(row["body"])) for row in rows]
 
-    async def head(self, scope: str, thread_id: str, identity_id: str) -> tuple[int, int] | None:
+    async def head(
+        self, scope: str, thread_id: str, identity_id: str
+    ) -> tuple[int, int, int] | None:
         async with self._guard("head"), self._pool.acquire() as conn:
             row = await conn.fetchrow(
-                "SELECT t.last_seq, CASE WHEN t.history = 'since_added' THEN m.added_seq "
+                "SELECT t.last_seq, t.epoch, CASE WHEN t.history = 'since_added' THEN m.added_seq "
                 "ELSE 0 END AS floor FROM thread_threads t JOIN thread_members m "
                 "ON m.scope = t.scope AND m.thread_id = t.id "
                 "WHERE t.scope = $1 AND t.id = $2 AND m.identity_id = $3",
@@ -539,7 +545,7 @@ class PostgresStorage:
                 thread_id,
                 identity_id,
             )
-        return None if row is None else (int(row["last_seq"]), int(row["floor"]))
+        return None if row is None else (int(row["last_seq"]), int(row["floor"]), int(row["epoch"]))
 
     async def is_member(self, scope: str, thread_id: str, identity_id: str) -> bool:
         async with self._guard("is_member"), self._pool.acquire() as conn:
@@ -554,10 +560,10 @@ class PostgresStorage:
 
     async def append_event(self, scope: str, event: Event) -> tuple[Event, bool]:
         async with self._guard("append_event"), self._pool.acquire() as conn, conn.transaction():
-            last = None
+            locked = None
             if event.author.role != "system":
-                last = await conn.fetchval(
-                    "SELECT t.last_seq FROM thread_threads t JOIN thread_members m "
+                row = await conn.fetchrow(
+                    "SELECT t.last_seq, t.epoch FROM thread_threads t JOIN thread_members m "
                     "ON m.scope = t.scope AND m.thread_id = t.id "
                     "WHERE t.scope = $1 AND t.id = $2 AND m.identity_id = $3 "
                     "FOR UPDATE OF t FOR KEY SHARE OF m",
@@ -565,9 +571,10 @@ class PostgresStorage:
                     event.thread_id,
                     event.author.id,
                 )
-            if last is None:
-                last = await self._locked(conn, scope, event.thread_id)
-                if last is None:
+                locked = None if row is None else (int(row["last_seq"]), int(row["epoch"]))
+            if locked is None:
+                locked = await self._locked(conn, scope, event.thread_id)
+                if locked is None:
                     raise NotFoundError(f"postgres: thread {event.thread_id!r} was not found")
                 if event.author.role != "system":
                     raise ForbiddenError(
@@ -583,9 +590,9 @@ class PostgresStorage:
             )
             if existing is not None:
                 return _event(existing), False
-            return await self._append(conn, scope, event, last), True
+            return await self._append(conn, scope, event, *locked), True
 
-    async def _append[E: Event](self, conn: Any, scope: str, event: E, last: int) -> E:
+    async def _append[E: Event](self, conn: Any, scope: str, event: E, last: int, epoch: int) -> E:
         events_channel, _ = await self._channels(conn)
         stored = cast(E, event.model_copy(update={"seq": last + 1}))
         await conn.execute(
@@ -619,7 +626,7 @@ class PostgresStorage:
         await conn.execute(
             "SELECT pg_notify($1, $2)",
             events_channel,
-            json.dumps({"s": scope, "t": stored.thread_id, "q": stored.seq}),
+            json.dumps({"s": scope, "t": stored.thread_id, "q": stored.seq, "e": epoch}),
         )
         return stored
 
@@ -807,7 +814,7 @@ class PostgresStorage:
         def dispatch(channel: str, text: str) -> None:
             data = json.loads(text)
             if channel == events_channel:
-                track(on_event(data["s"], data["t"], int(data["q"])))
+                track(on_event(data["s"], data["t"], int(data["q"]), int(data["e"])))
             else:
                 track(on_signal(data["s"], data["t"], data["p"]))
 

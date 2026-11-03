@@ -810,7 +810,7 @@ async def test_a_follow_into_threads_made_again_keeps_the_event_that_races_its_a
         await ana.add_member(thread_id, HELPER)
         await ana.send(thread_id, "first")
     page = await server.connect(identity=HELPER, scope="acme")
-    page._made.update({"t1": AT, "t2": AT})
+    page._epochs.update({"t1": 0, "t2": 0})
     page._cursors.update({"t1": 40, "t2": 40})
     enter = server._hub._enter
 

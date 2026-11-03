@@ -1207,6 +1207,7 @@ class Thread(BaseModel):
     scope: str
     metadata: dict[str, Any] = {}
     created_at: datetime
+    epoch: int = 0
     history: History = "all"
     last_seq: int | None = None
     last_message_at: datetime | None = None
@@ -1216,7 +1217,8 @@ class Thread(BaseModel):
     match: Message | None = None
 ```
 
-A conversation: `id` yours or the server's, `scope` its tenant, `metadata` yours, `history` who
+A conversation: `id` yours or the server's, `scope` its tenant, `metadata` yours, `epoch` the number Postgres gave it when it was made (a thread deleted and made
+again under the same id gets a larger one; `0` until stored), `history` who
 reads what came before an add (`"all"`, or `"since_added"`: each member from its add). A listed
 thread also carries `last_seq` and `last_message_at` (when its latest message was written); listed
 for a member, `marked` (the member's private read position, `None` without one) and `unread`
@@ -1444,7 +1446,7 @@ class Storage(Protocol):
 
     async def head(
         self, scope: str, thread_id: str, identity_id: str
-    ) -> tuple[int, int] | None: ...
+    ) -> tuple[int, int, int] | None: ...
 
     async def mark(
         self, scope: str, thread_id: str, identity_id: str, seq: int, back: bool = False
@@ -1518,12 +1520,12 @@ for a query with no word. A page continues below `before`: a thread id, at that 
 a `Thread` without `last_seq` (from `get_thread` or `create_thread`), also at that place now, or a `Thread` a page listed, at the place its own `created_at`, `last_message_at` and `id` give it,
 so paging holds when that thread is deleted or moves meanwhile. A member listing gives each thread's
 `last_seq` as it was when read, and `follow` enters a thread whose `history` is `"all"` at it unless
-the server heard the thread change since. `head` returns a thread's last `seq` and the member's
-floor when `identity_id` is a member of it, `None` otherwise: the one read that enters a thread for
+the server heard the thread change since. `head` returns a thread's last `seq`, the member's
+floor and the thread's `epoch` when `identity_id` is a member of it, `None` otherwise: the one read that enters a thread for
 a connection. The floor is 0 in a thread whose `history` is `"all"`, and in a `"since_added"` one
 the `seq` of the member's `MemberAdded` event; `list_events`
 and `get_event` given a `floor` leave out events below it and edits and retractions of them.
-`listen` takes an `OnEvent`, `on_event(scope, thread_id, seq)`, and an `OnSignal`,
+`listen` takes an `OnEvent`, `on_event(scope, thread_id, seq, epoch)`, and an `OnSignal`,
 `on_signal(scope, thread_id, payload)`, called for what any server on the storage appends or
 publishes, and an `OnResume`, `on_resume()`, called once a dropped listener is back and before
 anything it heard since is passed on; it returns a
@@ -2617,6 +2619,7 @@ type Thread = {
   scope: string
   metadata: Record<string, unknown>
   created_at: string
+  epoch: number
   history: 'all' | 'since_added'
   last_seq?: number
   last_message_at?: string
@@ -2627,7 +2630,8 @@ type Thread = {
 }
 ```
 
-A conversation: `id` yours or the server's, `scope` its tenant, `metadata` yours, `history` who
+A conversation: `id` yours or the server's, `scope` its tenant, `metadata` yours, `epoch` the number Postgres gave it when it was made (a thread deleted and made
+again under the same id gets a larger one; `0` until stored), `history` who
 reads what came before an add (`'all'`, or `'since_added'`: each member from its add). A listed
 thread also carries `last_seq` and `last_message_at` (when its latest message was written); listed
 for a member, `marked` (the member's private read position, omitted without one) and `unread`

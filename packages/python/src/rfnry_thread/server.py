@@ -92,14 +92,14 @@ class _Update(_Ref):
 
 class _Join(_Ref):
     since: Seq | None = None
-    created_at: datetime | None = None
+    epoch: Seq | None = None
     resume: bool = False
     away: bool = False
 
 
 class _Position(_Args):
     seq: Seq
-    created_at: datetime | None = None
+    epoch: Seq | None = None
 
 
 class _Follow(_Args):
@@ -108,8 +108,8 @@ class _Follow(_Args):
     left: dict[str, _Position] | None = None
 
 
-def _positions(found: dict[str, _Position] | None) -> dict[str, tuple[int, datetime | None]] | None:
-    return None if found is None else {t: (p.seq, p.created_at) for t, p in found.items()}
+def _positions(found: dict[str, _Position] | None) -> dict[str, tuple[int, int | None]] | None:
+    return None if found is None else {t: (p.seq, p.epoch) for t, p in found.items()}
 
 
 class _History(_Ref):
@@ -367,7 +367,7 @@ class Server:
             join = _args(_Join, method, payload)
             return _dump(
                 await verbs.join(
-                    session, join.thread_id, join.since, join.resume, join.away, join.created_at
+                    session, join.thread_id, join.since, join.resume, join.away, join.epoch
                 )
             )
         if method == "thread.follow":

@@ -421,7 +421,64 @@ async def test_upgrading_to_history_keeps_every_thread_whole_for_its_members(
     await storage.check()
     thread = await storage.get_thread("acme", "t1")
     assert thread is not None and thread.history == "all"
-    assert await storage.head("acme", "t1", "ana") == (7, 0)
+    assert thread.epoch > 0
+    assert await storage.head("acme", "t1", "ana") == (7, 0, thread.epoch)
+
+
+async def test_the_epoch_migration_numbers_existing_threads(
+    schemas: Schemas, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    every = migrations.MIGRATIONS
+    monkeypatch.setattr(migrations, "MIGRATIONS", every[:3])
+    monkeypatch.setattr(migrations, "LATEST", 3)
+    _, pool = await created(schemas)
+    async with pool.acquire() as conn:
+        for thread_id in ("t1", "t2", "t3"):
+            await conn.execute(
+                "INSERT INTO thread_threads (scope, id, metadata, created_at) "
+                "VALUES ('acme', $1, '{}', now())",
+                thread_id,
+            )
+    monkeypatch.setattr(migrations, "MIGRATIONS", every)
+    monkeypatch.setattr(migrations, "LATEST", every[-1].version)
+    async with pool.acquire() as conn:
+        ran = await migrations.apply(conn, migrations.plan_upgrade)
+    assert ran.steps == ["0004 epoch"]
+    storage = PostgresStorage(pool)
+    await storage.check()
+    epochs = [(await storage.get_thread("acme", t)).epoch for t in ("t1", "t2", "t3")]  # type: ignore[union-attr]
+    assert len(set(epochs)) == 3 and all(e > 0 for e in epochs)
+
+
+async def test_an_app_role_creates_threads_without_a_sequence_grant(schemas: Schemas) -> None:
+    name, _ = await created(schemas)
+    role = f"thread_probe_{uuid4().hex[:8]}"
+    await admin(f"CREATE ROLE {role} LOGIN PASSWORD 'probe'")
+    try:
+        await admin(f"GRANT USAGE ON SCHEMA {quoted(name)} TO {role}")
+        await admin(
+            f"GRANT SELECT, INSERT, UPDATE, DELETE ON ALL TABLES IN SCHEMA {quoted(name)} TO {role}"
+        )
+        parts = urlsplit(URL)
+        url = urlunsplit(parts._replace(netloc=f"{role}:probe@{parts.hostname}:{parts.port}"))
+        pool = await asyncpg.create_pool(
+            url, min_size=1, max_size=1, server_settings={"search_path": quoted(name)}
+        )
+        try:
+            storage = PostgresStorage(pool)
+            await storage.check()
+            first, _ = await storage.create_thread(
+                "acme", Thread(id="t1", scope="acme", created_at=AT)
+            )
+            second, _ = await storage.create_thread(
+                "acme", Thread(id="t2", scope="acme", created_at=AT)
+            )
+            assert 0 < first.epoch < second.epoch
+        finally:
+            await pool.close()
+    finally:
+        await admin(f"DROP OWNED BY {role}")
+        await admin(f"DROP ROLE {role}")
 
 
 def test_the_first_schema_of_a_search_path_is_read_as_postgres_reads_it() -> None:

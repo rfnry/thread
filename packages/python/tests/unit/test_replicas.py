@@ -2,7 +2,7 @@ import asyncio
 import inspect
 import logging
 from collections.abc import AsyncIterator, Callable
-from datetime import UTC, datetime, timedelta
+from datetime import UTC, datetime
 from typing import Any
 
 import pytest
@@ -324,11 +324,11 @@ async def test_a_room_whose_check_fails_tells_no_one_until_a_check_succeeds(
     monkeypatch.setattr(storage, "get_thread", failing)
     with caplog.at_level(logging.WARNING, logger="rfnry_thread.hub"):
         await near._hub.on_resume()
-        await near._hub.on_event("acme", "t1", 7)
+        await near._hub.on_event("acme", "t1", 7, 1)
     assert [(p["kind"], p["thread_id"]) for p in await ana.quiet()] == [("thread.deleted", "t2")]
     assert "hub: checking thread 't1' against storage failed" in caplog.text
     monkeypatch.setattr(storage, "get_thread", real)
-    await near._hub.on_event("acme", "t1", 7)
+    await near._hub.on_event("acme", "t1", 7, 1)
     assert [(p["kind"], p["thread_id"]) for p in await ana.quiet()] == [("thread.deleted", "t1")]
 
 
@@ -345,7 +345,7 @@ async def test_a_connection_taken_out_of_a_thread_ends_its_presence_when_what_fo
     await ana.quiet()
     await bruno.quiet()
     [held] = [s for s in near._hub.sessions if s.identity.id == "ana"]
-    held.created["t1"] -= timedelta(days=1)
+    held.epochs["t1"] -= 1
     real = storage.list_events
 
     async def failing(*args: Any, **kwargs: Any) -> Any:
@@ -355,7 +355,7 @@ async def test_a_connection_taken_out_of_a_thread_ends_its_presence_when_what_fo
 
     monkeypatch.setattr(storage, "list_events", failing)
     walk = near._hub.on_resume()
-    await near._hub.on_event("acme", "t1", 3)
+    await near._hub.on_event("acme", "t1", 3, 1)
     assert (await ana.push("thread.deleted"))["sender"]["id"] == "system"
     assert [(p["kind"], p["sender"]["id"]) for p in await bruno.quiet()] == [("left", "ana")]
     await asyncio.wait_for(walk, 5)
@@ -393,7 +393,7 @@ async def test_a_room_marked_again_while_its_check_reads_is_checked_again(
     bruno = await Peer.open(far, BRUNO)
     for n in range(3):
         sent = await say(bruno, "t1", f"new {n}")
-        await near._hub.on_event("acme", "t1", sent["seq"])
+        await near._hub.on_event("acme", "t1", sent["seq"], 1)
     assert await ana.quiet() == []
 
 
@@ -716,9 +716,9 @@ async def test_a_removal_after_a_follow_listing_cuts_the_follower_when_its_notic
     near, far = Server(storage), Server(storage)
     heard = near._hub.on_event
 
-    async def late(scope: str, thread_id: str, seq: int) -> None:
+    async def late(scope: str, thread_id: str, seq: int, epoch: int) -> None:
         await asyncio.sleep(0.3)
-        await heard(scope, thread_id, seq)
+        await heard(scope, thread_id, seq, epoch)
 
     monkeypatch.setattr(near._hub, "on_event", late)
     await near.start()

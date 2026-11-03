@@ -6,7 +6,6 @@ import random
 import uuid
 from collections.abc import AsyncIterator, Awaitable, Callable
 from dataclasses import dataclass, field
-from datetime import datetime
 from types import TracebackType
 from typing import Any
 
@@ -211,7 +210,7 @@ class _Hold:
     events: list[Event] = field(default_factory=list)
     top: int = 0
     base: int = 0
-    made: datetime | None = None
+    epoch: int | None = None
     guessed: bool = False
 
 
@@ -231,7 +230,7 @@ class Client:
         self._following = False
         self._present: set[str] = set()
         self._left: dict[str, int] = {}
-        self._made: dict[str, datetime] = {}
+        self._epochs: dict[str, int] = {}
         self._outbox: dict[str, asyncio.Lock] = {}
         self._connected = asyncio.Event()
         self._reader: asyncio.Task[None] | None = None
@@ -343,7 +342,7 @@ class Client:
             joined = Joined.model_validate(push.payload)
             thread_id = joined.thread.id
             self._left.pop(thread_id, None)
-            self._made[thread_id] = joined.thread.created_at
+            self._epochs[thread_id] = joined.thread.epoch
             self._cursors[thread_id] = max(self._cursors.get(thread_id, 0), joined.seq)
             self._inbox.put_nowait(joined)
             return
@@ -393,10 +392,10 @@ class Client:
 
     def _settle(self, joined: Joined, hold: _Hold | None, announce: bool) -> None:
         thread_id = joined.thread.id
-        created = joined.thread.created_at
-        before = hold.made if hold is not None else self._made.get(thread_id)
-        self._made[thread_id] = created
-        again = before is not None and before != created
+        epoch = joined.thread.epoch
+        before = hold.epoch if hold is not None else self._epochs.get(thread_id)
+        self._epochs[thread_id] = epoch
+        again = before is not None and before != epoch
         past = hold is not None and joined.seq < hold.sent
         top = hold.top if hold is not None else 0
         if again:
@@ -547,7 +546,7 @@ class Client:
     async def _rejoined(self, thread_id: str, cursor: int) -> Joined:
         away = thread_id not in self._present
         return await self._join(
-            thread_id, cursor, away=away, announce=True, made=self._made.get(thread_id)
+            thread_id, cursor, away=away, announce=True, epoch=self._epochs.get(thread_id)
         )
 
     def _fail(self, error: ThreadException) -> None:
@@ -646,7 +645,7 @@ class Client:
         resume: bool = False,
         away: bool = False,
         announce: bool = False,
-        made: datetime | None = None,
+        epoch: int | None = None,
     ) -> Joined:
         held = self._cursors.get(thread_id)
         hold = (
@@ -654,7 +653,7 @@ class Client:
                 thread_id,
                 since,
                 base=self._trusted(thread_id),
-                made=self._made.get(thread_id),
+                epoch=self._epochs.get(thread_id),
                 guessed=held is None,
             )
             if since is not None
@@ -672,8 +671,8 @@ class Client:
             payload["resume"] = True
         if away:
             payload["away"] = True
-        if made is not None:
-            payload["created_at"] = made
+        if epoch is not None:
+            payload["epoch"] = epoch
         if hold is not None:
             self._holds.append(hold)
         try:
@@ -783,7 +782,7 @@ class Client:
             payload["left"] = self._positions(left)
         holds = {
             thread_id: _Hold(
-                thread_id, sent, base=self._trusted(thread_id), made=self._made.get(thread_id)
+                thread_id, sent, base=self._trusted(thread_id), epoch=self._epochs.get(thread_id)
             )
             for thread_id, sent in (since or {}).items()
         }
@@ -810,8 +809,8 @@ class Client:
 
     def _positions(self, seqs: dict[str, int]) -> dict[str, dict[str, Any]]:
         return {
-            thread_id: {"seq": seq, "created_at": self._made[thread_id]}
-            if thread_id in self._made
+            thread_id: {"seq": seq, "epoch": self._epochs[thread_id]}
+            if thread_id in self._epochs
             else {"seq": seq}
             for thread_id, seq in seqs.items()
         }

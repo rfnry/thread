@@ -7,7 +7,6 @@ import weakref
 from collections.abc import AsyncIterator, Awaitable, Callable, Coroutine, Iterator
 from contextlib import asynccontextmanager, contextmanager
 from dataclasses import dataclass, field
-from datetime import datetime
 from typing import Any
 
 from rfnry_thread.errors import ForbiddenError, NotFoundError, StorageError, ThreadException
@@ -53,7 +52,7 @@ class Session:
     id: str = field(default_factory=lambda: uuid.uuid4().hex)
     joined: dict[str, int] = field(default_factory=dict)
     floors: dict[str, int] = field(default_factory=dict)
-    created: dict[str, datetime] = field(default_factory=dict)
+    epochs: dict[str, int] = field(default_factory=dict)
     streams: set[tuple[str, str]] = field(default_factory=set)
     working: set[str] = field(default_factory=set)
     present: set[str] = field(default_factory=set)
@@ -136,20 +135,20 @@ class Hub:
     def _audience(self, scope: str, thread_id: str) -> list[Session]:
         return [] if (scope, thread_id) in self._unchecked else self._room(scope, thread_id)
 
-    def _doubted(self, scope: str, thread_id: str, created: datetime | None) -> bool:
+    def _doubted(self, scope: str, thread_id: str, epoch: int | None) -> bool:
         return (scope, thread_id) in self._unchecked or (
-            created is not None
-            and any(s.created.get(thread_id) != created for s in self._room(scope, thread_id))
+            epoch is not None
+            and any(s.epochs.get(thread_id) != epoch for s in self._room(scope, thread_id))
         )
 
     @asynccontextmanager
     async def _locked(
-        self, scope: str, thread_id: str, created: datetime | None = None
+        self, scope: str, thread_id: str, epoch: int | None = None
     ) -> AsyncIterator[_Aftermath]:
         after = _Aftermath()
         try:
             async with self._lock(scope, thread_id):
-                if self._doubted(scope, thread_id, created):
+                if self._doubted(scope, thread_id, epoch):
                     await self._settle(scope, thread_id, after)
                 yield after
         finally:
@@ -178,7 +177,7 @@ class Hub:
             self._told.setdefault(key, self.state.snapshot(scope, thread_id, expired=True))
             logger.warning("hub: checking thread %r against storage failed: %s", thread_id, error)
             return
-        stale = [s for s in room if thread is None or s.created.get(thread_id) != thread.created_at]
+        stale = [s for s in room if thread is None or s.epochs.get(thread_id) != thread.epoch]
         gone = ThreadDeleted(thread_id=thread_id, sender=SYSTEM)
         if len(stale) == len(room):
             after.emptied.update(self._wipe(scope, gone))
@@ -231,7 +230,7 @@ class Hub:
         touched: set[tuple[str, str | None]] | None = None,
     ) -> tuple[Joined, bool]:
         scope, thread_id = session.scope, thread.id
-        async with self._locked(scope, thread_id, thread.created_at):
+        async with self._locked(scope, thread_id, thread.epoch):
             if session.dropped:
                 return Joined(thread=thread, seq=session.joined.get(thread_id, 0)), False
             if (scope, thread_id) in self._unchecked:
@@ -248,7 +247,7 @@ class Hub:
                 and thread.last_seq is not None
             )
             found = (
-                (thread.last_seq or 0, 0)
+                (thread.last_seq or 0, 0, thread.epoch)
                 if listed
                 else await self.storage.head(scope, thread_id, session.identity.id)
             )
@@ -256,7 +255,7 @@ class Hub:
                 raise ForbiddenError(
                     f"server: {session.identity.id!r} is not a member of thread {thread_id!r}"
                 )
-            head, floor = found
+            head, floor, _ = found
             start = None if since is None else max(since, floor - 1)
             replay: list[Event] = []
             truncated = since is not None and since > head
@@ -279,7 +278,7 @@ class Hub:
                 return Joined(thread=thread, seq=head), False
             session.joined[thread_id] = replay[0].seq - 1 if replay else head
             session.floors[thread_id] = floor
-            session.created[thread_id] = thread.created_at
+            session.epochs[thread_id] = thread.epoch
             self._expire(scope, thread_id)
             self._rooms.setdefault((scope, thread_id), set()).add(session)
             for event in replay:
@@ -331,7 +330,7 @@ class Hub:
 
     def _part(self, session: Session, thread_id: str) -> bool:
         session.floors.pop(thread_id, None)
-        session.created.pop(thread_id, None)
+        session.epochs.pop(thread_id, None)
         if session.joined.pop(thread_id, None) is None:
             return False
         room = self._rooms.get((session.scope, thread_id))
@@ -366,9 +365,9 @@ class Hub:
             session.present.discard(thread_id)
             await self._depart(session, thread_id)
 
-    async def deliver(self, scope: str, event: Event, created: datetime | None = None) -> None:
+    async def deliver(self, scope: str, event: Event, epoch: int | None = None) -> None:
         self._touch(scope, event.thread_id)
-        async with self._locked(scope, event.thread_id, created) as after:
+        async with self._locked(scope, event.thread_id, epoch) as after:
             await self._deliver(scope, event, after)
 
     async def _deliver(self, scope: str, event: Event, after: _Aftermath) -> None:
@@ -462,7 +461,7 @@ class Hub:
         found = await self.storage.get_event(scope, event.thread_id, event.target)
         return event.seq if found is None else found.seq
 
-    async def on_event(self, scope: str, thread_id: str, seq: int) -> None:
+    async def on_event(self, scope: str, thread_id: str, seq: int, epoch: int) -> None:
         self._touch(scope, thread_id)
         lock = self._locks.get((scope, thread_id))
         entering = lock is not None and lock.locked()
@@ -586,7 +585,7 @@ class Hub:
     ) -> None:
         for wiping in list(self._wiping.get(scope, ())):
             await wiping.wait()
-        await self._check(scope, thread.id, thread.created_at)
+        await self._check(scope, thread.id, thread.epoch)
         for session in list(self.sessions):
             if (
                 session.scope != scope
@@ -687,7 +686,7 @@ class Hub:
             session.push_signal(payload)
             session.joined.pop(thread_id, None)
             session.floors.pop(thread_id, None)
-            session.created.pop(thread_id, None)
+            session.epochs.pop(thread_id, None)
             session.present.discard(thread_id)
             session.working.discard(thread_id)
             session.streams = {s for s in session.streams if s[0] != thread_id}
@@ -719,8 +718,8 @@ class Hub:
                     "hub: checking thread %r against storage failed: %s", thread_id, error
                 )
 
-    async def _check(self, scope: str, thread_id: str, created: datetime | None = None) -> None:
-        async with self._locked(scope, thread_id, created):
+    async def _check(self, scope: str, thread_id: str, epoch: int | None = None) -> None:
+        async with self._locked(scope, thread_id, epoch):
             pass
 
     async def _emptied(self, scope: str, emptied: dict[str, list[dict[str, Any]]]) -> None:

@@ -12,7 +12,7 @@ from rfnry_thread.models import (
     ThreadUpdated,
 )
 
-OnEvent = Callable[[str, str, int], Awaitable[None]]
+OnEvent = Callable[[str, str, int, int], Awaitable[None]]
 OnSignal = Callable[[str, str, dict[str, Any]], Awaitable[None]]
 OnResume = Callable[[], Awaitable[None]]
 Stop = Callable[[], Awaitable[None]]
@@ -71,7 +71,7 @@ class Storage(Protocol):
 
     async def head(
         self, scope: str, thread_id: str, identity_id: str
-    ) -> tuple[int, int] | None: ...
+    ) -> tuple[int, int, int] | None: ...
 
     async def mark(
         self, scope: str, thread_id: str, identity_id: str, seq: int, back: bool = False

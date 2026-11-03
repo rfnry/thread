@@ -36,7 +36,7 @@ type Hold = {
   events: Event[]
   top: number
   base: number
-  made: string | undefined
+  epoch: number | undefined
   guessed: boolean
 }
 export type Protocols = string | string[]
@@ -245,7 +245,7 @@ export class Client {
   private following = false
   private readonly held = new Set<string>()
   private readonly left = new Map<string, number>()
-  private readonly made = new Map<string, string>()
+  private readonly epochs = new Map<string, number>()
   private stopped = false
   private attempt = 0
   private reconnecting = false
@@ -338,7 +338,7 @@ export class Client {
     if (frame.name === 'joined') {
       const joined = frame.payload as unknown as Joined
       this.left.delete(joined.thread.id)
-      this.made.set(joined.thread.id, joined.thread.created_at)
+      this.epochs.set(joined.thread.id, joined.thread.epoch)
       this.cursors.set(
         joined.thread.id,
         Math.max(this.cursors.get(joined.thread.id) ?? 0, joined.seq)
@@ -403,10 +403,10 @@ export class Client {
 
   private conclude(joined: Joined, hold: Hold | undefined, announce: boolean): void {
     const threadId = joined.thread.id
-    const created = joined.thread.created_at
-    const before = hold ? hold.made : this.made.get(threadId)
-    this.made.set(threadId, created)
-    const again = before !== undefined && before !== created
+    const epoch = joined.thread.epoch
+    const before = hold ? hold.epoch : this.epochs.get(threadId)
+    this.epochs.set(threadId, epoch)
+    const again = before !== undefined && before !== epoch
     const past = hold !== undefined && joined.seq < hold.sent
     const top = hold?.top ?? 0
     let floor: number
@@ -593,7 +593,7 @@ export class Client {
 
   private async rejoined(threadId: string, cursor: number): Promise<Joined> {
     const away = !this.held.has(threadId)
-    return this.joinFrom(threadId, cursor, false, away, true, this.made.get(threadId))
+    return this.joinFrom(threadId, cursor, false, away, true, this.epochs.get(threadId))
   }
 
   private fail(error: ThreadException): void {
@@ -659,7 +659,7 @@ export class Client {
     resume = false,
     away = false,
     announce = false,
-    made?: string
+    epoch?: number
   ): Promise<Joined> {
     const held = this.cursors.get(threadId)
     const hold: Hold | undefined =
@@ -671,7 +671,7 @@ export class Client {
             events: [],
             top: 0,
             base: this.trusted(threadId),
-            made: this.made.get(threadId),
+            epoch: this.epochs.get(threadId),
             guessed: held === undefined,
           }
     const start = resume ? 0 : since
@@ -684,7 +684,7 @@ export class Client {
     const payload: Payload = { thread_id: threadId, since }
     if (resume) payload.resume = true
     if (away) payload.away = true
-    if (made !== undefined) payload.created_at = made
+    if (epoch !== undefined) payload.epoch = epoch
     if (hold) this.holds.push(hold)
     try {
       let joined: Joined
@@ -820,7 +820,7 @@ export class Client {
           events: [],
           top: 0,
           base: this.trusted(id),
-          made: this.made.get(id),
+          epoch: this.epochs.get(id),
           guessed: false,
         },
       ])
@@ -852,8 +852,8 @@ export class Client {
   private positions(seqs: Record<string, number>): Record<string, Payload> {
     return Object.fromEntries(
       Object.entries(seqs).map(([id, seq]) => {
-        const created = this.made.get(id)
-        return [id, created === undefined ? { seq } : { seq, created_at: created }]
+        const epoch = this.epochs.get(id)
+        return [id, epoch === undefined ? { seq } : { seq, epoch }]
       })
     )
   }

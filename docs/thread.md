@@ -112,7 +112,7 @@ A **signal** is ephemeral. Every signal carries `thread_id` and `sender`, stampe
 | `Marked` | `seq`, `unread` | your read position in the thread moved; only your other connections hear it |
 | `ThreadDeleted` | — | the thread is gone |
 
-`Signal` is any of them. `Thread` (`id`, `scope`, `metadata`, `created_at`) and `Member`
+`Signal` is any of them. `Thread` (`id`, `scope`, `metadata`, `created_at`, `epoch`) and `Member`
 (`thread_id`, `identity`, `added_at`, `added_by`) complete the shapes.
 
 ## Getting started
@@ -261,8 +261,8 @@ Without `since`, a join is live from now. With `since`, the events after that `s
 `since=0` for the whole log — then what is happening right now, then live traffic. A join replays
 at most 500 events (`Server(replay_limit=)`); beyond that you get the latest 500 and
 `truncated=True`, and `history(thread.id, before=seq)` pages back when you want more. A `since`
-past the thread's last `seq` — it was deleted and made again under the same id — replays nothing
-and says `truncated=True` too, and the client follows the thread from `joined.seq`.
+past the thread's last `seq` — it was deleted and made again under the same id, which gives it a new
+`epoch` — replays nothing and says `truncated=True` too, and the client follows the thread from `joined.seq`.
 
 A participant that follows never needs this: a thread it is added to arrives on its own
 ([Following and catching up](#following-and-catching-up)).
@@ -462,7 +462,8 @@ Until then nothing of that thread reaches the client, though writes to it still 
 to arrives as `Invited`, and as `Joined` once the follow is taken.
 A re-follow's or re-join's `Joined`
 also arrives in `events()`, and when it says `truncated`, redraw from the latest page. Each position
-a re-join or re-follow resumes from carries the `created_at` of the thread it was read in, so a
+a re-join or re-follow resumes from carries the `epoch` of the thread it was read in, the number
+Postgres gave the thread when it was made, so a
 thread deleted and made again under the same id while the client was away arrives from its start
 (from your add in a `since_added` thread), at most the replay limit of it, with `truncated=True`. A reconnect
 your endpoint refuses (HTTP 401 or 403 on the upgrade, or 1008 before the hello is answered), or

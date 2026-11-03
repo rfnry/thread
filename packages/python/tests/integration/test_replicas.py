@@ -564,7 +564,7 @@ async def test_a_dropped_listener_listens_again_and_resumes(
     heard: list[dict[str, Any]] = []
     resumed = asyncio.Event()
 
-    async def on_event(scope: str, thread_id: str, seq: int) -> None:
+    async def on_event(scope: str, thread_id: str, seq: int, epoch: int) -> None:
         seen.append(seq)
 
     async def on_signal(scope: str, thread_id: str, payload: dict[str, Any]) -> None:
@@ -615,7 +615,7 @@ async def test_what_a_listener_hears_while_listening_again_is_passed_on_after_on
     monkeypatch.setattr(asyncpg.connection.Connection, "add_listener", held)
     monkeypatch.setattr(postgres, "RELISTEN", 0.01)
 
-    def on_event(scope: str, thread_id: str, seq: int) -> Awaitable[None]:
+    def on_event(scope: str, thread_id: str, seq: int, epoch: int) -> Awaitable[None]:
         order.append(f"event {seq}")
         return asyncio.sleep(0)
 
@@ -724,7 +724,7 @@ async def test_deployments_in_different_schemas_do_not_hear_each_other(
 
             return on_signal
 
-        async def on_event(scope: str, thread_id: str, seq: int) -> None:
+        async def on_event(scope: str, thread_id: str, seq: int, epoch: int) -> None:
             events.append(seq)
 
         for name, store in (("near", storage), ("sibling", sibling), ("foreign", foreign)):
