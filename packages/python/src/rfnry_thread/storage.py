@@ -72,8 +72,8 @@ class Storage(Protocol):
     async def is_member(self, scope: str, thread_id: str, identity_id: str) -> bool: ...
 
     async def head(
-        self, scope: str, thread_id: str, identity_id: str
-    ) -> tuple[int, int, int] | None: ...
+        self, scope: str, identity_id: str, thread_ids: Sequence[str]
+    ) -> dict[str, tuple[int, int, int]]: ...
 
     async def heads(
         self, keys: Sequence[tuple[str, str]]

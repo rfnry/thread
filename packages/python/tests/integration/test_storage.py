@@ -275,17 +275,30 @@ async def test_list_events_pages_both_ways_and_filters_kinds(storage: Storage) -
     assert await storage.get_event("acme", "t1", "ghost") is None
 
 
-async def test_a_head_is_the_last_seq_for_a_member_and_none_for_anyone_else(
+async def test_a_head_holds_each_listed_thread_its_identity_is_a_member_of_in_one_read(
     storage: Storage,
 ) -> None:
     await room(storage, "t1")
+    await room(storage, "t2")
     await room(storage, "t1", "globex")
     for client_id in ("c1", "c2"):
         await append(storage, "acme", say("t1", client_id))
-    assert await storage.head("acme", "t1", "ana") == (3, 0, await epoch_of(storage))
-    assert await storage.head("globex", "t1", "ana") == (1, 0, await epoch_of(storage, "globex"))
-    assert await storage.head("acme", "t1", "bruno") is None
-    assert await storage.head("acme", "ghost", "ana") is None
+    await storage.create_thread("acme", thread("t3").model_copy(update={"history": "since_added"}))
+    await admit(storage, "acme", added("t3", BRUNO))
+    await append(storage, "acme", say("t3", "c3", author=BRUNO))
+    await admit(storage, "acme", added("t3", ANA))
+    await append(storage, "acme", say("t3", "c4"))
+    one, two = await epoch_of(storage), await epoch_of(storage, thread_id="t2")
+    three = await epoch_of(storage, thread_id="t3")
+    ids = ["t3", "t1", "t2", "t1", "ghost"]
+    found = await storage.head("acme", "ana", ids)
+    assert found == {"t1": (3, 0, one), "t2": (1, 0, two), "t3": (4, 3, three)}
+    assert found == {k: v for i in ids for k, v in (await storage.head("acme", "ana", [i])).items()}
+    assert await storage.head("globex", "ana", ["t1", "t2"]) == {
+        "t1": (1, 0, await epoch_of(storage, "globex"))
+    }
+    assert await storage.head("acme", "bruno", ["t1", "t2"]) == {}
+    assert await storage.head("acme", "ana", []) == {}
 
 
 async def test_the_same_thread_id_in_two_scopes_is_two_threads(storage: Storage) -> None:
@@ -888,8 +901,8 @@ async def test_a_thread_since_added_keeps_what_came_before_a_member_from_them(
     await append(storage, "acme", changed(Edit, "e1", before.id, content=[Text(text="x")]))
     await append(storage, "acme", changed(Edit, "e2", after.id, content=[Text(text="y")]))
     await append(storage, "acme", changed(Retract, "r1", before.id))
-    assert await storage.head("acme", "t1", "ana") == (7, 1, await epoch_of(storage))
-    assert await storage.head("acme", "t1", "bruno") == (7, 3, await epoch_of(storage))
+    assert await storage.head("acme", "ana", ["t1"]) == {"t1": (7, 1, await epoch_of(storage))}
+    assert await storage.head("acme", "bruno", ["t1"]) == {"t1": (7, 3, await epoch_of(storage))}
     assert seqs(await storage.list_events("acme", "t1")) == [1, 2, 3, 4, 5, 6, 7]
     assert seqs(await storage.list_events("acme", "t1", floor=3)) == [3, 4, 6]
     assert seqs(await storage.list_events("acme", "t1", since=0, floor=3)) == [3, 4, 6]
@@ -911,8 +924,8 @@ async def test_a_thread_with_its_whole_history_floors_no_member(storage: Storage
     await admit(storage, "acme", added("t1", BRUNO))
     got = await storage.get_thread("acme", "t1")
     assert got is not None and got.history == "all"
-    assert await storage.head("acme", "t1", "bruno") == (3, 0, await epoch_of(storage))
-    assert await storage.head("acme", "t1", "zed") is None
+    assert await storage.head("acme", "bruno", ["t1"]) == {"t1": (3, 0, await epoch_of(storage))}
+    assert await storage.head("acme", "zed", ["t1"]) == {}
 
 
 async def test_a_member_listing_by_activity_filters_metadata_and_pages_together(
@@ -979,7 +992,7 @@ async def test_a_member_added_while_an_append_is_in_flight_is_floored_after_it(
         await asyncio.sleep(0.2)
         assert not adding.done()
     await adding
-    assert await storage.head("acme", "t1", "bruno") == (3, 3, await epoch_of(storage))
+    assert await storage.head("acme", "bruno", ["t1"]) == {"t1": (3, 3, await epoch_of(storage))}
 
 
 async def failing(schemas: Schemas) -> tuple[PostgresStorage, Any]:
@@ -1060,13 +1073,13 @@ async def test_membership_reads_from_its_member_added_event(storage: Storage) ->
     await append(storage, "acme", say("t1", "c2", "two"))
     _, event = await admit(storage, "acme", added("t1", BRUNO))
     assert event is not None
-    head = await storage.head("acme", "t1", "bruno")
+    head = (await storage.head("acme", "bruno", ["t1"])).get("t1")
     assert head is not None and head[1] == event.seq
     assert await storage.get_mark("acme", "t1", "bruno") == event.seq - 1
     assert await expel(storage, "acme", removed("t1", BRUNO)) is not None
     _, again = await admit(storage, "acme", added("t1", BRUNO))
     assert again is not None and again.seq > event.seq
-    head = await storage.head("acme", "t1", "bruno")
+    head = (await storage.head("acme", "bruno", ["t1"])).get("t1")
     assert head is not None and head[1] == again.seq
 
 
@@ -1264,8 +1277,7 @@ async def test_head_returns_the_epoch(storage: Storage) -> None:
     await room(storage, "t2")
     one, two = await epoch_of(storage), await epoch_of(storage, thread_id="t2")
     assert one != two and one > 0 and two > 0
-    assert await storage.head("acme", "t1", "ana") == (1, 0, one)
-    assert await storage.head("acme", "t2", "ana") == (1, 0, two)
+    assert await storage.head("acme", "ana", ["t1", "t2"]) == {"t1": (1, 0, one), "t2": (1, 0, two)}
 
 
 async def test_the_event_hint_carries_the_epoch(storage: Storage) -> None:

@@ -631,10 +631,12 @@ async def test_an_invitation_crossing_the_deletion_of_its_scope_is_handed_over_a
     checked: list[str] = []
     release = asyncio.Event()
 
-    async def held(scope: str, thread_id: str, identity_id: str) -> tuple[int, int, int] | None:
-        found = await head(scope, thread_id, identity_id)
-        if thread_id == "t0":
-            reading.append(thread_id)
+    async def held(
+        scope: str, identity_id: str, thread_ids: list[str]
+    ) -> dict[str, tuple[int, int, int]]:
+        found = await head(scope, identity_id, thread_ids)
+        if "t0" in thread_ids:
+            reading.append("t0")
             await release.wait()
         return found
 
@@ -695,9 +697,11 @@ async def test_joins_and_a_signal_crossing_the_deletion_of_their_scope_leave_not
     reading: list[str] = []
     release = asyncio.Event()
 
-    async def held(scope: str, thread_id: str, identity_id: str) -> tuple[int, int, int] | None:
-        found = await head(scope, thread_id, identity_id)
-        reading.append(thread_id)
+    async def held(
+        scope: str, identity_id: str, thread_ids: list[str]
+    ) -> dict[str, tuple[int, int, int]]:
+        found = await head(scope, identity_id, thread_ids)
+        reading.extend(thread_ids)
         await release.wait()
         return found
 
@@ -1161,11 +1165,11 @@ async def test_a_member_added_is_stored_and_served_though_one_connection_fails_t
     head = storage.head
     armed = [True]
 
-    async def flaky(scope: str, thread_id: str, identity_id: str) -> Any:
+    async def flaky(scope: str, identity_id: str, thread_ids: list[str]) -> Any:
         if identity_id == HELPER.id and armed:
             armed.pop()
             raise StorageError("postgres: storage rejected head: connection reset")
-        return await head(scope, thread_id, identity_id)
+        return await head(scope, identity_id, thread_ids)
 
     monkeypatch.setattr(storage, "head", flaky)
     with caplog.at_level(logging.WARNING, logger="rfnry_thread.hub"):
@@ -1448,8 +1452,11 @@ async def test_a_follow_answers_no_join_for_a_thread_deleted_or_left_by_its_remo
     await append(storage, "acme", message(1, "m1", BRUNO).model_copy(update={"thread_id": "t2"}))
     session, _ = open_session(BRUNO)
     session.following = True
+    heads = await storage.head("acme", "bruno", ["t1", "t2"])
     reached, release = gated(storage, monkeypatch, "tail")
-    following = asyncio.create_task(hub.follow(session, [(thread, None), (second, 0)], set()))
+    following = asyncio.create_task(
+        hub.follow(session, [(thread, None, heads.get("t1")), (second, 0, heads.get("t2"))])
+    )
     await asyncio.wait_for(reached.wait(), 5)
     assert "t1" in session.joined
     if crossing == "deleted":

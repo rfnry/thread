@@ -552,19 +552,22 @@ class PostgresStorage:
         return [Member.model_validate(_json(row["body"])) for row in rows]
 
     async def head(
-        self, scope: str, thread_id: str, identity_id: str
-    ) -> tuple[int, int, int] | None:
+        self, scope: str, identity_id: str, thread_ids: Sequence[str]
+    ) -> dict[str, tuple[int, int, int]]:
         async with self._guard("head"), self._pool.acquire() as conn:
-            row = await conn.fetchrow(
-                "SELECT t.last_seq, t.epoch, CASE WHEN t.history = 'since_added' THEN m.added_seq "
-                "ELSE 0 END AS floor FROM thread_threads t JOIN thread_members m "
-                "ON m.scope = t.scope AND m.thread_id = t.id "
-                "WHERE t.scope = $1 AND t.id = $2 AND m.identity_id = $3",
+            rows = await conn.fetch(
+                "SELECT t.id, t.last_seq, t.epoch, CASE WHEN t.history = 'since_added' "
+                "THEN m.added_seq ELSE 0 END AS floor FROM unnest($3::text[]) AS k(id) "
+                "JOIN thread_threads t ON t.scope = $1 AND t.id = k.id "
+                "JOIN thread_members m ON m.scope = t.scope AND m.thread_id = t.id "
+                "AND m.identity_id = $2",
                 scope,
-                thread_id,
                 identity_id,
+                list(thread_ids),
             )
-        return None if row is None else (int(row["last_seq"]), int(row["floor"]), int(row["epoch"]))
+        return {
+            row["id"]: (int(row["last_seq"]), int(row["floor"]), int(row["epoch"])) for row in rows
+        }
 
     async def heads(
         self, keys: Sequence[tuple[str, str]]

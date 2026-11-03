@@ -424,7 +424,7 @@ async def test_upgrading_to_history_keeps_every_thread_whole_for_its_members(
     thread = await storage.get_thread("acme", "t1")
     assert thread is not None and thread.history == "all"
     assert thread.epoch > 0
-    assert await storage.head("acme", "t1", "ana") == (7, 0, thread.epoch)
+    assert await storage.head("acme", "ana", ["t1"]) == {"t1": (7, 0, thread.epoch)}
 
 
 async def test_the_epoch_migration_numbers_existing_threads(

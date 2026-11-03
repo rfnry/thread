@@ -576,20 +576,21 @@ storage.
 
 A notice about a thread carries its epoch, and every replica catches each thread its connections
 have open up from storage: on a notice for it, and in a pass over all of them, in one read, every
-ten seconds, on `start()` and whenever it listens again. Catching up reads the thread's row and the
-events past each connection's position in one snapshot. A missing row or another epoch is a thread
-deleted, or deleted and made again under the same id: its connections are sent `ThreadDeleted` and
-leave it, and nothing of the new thread reaches them — a signal from a newer epoch first catches
-their room up, and one from an older epoch is dropped. Otherwise they are sent what they missed, and
-a member removed meanwhile receives its `MemberRemoved` and leaves. A lost notice costs at most ten
-seconds, never an event; the `thread.deleted` and `scope.deleted` notices only act sooner. A read
-that fails is tried again by whatever next reaches the thread. Every pass — the ten-second one, the
-one on `start()` and the one after listening again — leaves a thread still busy with a catch-up, a
-join or a write to that work, whose traffic or the next pass catches it up; a pass still running
-after ten seconds is stopped and started over at the next, and a pass that fails is logged and the
-next one runs. Give the pool a `command_timeout`, so a read the database never answers ends. A
-replica that misses an `invited` notice gives no `Invited`, and a follower no `Joined`, until the
-connection follows again.
+ten seconds, on `start()` and whenever it listens again; a follow, which reads where each of its
+threads stands from storage in one read, catches up the threads it entered before it answers.
+Catching up reads the thread's row and the events past each connection's position in one snapshot. A
+missing row or another epoch is a thread deleted, or deleted and made again under the same id: its
+connections are sent `ThreadDeleted` and leave it, and nothing of the new thread reaches them — a
+signal from a newer epoch first catches their room up, and one from an older epoch is dropped.
+Otherwise they are sent what they missed, and a member removed meanwhile receives its
+`MemberRemoved` and leaves. A lost notice costs at most ten seconds, never an event; the
+`thread.deleted` and `scope.deleted` notices only act sooner. A read that fails is tried again by
+whatever next reaches the thread. Every pass — the ten-second one, the one on `start()` and the one
+after listening again — leaves a thread still busy with a catch-up, a join or a write to that work,
+whose traffic or the next pass catches it up; a pass still running after ten seconds is stopped and
+started over at the next, and a pass that fails is logged and the next one runs. Give the pool a
+`command_timeout`, so a read the database never answers ends. A replica that misses an `invited`
+notice gives no `Invited`, and a follower no `Joined`, until the connection follows again.
 
 The tick's one read took 1.1 ms in the database for 1,000 threads open on a replica and 10.9 ms for
 10,000 (Postgres 18, median of five). On Postgres 18 on one machine, a write that sends a `NOTIFY` in

@@ -290,7 +290,7 @@ async def test_a_since_added_member_finds_only_what_it_may_read(schemas: Schemas
     ):
         assert [t.id for t in await storage.list_threads("acme", "ana", query=word)] == ana
         assert [t.id for t in await storage.list_threads("acme", "bruno", query=word)] == bruno
-    _, floor, _ = await storage.head("acme", "t1", "bruno") or (0, 0, 0)
+    _, floor, _ = (await storage.head("acme", "bruno", ["t1"])).get("t1", (0, 0, 0))
     found = await storage.search("acme", "t1", "the add", floor=floor)
     assert [m.id for m in found] == [after.id]
 

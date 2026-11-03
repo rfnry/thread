@@ -349,7 +349,7 @@ class Verbs:
     async def _floor(self, actor: Identity, scope: str, thread: Thread) -> int:
         if actor.role == "system" or thread.history == "all":
             return 0
-        found = await self._storage.head(scope, thread.id, actor.id)
+        found = (await self._storage.head(scope, actor.id, [thread.id])).get(thread.id)
         if found is None:
             raise ForbiddenError(f"server: {actor.id!r} is not a member of thread {thread.id!r}")
         return found[1]
@@ -368,7 +368,7 @@ class Verbs:
     ) -> tuple[int, int]:
         actor, scope = session.identity, session.scope
         await self.thread(actor, scope, thread_id, "read")
-        found = await self._storage.head(scope, thread_id, actor.id)
+        found = (await self._storage.head(scope, actor.id, [thread_id])).get(thread_id)
         if found is None:
             raise NotFoundError(f"server: {actor.id!r} is not a member of thread {thread_id!r}")
         head = found[0]
@@ -409,7 +409,7 @@ class Verbs:
         if resume:
             since = await self._storage.get_mark(scope, thread_id, actor.id)
             if since is None:
-                found = await self._storage.head(scope, thread_id, actor.id)
+                found = (await self._storage.head(scope, actor.id, [thread_id])).get(thread_id)
                 head = found[0] if found else 0
                 with contextlib.suppress(NotFoundError):
                     since, _, _ = await self._storage.mark(scope, thread_id, actor.id, head)
@@ -441,16 +441,20 @@ class Verbs:
                     return start[thread.id][0]
                 return thread.marked if resume else None
 
-            with self._hub.watching() as touched:
-                threads = [
-                    t
-                    for t in await self._memberships(actor, scope)
-                    if t.id not in gone or await self._back(scope, actor.id, t, *gone[t.id])
-                ]
-                remade = {t.id for t in threads if t.id in start and _remade(start[t.id][1], t)}
-                found = await self._hub.follow(
-                    session, [(t, position(t)) for t in threads], touched
-                )
+            threads = [
+                t
+                for t in await self._memberships(actor, scope)
+                if t.id not in gone or await self._back(scope, actor.id, t, *gone[t.id])
+            ]
+            remade = {t.id for t in threads if t.id in start and _remade(start[t.id][1], t)}
+            stored = (
+                await self._storage.head(scope, actor.id, [t.id for t in threads])
+                if threads
+                else {}
+            )
+            found = await self._hub.follow(
+                session, [(t, position(t), stored.get(t.id)) for t in threads]
+            )
             return [
                 j.model_copy(update={"truncated": True}) if j.thread.id in remade else j
                 for j in found

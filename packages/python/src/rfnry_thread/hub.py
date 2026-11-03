@@ -4,8 +4,8 @@ import json
 import logging
 import uuid
 import weakref
-from collections.abc import AsyncIterator, Awaitable, Callable, Coroutine, Iterator
-from contextlib import asynccontextmanager, contextmanager
+from collections.abc import AsyncIterator, Awaitable, Callable, Coroutine, Iterable
+from contextlib import asynccontextmanager
 from dataclasses import dataclass, field
 from typing import Any
 
@@ -118,7 +118,6 @@ class Hub:
             weakref.WeakValueDictionary()
         )
         self._local: dict[tuple[str, str, str], int] = {}
-        self._watching: list[set[tuple[str, str | None]]] = []
         self._sent = itertools.count(1)
         self._shielded: set[asyncio.Future[None]] = set()
         self._sending: set[asyncio.Task[None]] = set()
@@ -173,8 +172,10 @@ class Hub:
                 if current is None or not current.cancelling():
                     await asyncio.shield(aftermath)
 
-    async def catch_up(self) -> None:
-        held = sorted(self._rooms)
+    async def catch_up(
+        self, keys: Iterable[tuple[str, str]] | None = None, wait: bool = False
+    ) -> None:
+        held = sorted(self._rooms if keys is None else set(keys))
         if not held:
             return
         try:
@@ -187,7 +188,7 @@ class Hub:
             head = heads.get((scope, thread_id))
             if (
                 room is None
-                or self._busy(scope, thread_id)
+                or (not wait and self._busy(scope, thread_id))
                 or (head is not None and _level(room, thread_id, *head))
             ):
                 continue
@@ -267,19 +268,6 @@ class Hub:
             return None
         return room
 
-    @contextmanager
-    def watching(self) -> Iterator[set[tuple[str, str | None]]]:
-        touched: set[tuple[str, str | None]] = set()
-        self._watching.append(touched)
-        try:
-            yield touched
-        finally:
-            self._watching = [watch for watch in self._watching if watch is not touched]
-
-    def _touch(self, scope: str, thread_id: str | None) -> None:
-        for touched in self._watching:
-            touched.add((scope, thread_id))
-
     async def join(
         self, session: Session, thread: Thread, since: int | None, away: bool = False
     ) -> Joined:
@@ -305,7 +293,7 @@ class Hub:
         thread: Thread,
         since: int | None,
         rewind: bool = True,
-        touched: set[tuple[str, str | None]] | None = None,
+        found: dict[str, tuple[int, int, int]] | None = None,
     ) -> tuple[Joined, bool]:
         scope, thread_id = session.scope, thread.id
         async with self._lock(scope, thread_id):
@@ -314,25 +302,14 @@ class Hub:
             room = self._outdated(scope, thread)
             if thread_id in session.joined:
                 return await self._rewind(session, thread, since if rewind else None), False
-            listed = (
-                (room is None or room.epoch == thread.epoch)
-                and touched is not None
-                and (scope, thread_id) not in touched
-                and (scope, None) not in touched
-                and thread.history == "all"
-                and thread.last_seq is not None
-            )
-            found = (
-                (thread.last_seq or 0, 0, thread.epoch)
-                if listed
-                else await self.storage.head(scope, thread_id, session.identity.id)
-            )
             if found is None:
+                found = await self.storage.head(scope, session.identity.id, [thread_id])
+            if thread_id not in found:
                 raise ForbiddenError(
                     f"server: {session.identity.id!r} is not a member of thread {thread_id!r}"
                 )
-            head, floor, epoch = found
-            if epoch != thread.epoch:
+            head, floor, epoch = found[thread_id]
+            if epoch != thread.epoch or (room is not None and room.epoch != epoch):
                 raise NotFoundError(f"server: thread {thread_id!r} was not found")
             start = None if since is None else max(since, floor - 1)
             replay: list[Event] = []
@@ -386,16 +363,18 @@ class Hub:
     async def follow(
         self,
         session: Session,
-        threads: list[tuple[Thread, int | None]],
-        touched: set[tuple[str, str | None]],
+        threads: list[tuple[Thread, int | None, tuple[int, int, int] | None]],
     ) -> list[Joined]:
         found: list[Joined] = []
-        for thread, since in threads:
+        for thread, since, head in threads:
             try:
-                joined, _ = await self._enter(session, thread, since, False, touched)
+                joined, _ = await self._enter(
+                    session, thread, since, False, {} if head is None else {thread.id: head}
+                )
             except ForbiddenError, NotFoundError:
                 continue
             found.append(joined)
+        await self.catch_up(((session.scope, joined.thread.id) for joined in found), True)
         return [
             self._answer(session, joined) for joined in found if joined.thread.id in session.joined
         ]
@@ -459,7 +438,6 @@ class Hub:
     async def _heard(
         self, scope: str, thread_id: str, seq: int, epoch: int, event: Event | None = None
     ) -> None:
-        self._touch(scope, thread_id)
         if self._quiet(scope, thread_id):
             return
         async with self._locked(scope, thread_id) as after:
@@ -670,7 +648,6 @@ class Hub:
         await self._gone(scope, signal, epoch)
 
     async def _gone(self, scope: str, signal: ThreadDeleted, epoch: int) -> None:
-        self._touch(scope, signal.thread_id)
         async with self._lock(scope, signal.thread_id):
             room = self._rooms.get((scope, signal.thread_id))
             if room is not None and room.epoch == epoch:
@@ -683,7 +660,6 @@ class Hub:
         await self._scope_gone(scope, sender)
 
     async def _scope_gone(self, scope: str, sender: Identity) -> None:
-        self._touch(scope, None)
         for held, thread_id in sorted({*self._rooms, *list(self._locks.keys())}):
             if held == scope:
                 await self._catch_up(scope, thread_id, sender)

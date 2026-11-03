@@ -160,14 +160,16 @@ async def test_a_second_follow_on_the_same_connection_replays_nothing_already_de
     assert [j["truncated"] for j in again["joined"]] == [False]
 
 
-def counting(storage: PostgresStorage, monkeypatch: pytest.MonkeyPatch) -> list[str]:
-    reads: list[str] = []
+def counting(
+    storage: PostgresStorage, monkeypatch: pytest.MonkeyPatch
+) -> list[tuple[str, tuple[Any, ...]]]:
+    reads: list[tuple[str, tuple[Any, ...]]] = []
     for name in ("head", "is_member", "list_events"):
         real = getattr(storage, name)
 
         def counted(real: Any = real, name: str = name) -> Any:
             async def read(*args: Any, **kwargs: Any) -> Any:
-                reads.append(name)
+                reads.append((name, args))
                 return await real(*args, **kwargs)
 
             return read
@@ -176,7 +178,7 @@ def counting(storage: PostgresStorage, monkeypatch: pytest.MonkeyPatch) -> list[
     return reads
 
 
-async def test_follow_enters_each_thread_with_the_head_its_listing_read(
+async def test_follow_enters_threads_of_either_history_at_their_stored_heads_in_one_read(
     storage: PostgresStorage, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     server = Server(storage)
@@ -191,7 +193,42 @@ async def test_follow_enters_each_thread_with_the_head_its_listing_read(
         ("t2", 2),
         ("t3", 2),
     ]
-    assert reads == ["head"]
+    assert [name for name, _ in reads] == ["head"]
+    assert sorted(reads[0][1][2]) == ["t1", "t2", "t3"]
+
+
+async def test_a_follow_reads_every_thread_position_in_one_query(
+    storage: PostgresStorage, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    server = Server(storage)
+    ids = [f"t{n:02}" for n in range(20)]
+    for n, thread_id in enumerate(ids):
+        await server.create_thread("acme", thread_id, history="since_added" if n % 2 else "all")
+        await server.add_member("acme", thread_id, HELPER)
+    reads: list[tuple[Any, ...]] = []
+    real = storage.head
+
+    async def head(*args: Any) -> Any:
+        reads.append(args)
+        return await real(*args)
+
+    monkeypatch.setattr(storage, "head", head)
+    helper = await Peer.open(server, HELPER)
+    reply = await helper.call("thread.follow")
+    assert sorted(j["thread"]["id"] for j in reply["joined"]) == ids
+    assert len(reads) == 1
+    scope, identity_id, thread_ids = reads[0]
+    assert (scope, identity_id, sorted(thread_ids)) == ("acme", "helper", ids)
+
+
+async def test_a_follow_of_no_thread_reads_no_position(
+    storage: PostgresStorage, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    server = Server(storage)
+    reads = counting(storage, monkeypatch)
+    helper = await Peer.open(server, HELPER)
+    assert (await helper.call("thread.follow"))["joined"] == []
+    assert reads == []
 
 
 async def test_a_thread_written_between_the_listing_and_the_enter_is_entered_at_its_new_head(
@@ -428,8 +465,10 @@ async def test_an_add_survives_a_follower_whose_membership_is_gone_and_is_still_
         await ana.call("thread.create", thread_id="t1")
         real = storage.head
 
-        async def head(scope: str, thread_id: str, identity_id: str) -> tuple[int, int, int] | None:
-            return None if identity_id == "helper" else await real(scope, thread_id, identity_id)
+        async def head(
+            scope: str, identity_id: str, thread_ids: list[str]
+        ) -> dict[str, tuple[int, int, int]]:
+            return {} if identity_id == "helper" else await real(scope, identity_id, thread_ids)
 
         monkeypatch.setattr(storage, "head", head)
         await ana.call("member.add", thread_id="t1", identity=who(HELPER))
@@ -473,10 +512,12 @@ async def test_a_session_dropped_inside_the_storage_reads_of_an_enter_is_not_lef
     await server.create_thread("acme", "t1")
     real = storage.head
 
-    async def head(scope: str, thread_id: str, identity_id: str) -> tuple[int, int, int] | None:
+    async def head(
+        scope: str, identity_id: str, thread_ids: list[str]
+    ) -> dict[str, tuple[int, int, int]]:
         if identity_id == "helper":
             await server._hub.drop(session)
-        return await real(scope, thread_id, identity_id)
+        return await real(scope, identity_id, thread_ids)
 
     monkeypatch.setattr(storage, "head", head)
     await server.add_member("acme", "t1", HELPER)
@@ -809,7 +850,7 @@ async def test_the_inbox_lists_by_activity_with_previews(server: Server) -> None
     assert system[0].marked is None and system[0].last_message is not None
 
 
-async def test_two_follows_at_once_each_keep_their_own_watch(
+async def test_two_follows_at_once_each_answer_from_the_head_storage_holds(
     storage: PostgresStorage, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     server = Server(storage)
@@ -832,7 +873,6 @@ async def test_two_follows_at_once_each_keep_their_own_watch(
     await say(ana, "t1", "during the first follow")
     reply = await first
     assert [(j["thread"]["id"], j["seq"]) for j in reply["joined"]] == [("t1", 4)]
-    assert server._hub._watching == []
 
 
 async def test_a_removal_delivered_inside_a_gap_cuts_the_removed_connection(

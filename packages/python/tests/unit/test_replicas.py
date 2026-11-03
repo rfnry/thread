@@ -492,7 +492,7 @@ async def test_a_thread_another_replica_wrote_between_a_listing_and_its_enter_is
     assert pushed == ["from far"]
 
 
-async def test_a_removal_after_a_follow_listing_cuts_the_follower_when_its_notice_is_late(
+async def test_a_removal_after_a_follow_listing_keeps_the_follower_out_when_its_notice_is_late(
     storage: PostgresStorage, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     near, far = Server(storage), Server(storage)
@@ -523,9 +523,9 @@ async def test_a_removal_after_a_follow_listing_cuts_the_follower_when_its_notic
 
         monkeypatch.setattr(storage, "list_threads", listed)
         helper = await Peer.open(near, HELPER)
-        await helper.call("thread.follow", since={"t1": {"seq": 0}})
-        kinds = [p["kind"] for p in await helper.quiet(0.6) if "seq" in p]
-        assert kinds[-1] == "member_removed"
+        reply = await helper.call("thread.follow", since={"t1": {"seq": 0}})
+        assert reply["joined"] == []
+        assert await helper.quiet(0.6) == [] and helper.joined == []
         await say(ana, "t1", "said after helper was removed")
         assert await helper.quiet(0.8) == []
     finally:
@@ -566,6 +566,172 @@ async def test_a_notice_landing_while_a_follower_enters_is_delivered_at_once(
     finally:
         await near.stop()
         await far.stop()
+
+
+@pytest.mark.parametrize(
+    ("window", "occupied"), [("list_threads", False), ("head", False), ("head", True)]
+)
+async def test_a_thread_made_again_between_a_follows_listing_and_its_enter_is_never_entered_at_its_old_epoch(
+    storage: PostgresStorage, monkeypatch: pytest.MonkeyPatch, window: str, occupied: bool
+) -> None:
+    near, far = Server(storage), Server(storage)
+    for thread_id in ("t1", "t2"):
+        await far.create_thread("acme", thread_id)
+        await far.add_member("acme", thread_id, HELPER)
+    old = (await far.get_thread("acme", "t1")).epoch
+    ana = await Peer.open(near, ANA)
+    remade: list[int] = []
+    real = getattr(storage, window)
+
+    async def remaking(*args: Any, **kwargs: Any) -> Any:
+        found = await real(*args, **kwargs)
+        if "helper" in args and not remade:
+            await far.delete_thread("acme", "t1")
+            remade.append((await far.create_thread("acme", "t1")).epoch)
+            for identity in (ANA, HELPER):
+                await far.add_member("acme", "t1", identity)
+            if occupied:
+                await ana.call("thread.join", thread_id="t1")
+        return found
+
+    monkeypatch.setattr(storage, window, remaking)
+    helper = await Peer.open(near, HELPER)
+    reply = await helper.call("thread.follow")
+    assert remade and remade[0] != old
+    answered = [
+        (j["thread"]["id"], j["thread"]["epoch"]) for j in [*reply["joined"], *helper.joined]
+    ]
+    assert ("t1", old) not in answered
+    assert [j["thread"]["id"] for j in reply["joined"]] == ["t2"]
+    assert [p for p in await helper.quiet() if "seq" in p] == []
+
+
+async def test_a_write_landing_between_a_follows_position_read_and_its_enter_is_delivered_before_it_answers(
+    replicas: tuple[Server, Server],
+    storage: PostgresStorage,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    near, far = replicas
+    ana = await Peer.open(far, ANA)
+    await ana.call("thread.create", thread_id="t1")
+    await ana.call("member.add", thread_id="t1", identity=HELPER.model_dump(mode="json"))
+    await say(ana, "t1", "one")
+    await asyncio.sleep(0.3)
+    said: list[str] = []
+    real = storage.head
+
+    async def reading(*args: Any) -> Any:
+        found = await real(*args)
+        if "helper" in args and not said:
+            said.append((await say(ana, "t1", "between"))["id"])
+            await asyncio.sleep(0.3)
+        return found
+
+    monkeypatch.setattr(storage, "head", reading)
+    helper = await Peer.open(near, HELPER)
+    reply = await helper.call("thread.follow", since={"t1": {"seq": 0}})
+    assert said
+    assert [j["seq"] for j in reply["joined"]] == [4]
+    pushed = [p["content"][0]["text"] for p in await helper.quiet() if p["kind"] == "message"]
+    assert pushed == ["one", "between"]
+
+
+def held_while_caught_up(
+    storage: PostgresStorage, monkeypatch: pytest.MonkeyPatch, hold: Callable[[], Awaitable[Any]]
+) -> list[asyncio.Future[Any]]:
+    reached, release = asyncio.Event(), asyncio.Event()
+    holding: list[asyncio.Future[Any]] = []
+    tail, heads = storage.tail, storage.heads
+
+    async def replaying(*args: Any) -> Any:
+        if args[2] == 0 and not reached.is_set():
+            reached.set()
+            await release.wait()
+        return await tail(*args)
+
+    async def reading(keys: Any) -> Any:
+        if not holding:
+            holding.append(asyncio.ensure_future(hold()))
+            await asyncio.wait_for(reached.wait(), 5)
+            asyncio.get_running_loop().call_later(0.2, release.set)
+        return await heads(keys)
+
+    monkeypatch.setattr(storage, "tail", replaying)
+    monkeypatch.setattr(storage, "heads", reading)
+    return holding
+
+
+async def test_a_follow_empties_a_room_at_a_dead_epoch_before_it_answers_though_another_enter_holds_it(
+    storage: PostgresStorage, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    near, far = Server(storage), Server(storage)
+    await far.create_thread("acme", "t1")
+    for identity in (HELPER, BRUNO):
+        await far.add_member("acme", "t1", identity)
+    old = (await far.get_thread("acme", "t1")).epoch
+    read, go = asyncio.Event(), asyncio.Event()
+    remade: list[int] = []
+    head = storage.head
+
+    async def reading(scope: str, identity_id: str, thread_ids: list[str]) -> Any:
+        found = await head(scope, identity_id, thread_ids)
+        if identity_id == "bruno":
+            read.set()
+            await go.wait()
+        elif identity_id == "helper" and not remade:
+            await far.delete_thread("acme", "t1")
+            remade.append((await far.create_thread("acme", "t1")).epoch)
+            for identity in (HELPER, BRUNO):
+                await far.add_member("acme", "t1", identity)
+        return found
+
+    async def resume() -> None:
+        go.set()
+
+    monkeypatch.setattr(storage, "head", reading)
+    holding = held_while_caught_up(storage, monkeypatch, resume)
+    helper, bruno = await Peer.open(near, HELPER), await Peer.open(near, BRUNO)
+    following = asyncio.ensure_future(bruno.call("thread.follow", since={"t1": {"seq": 0}}))
+    await asyncio.wait_for(read.wait(), 5)
+    reply = await helper.call("thread.follow")
+    assert holding and remade and remade[0] != old
+    assert ("t1", old) not in [
+        (j["thread"]["id"], j["thread"]["epoch"]) for j in [*reply["joined"], *helper.joined]
+    ]
+    assert reply["joined"] == []
+    assert [p["kind"] for p in await helper.quiet()] == ["thread.deleted"]
+    assert (await asyncio.wait_for(following, 5))["joined"] == []
+
+
+async def test_a_write_landing_before_a_follows_enter_is_delivered_at_once_though_another_join_holds_the_room(
+    storage: PostgresStorage, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    near, far = Server(storage), Server(storage)
+    ana = await Peer.open(far, ANA)
+    await ana.call("thread.create", thread_id="t1")
+    for identity in (HELPER, BRUNO):
+        await ana.call("member.add", thread_id="t1", identity=identity.model_dump(mode="json"))
+    await say(ana, "t1", "one")
+    said: list[int] = []
+    head = storage.head
+
+    async def reading(scope: str, identity_id: str, thread_ids: list[str]) -> Any:
+        found = await head(scope, identity_id, thread_ids)
+        if identity_id == "helper" and not said:
+            said.append((await say(ana, "t1", "between"))["seq"])
+        return found
+
+    monkeypatch.setattr(storage, "head", reading)
+    helper, bruno = await Peer.open(near, HELPER), await Peer.open(near, BRUNO)
+    holding = held_while_caught_up(
+        storage, monkeypatch, lambda: bruno.call("thread.join", thread_id="t1", since=0)
+    )
+    reply = await helper.call("thread.follow")
+    assert holding and said == [5]
+    assert [(j["thread"]["id"], j["seq"]) for j in reply["joined"]] == [("t1", 5)]
+    pushed = [p["content"][0]["text"] for p in await helper.quiet() if p["kind"] == "message"]
+    assert pushed == ["between"]
+    assert (await asyncio.wait_for(holding[0], 5))["seq"] == 5
 
 
 async def test_a_replica_started_again_with_connections_open_checks_their_threads(

@@ -1460,8 +1460,8 @@ class Storage(Protocol):
     async def is_member(self, scope: str, thread_id: str, identity_id: str) -> bool: ...
 
     async def head(
-        self, scope: str, thread_id: str, identity_id: str
-    ) -> tuple[int, int, int] | None: ...
+        self, scope: str, identity_id: str, thread_ids: Sequence[str]
+    ) -> dict[str, tuple[int, int, int]]: ...
 
     async def heads(
         self, keys: Sequence[tuple[str, str]]
@@ -1546,10 +1546,11 @@ held them. `search` returns the latest `limit` messages of one thread at or abov
 for a query with no word. A page continues below `before`: a thread id, at that thread's place now,
 a `Thread` without `last_seq` (from `get_thread` or `create_thread`), also at that place now, or a `Thread` a page listed, at the place its own `created_at`, `last_message_at` and `id` give it,
 so paging holds when that thread is deleted or moves meanwhile. A member listing gives each thread's
-`last_seq` as it was when read, and `follow` enters a thread whose `history` is `"all"` at it unless
-the server heard the thread change since. `head` returns a thread's last `seq`, the member's
-floor and the thread's `epoch` when `identity_id` is a member of it, `None` otherwise: the one read that enters a thread for
-a connection. The floor is 0 in a thread whose `history` is `"all"`, and in a `"since_added"` one
+`last_seq` as it was when read. `head` returns, for each of `thread_ids` that `identity_id` is a
+member of, the thread's last `seq`, the member's floor and the thread's `epoch`, keyed by thread id,
+in one read; a thread it is not a member of, or that does not exist, is left out. It is the read
+that enters threads for a connection: a join reads one, and a follow reads every thread it listed at
+once. The floor is 0 in a thread whose `history` is `"all"`, and in a `"since_added"` one
 the `seq` of the member's `MemberAdded` event; `list_events`
 and `get_event` given a `floor` leave out events below it and edits and retractions of them.
 `tail` returns a thread's last `seq`, its `epoch` and at most `limit` events after `since`, up to
