@@ -161,13 +161,14 @@ async def start(self) -> None: ...
 ```
 
 Links this server to the other replicas on the same storage: it listens for their events and
-signals, mirrors its own signals to them, repeats its own presence, working and streams every ten
-seconds, and catches the threads its connections have open up from storage: each on a notice for
-it, and all of them in a pass every ten seconds, before it returns and whenever it listens again —
-after its listening connection drops or misses the notice it sends itself every ten seconds — then
-repeats its own state. A pass skips a thread whose catch-up, join or write is under way, which that
-work or the next pass catches up. Every server hints the others of each event it stores, started or
-not. Calling it again does nothing. Raises `StorageError` when the storage cannot listen.
+signals, mirrors its own signals to them, sends them a snapshot of its own presence, working and
+streams every ten seconds, and catches the threads its connections have open up from storage: each
+on a notice for it, and all of them in a pass every ten seconds, before it returns and whenever it
+listens again — after its listening connection drops or misses the notice it sends itself every ten
+seconds — then sends its snapshots and asks the others to send theirs at once. A pass skips a thread
+whose catch-up, join or write is under way, which that work or the next pass catches up. Every
+server hints the others of each event it stores, started or not. Calling it again does nothing.
+Raises `StorageError` when the storage cannot listen.
 
 ### `Server.stop`
 
@@ -175,14 +176,14 @@ not. Calling it again does nothing. Raises `StorageError` when the storage canno
 async def stop(self) -> None: ...
 ```
 
-Sends the other replicas the end of what this server's connections announced — `StreamEnd`, `Idle`
-and `Left` — together, waits for every notice this server had still to send when it was called,
-hints of its last writes among them, then stops listening to them, gives the listening connection
-back, and ends their state for this server's connections. Each group of notices is bounded by ten
-seconds, and it waits for at most two: the one going out when it is called and the one holding what
-was queued behind it. Giving the connection back is bounded by ten seconds too: one that does not
-answer is closed. Call it before the pool closes: ends it cannot send reach the others only
-when they forget this server, within forty seconds.
+Sends the other replicas an empty snapshot for each thread this server's connections hold, which
+ends what they announced — `StreamEnd`, `Idle` and `Left` — waits for every notice this server had
+still to send when it was called, hints of its last writes among them, then stops listening to them,
+gives the listening connection back, and ends their state for this server's connections. Each group
+of notices is bounded by ten seconds, and it waits for at most two: the one going out when it is
+called and the one holding what was queued behind it. Giving the connection back is bounded by ten
+seconds too: one that does not answer is closed. Call it before the pool closes: ends it cannot send
+reach the others only when they forget this server, within forty seconds.
 
 ### `Server.create_thread`
 

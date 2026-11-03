@@ -453,6 +453,7 @@ class Server:
         self._refresher = asyncio.get_running_loop().create_task(self._refresh())
         await self._hub.catch_up()
         await self._hub.announce()
+        self._hub.request_announce()
 
     async def stop(self) -> None:
         if self._refresher is not None:
@@ -461,13 +462,13 @@ class Server:
                 await self._refresher
             self._refresher = None
         try:
-            await self._hub.unlink()
+            self._hub.unlink()
             await self._hub.drain()
         finally:
             if self._stop is not None:
                 await self._stop()
                 self._stop = None
-                await self._hub.sweep(forget=True)
+                self._hub.sweep(forget=True)
 
     async def _refresh(self) -> None:
         while True:
@@ -483,7 +484,7 @@ class Server:
         except TimeoutError:
             logger.warning("server: a catch-up pass took longer than %g s and was stopped", REFRESH)
         await self._hub.announce()
-        await self._hub.sweep()
+        self._hub.sweep()
 
     async def create_thread(
         self,

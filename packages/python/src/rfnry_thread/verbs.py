@@ -626,5 +626,5 @@ class Verbs:
         await self._hub.signal(session, signal)
 
     async def present(self, actor: Identity, scope: str, thread_id: str) -> list[Identity]:
-        await self.thread(actor, scope, thread_id, "read")
-        return self._hub.state.present(scope, thread_id)
+        thread = await self.thread(actor, scope, thread_id, "read")
+        return self._hub.state.present(scope, thread_id, thread.epoch)

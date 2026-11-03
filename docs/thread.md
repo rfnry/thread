@@ -553,9 +553,13 @@ queued to go out, and the caller is answered at once. Each replica sends its hin
 signals in groups, one transaction per group, in the order it sent them: at rest each goes out at
 once, and under load the groups grow. A group not sent within ten seconds fails, and the next one
 goes out. Signals are delivered on the sender's replica and mirrored to the others. Each replica
-keeps who is present, working and streaming, and repeats its own every ten seconds; what a repeat
-changes — a signal another replica missed — is told to that replica's connections. A missed hint
-costs latency, never an event: resume reads from storage.
+keeps who is present, working and streaming, and every ten seconds sends the others a snapshot of
+its own, whole, for each thread and its epoch: a newer snapshot replaces what they held from that
+replica, anything older than what they hold is dropped, and what the replacement changes — a signal
+they missed — is told to their connections. A stream a replica never heard start begins there with
+the next snapshot, without the text written before it. A replica that starts, or listens again, asks
+the others to send theirs at once. A missed hint costs latency, never an event: resume reads from
+storage.
 
 A notice about a thread carries its epoch, and every replica catches each thread its connections
 have open up from storage: on a notice for it, and in a pass over all of them, in one read, every
@@ -580,19 +584,21 @@ so every ten seconds the replica sends itself a notice through another connectio
 listens for it on this one; no handler sees it. When one has not come back by the next, it logs
 `postgres: the listener missed its own probe; listening again` and closes the connection. After that
 or a drop it takes another with jittered backoff, passes on what it hears there as it arrives, then
-catches its threads up and repeats its own state: a notice heard before that pass is checked against
-the epoch like any other, and the pass brings what was missed meanwhile. `LISTEN` needs a session
-connection: a pool behind PgBouncer's transaction pooling never hears its probe, so it keeps logging
-that warning.
+catches its threads up and sends its own snapshots: a notice heard before that pass is checked
+against the epoch like any other, and the pass brings what was missed meanwhile. `LISTEN` needs a
+session connection: a pool behind PgBouncer's transaction pooling never hears its probe, so it keeps
+logging that warning.
 
 A replica that goes away ends, for the others' connections, what its own had announced, as if they
 had dropped: `StreamEnd` for each open stream, `Idle` for the work, and `Left` for each identity no
-connection on any replica still holds in that thread. `stop()` sends these before it unlinks, so the
-others hear them at once, and ends the others' state for its own connections, since it no longer
-follows it. A replica the others stop hearing — it crashed, or the link to it was down — is
-forgotten within thirty seconds, and its ends reach their connections within ten more. When they
-hear from it again, what it still holds is announced again with `Present`, `Working` and
-`StreamStart`, and each end it sends afterwards arrives once.
+connection on any replica still holds in that thread. `stop()` sends an empty snapshot for each
+thread it holds before it unlinks, so the others hear these at once, and ends the others' state for
+its own connections, since it no longer follows it. A replica also sends one when its state in a
+thread becomes empty, and when the thread is deleted. When the others stop hearing a replica — it
+crashed, or the link to it was down — what it held expires as a whole after thirty seconds, and its
+ends reach their connections within ten more. When they hear from it again, its next snapshot
+announces what it still holds with `Present`, `Working` and `StreamStart`, and each end it sends
+afterwards arrives once.
 
 Notices are not signed: every database role that can connect hears every scope's notices — the live
 traffic of all tenants — and can send them. Give the database only to roles trusted with every

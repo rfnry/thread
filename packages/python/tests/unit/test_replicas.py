@@ -13,7 +13,6 @@ from rfnry_thread.errors import ForbiddenError, NotFoundError, StorageError
 from rfnry_thread.models import Identity, Thread
 from rfnry_thread.postgres import PostgresStorage
 from rfnry_thread.server import Server
-from rfnry_thread.state import EXPIRY
 from rfnry_thread.storage import OnEvent, OnResume, OnSignal, Stop
 
 from .conftest import say
@@ -88,25 +87,6 @@ async def test_an_invitation_and_a_deletion_cross_replicas(replicas: tuple[Serve
     assert (await helper.push("thread.deleted"))["sender"]["id"] == "ana"
 
 
-async def test_a_replica_learns_who_is_here_from_the_re_announcement(
-    storage: PostgresStorage,
-) -> None:
-    near = Server(storage)
-    ana = await Peer.open(near, ANA)
-    await ana.call("thread.create", thread_id="t1")
-    await ana.call("thread.join", thread_id="t1")
-    far = Server(storage)
-    await near.start()
-    await far.start()
-    await near._hub.announce()
-    await until(lambda: far._hub.state.present("acme", "t1") == [ANA])
-    now = far._hub.state._clock()
-    far._hub.state._clock = lambda: now + EXPIRY + 1
-    assert far._hub.state.present("acme", "t1") == []
-    await near.stop()
-    await far.stop()
-
-
 def resumes(storage: PostgresStorage) -> list[OnResume | None]:
     captured: list[OnResume | None] = []
     listen = storage.listen
@@ -121,7 +101,9 @@ def resumes(storage: PostgresStorage) -> list[OnResume | None]:
     return captured
 
 
-async def test_a_resumed_listener_republishes_this_replicas_state(storage: PostgresStorage) -> None:
+async def test_a_resumed_listener_republishes_this_replicas_state_and_asks_the_others_to(
+    storage: PostgresStorage,
+) -> None:
     resumed = resumes(storage)
     near = Server(storage)
     ana = await Peer.open(near, ANA)
@@ -129,12 +111,25 @@ async def test_a_resumed_listener_republishes_this_replicas_state(storage: Postg
     await ana.call("thread.join", thread_id="t1")
     far = Server(storage)
     await near.start()
+    published: list[dict[str, Any]] = []
+    publish = storage.publish
+
+    async def recorded(scope: str, thread_id: str, payload: dict[str, Any]) -> None:
+        published.append(payload)
+        await publish(scope, thread_id, payload)
+
+    storage.publish = recorded  # type: ignore[method-assign]
     await far.start()
-    assert far._hub.state.present("acme", "t1") == []
+    await until(lambda: [p["kind"] for p in published] == ["announce", "refresh"])
+    published.clear()
     resume = resumed[0]
     assert resume is not None
     await resume()
-    await until(lambda: far._hub.state.present("acme", "t1") == [ANA])
+    await until(lambda: len(published) == 2)
+    assert [(p["kind"], [e["sender"]["id"] for e in p.get("entries", [])]) for p in published] == [
+        ("refresh", ["ana"]),
+        ("announce", []),
+    ]
     await near.stop()
     await far.stop()
 

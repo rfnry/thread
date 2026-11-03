@@ -320,10 +320,11 @@ async def test_a_repeat_taken_before_a_leave_does_not_bring_the_presence_back(
 
 
 async def test_deleting_a_scope_empties_its_rooms_on_the_other_replica(
-    replicas: tuple[Server, Server],
+    replicas: tuple[Server, Server], storage: PostgresStorage
 ) -> None:
     near, far = replicas
     ana, helper = await room(near, far)
+    old = await epoch(storage, "acme", "t1")
     elsewhere = await Peer.open(far, HELPER, scope="other")
     await elsewhere.call("thread.create", thread_id="t1")
     await elsewhere.call("thread.join", thread_id="t1")
@@ -335,7 +336,7 @@ async def test_deleting_a_scope_empties_its_rooms_on_the_other_replica(
     assert await arrived(ana, 1, 2.0) == [("thread.deleted", "system")]
     assert await arrived(helper, 1, 2.0) == [("thread.deleted", "system")]
     for server in (near, far):
-        assert server._hub.state.present("acme", "t1") == []
+        assert server._hub.state.present("acme", "t1", old) == []
         assert [key for key in server._hub._rooms if key[0] == "acme"] == []
     await near.create_thread("acme", "t1")
     await near.add_member("acme", "t1", HELPER)
@@ -343,7 +344,7 @@ async def test_deleting_a_scope_empties_its_rooms_on_the_other_replica(
     await helper.call("thread.join", thread_id="t1")
     assert await present(helper) == ["helper"]
     assert await elsewhere.quiet(0.3) == []
-    assert far._hub.state.present("other", "t1") == [HELPER]
+    assert far._hub.state.present("other", "t1", await epoch(storage, "other", "t1")) == [HELPER]
 
 
 async def first_repeat_held(far: Server, step: Callable[[list[str]], Awaitable[None]]) -> None:
@@ -374,14 +375,16 @@ async def heard_since(near: Server, far: Server) -> None:
     elsewhere = await Peer.open(far, HELPER, scope="other")
     await elsewhere.call("thread.create", thread_id="t1")
     await elsewhere.call("thread.join", thread_id="t1")
-    await until(lambda: near._hub.state.present("other", "t1") == [HELPER])
+    other = await epoch(far._hub.storage, "other", "t1")
+    await until(lambda: near._hub.state.present("other", "t1", other) == [HELPER])
 
 
-async def made_again(near: Server, ana: Peer) -> list[str]:
+async def made_again(near: Server, ana: Peer) -> tuple[list[str], list[str]]:
     await near.create_thread("acme", "t1")
     await near.add_member("acme", "t1", ANA)
     await ana.call("thread.join", thread_id="t1")
-    return await present(ana)
+    told = [p["sender"]["id"] for p in await ana.quiet() if p["kind"] == "present"]
+    return told, await present(ana)
 
 
 async def test_a_repeat_taken_before_a_scope_was_deleted_does_not_bring_its_state_back(
@@ -389,6 +392,7 @@ async def test_a_repeat_taken_before_a_scope_was_deleted_does_not_bring_its_stat
 ) -> None:
     near, far = replicas
     ana, helper = await room(near, far)
+    old = await epoch(near._hub.storage, "acme", "t1")
 
     async def wipe(sent: list[str]) -> None:
         await near.delete_scope("acme")
@@ -397,8 +401,8 @@ async def test_a_repeat_taken_before_a_scope_was_deleted_does_not_bring_its_stat
 
     await first_repeat_held(far, wipe)
     await heard_since(near, far)
-    assert near._hub.state.present("acme", "t1") == []
-    assert await made_again(near, ana) == ["ana"]
+    assert near._hub.state.present("acme", "t1", old) == []
+    assert await made_again(near, ana) == (["ana"], ["ana"])
 
 
 async def test_a_repeat_taken_before_a_leave_does_not_bring_the_presence_back_after_a_wipe(
@@ -415,8 +419,17 @@ async def test_a_repeat_taken_before_a_leave_does_not_bring_the_presence_back_af
 
     await first_repeat_held(far, leave_then_wipe)
     await heard_since(near, far)
-    assert near._hub.state.present("acme", "t1") == []
-    assert await made_again(near, ana) == ["ana"]
+    assert await made_again(near, ana) == (["ana"], ["ana"])
+    bruno = await Peer.open(near, BRUNO)
+    await near.add_member("acme", "t1", BRUNO)
+    await bruno.call("thread.join", thread_id="t1")
+    await bruno.quiet()
+    await ana.quiet()
+    now = near._hub.state._clock()
+    near._hub.state._clock = lambda: now + state.EXPIRY + 1
+    near._hub.sweep()
+    assert await ana.quiet() == [] and await bruno.quiet() == []
+    await bruno.close()
 
 
 async def test_a_cancelled_stop_still_gives_the_listening_connection_back(

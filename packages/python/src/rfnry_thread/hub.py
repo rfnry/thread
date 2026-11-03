@@ -78,9 +78,8 @@ class _Room:
 
 @dataclass
 class _Aftermath:
-    parted: list[Session] = field(default_factory=list)
+    ends: list[tuple[int, Signal]] = field(default_factory=list)
     again: list[tuple[Session, MemberAdded, int]] = field(default_factory=list)
-    emptied: dict[str, list[dict[str, Any]]] = field(default_factory=dict)
 
 
 def _removes(event: Event, session: Session) -> bool:
@@ -161,20 +160,17 @@ class Hub:
         after = _Aftermath()
         try:
             async with self._lock(scope, thread_id):
-                yield after
+                try:
+                    yield after
+                finally:
+                    for epoch, signal in after.ends:
+                        self._say(scope, epoch, signal)
         finally:
-            if after.parted or after.emptied:
-                aftermath = self._started(self._aftermath(scope, thread_id, after))
+            if after.again:
+                aftermath = self._started(self._reentered(scope, thread_id, after.again))
                 current = asyncio.current_task()
                 if current is None or not current.cancelling():
                     await asyncio.shield(aftermath)
-
-    async def _aftermath(self, scope: str, thread_id: str, after: _Aftermath) -> None:
-        for session in after.parted:
-            await self._parted(session, thread_id)
-        await self._reentered(scope, thread_id, after.again)
-        if after.emptied:
-            await self._emptied(scope, after.emptied)
 
     async def catch_up(self) -> None:
         held = sorted(self._rooms)
@@ -228,8 +224,7 @@ class Hub:
                         )
                         break
                     if found is None or found[1] != room.epoch:
-                        gone = ThreadDeleted(thread_id=thread_id, sender=gone_by)
-                        after.emptied.update(self._wipe(scope, gone))
+                        self._wipe(scope, ThreadDeleted(thread_id=thread_id, sender=gone_by))
                         return
                     last, _, events = found
                     for event in events:
@@ -262,13 +257,12 @@ class Hub:
                 session.push_event(event, payload)
                 if _removes(event, session):
                     out[session] = event
-                    self._cut(session, thread_id, after)
+                    self._part(session, thread_id, after.ends)
 
-    def _outdated(self, scope: str, thread: Thread, after: _Aftermath) -> _Room | None:
+    def _outdated(self, scope: str, thread: Thread) -> _Room | None:
         room = self._rooms.get((scope, thread.id))
         if room is not None and room.epoch < thread.epoch:
-            gone = ThreadDeleted(thread_id=thread.id, sender=SYSTEM)
-            after.emptied.update(self._wipe(scope, gone))
+            self._wipe(scope, ThreadDeleted(thread_id=thread.id, sender=SYSTEM))
             return None
         return room
 
@@ -304,12 +298,12 @@ class Hub:
         touched: set[tuple[str, str | None]] | None = None,
     ) -> tuple[Joined, bool]:
         scope, thread_id = session.scope, thread.id
-        async with self._locked(scope, thread_id) as after:
+        async with self._lock(scope, thread_id):
             if session.dropped:
                 return Joined(thread=thread, seq=session.joined.get(thread_id, 0)), False
-            room = self._outdated(scope, thread, after)
+            room = self._outdated(scope, thread)
             if thread_id in session.joined:
-                return await self._rewind(session, thread, since if rewind else None, after), False
+                return await self._rewind(session, thread, since if rewind else None), False
             listed = (
                 (room is None or room.epoch == thread.epoch)
                 and touched is not None
@@ -349,17 +343,15 @@ class Hub:
                 return Joined(thread=thread, seq=head), False
             session.joined[thread_id] = replay[0].seq - 1 if replay else head
             session.floors[thread_id] = floor
-            self._expire(scope, thread_id)
-            self._rooms.setdefault((scope, thread_id), _Room(thread.epoch)).sessions.add(session)
+            room = self._rooms.setdefault((scope, thread_id), _Room(thread.epoch))
+            room.sessions.add(session)
             for event in replay:
                 session.push_event(event, event.model_dump(mode="json"))
-            for signal in self.state.snapshot(scope, thread_id):
+            for signal in self.state.snapshot(scope, thread_id, room.epoch):
                 session.push_signal(signal.model_dump(mode="json"))
         return Joined(thread=thread, seq=head, truncated=truncated), True
 
-    async def _rewind(
-        self, session: Session, thread: Thread, since: int | None, after: _Aftermath
-    ) -> Joined:
+    async def _rewind(self, session: Session, thread: Thread, since: int | None) -> Joined:
         scope, cursor = session.scope, session.joined[thread.id]
         floor = session.floors.get(thread.id, 0)
         if since is not None:
@@ -371,8 +363,7 @@ class Hub:
             scope, thread.id, max(since, cursor - self.replay_limit), floor, self.replay_limit
         )
         if read is None or read[1] != room.epoch:
-            gone = ThreadDeleted(thread_id=thread.id, sender=SYSTEM)
-            after.emptied.update(self._wipe(scope, gone))
+            self._wipe(scope, ThreadDeleted(thread_id=thread.id, sender=SYSTEM))
             raise NotFoundError(f"server: thread {thread.id!r} was not found")
         if session.dropped:
             return Joined(thread=thread, seq=cursor)
@@ -396,43 +387,42 @@ class Hub:
             found.append(joined)
         return [joined for joined in found if joined.thread.id in session.joined]
 
-    def _cut(self, session: Session, thread_id: str, after: _Aftermath) -> None:
-        if self._part(session, thread_id):
-            after.parted.append(session)
-
-    def _part(self, session: Session, thread_id: str) -> bool:
+    def _part(self, session: Session, thread_id: str, ends: list[tuple[int, Signal]]) -> None:
         session.floors.pop(thread_id, None)
-        if session.joined.pop(thread_id, None) is None:
-            return False
         room = self._rooms.get((session.scope, thread_id))
-        if room is not None:
-            room.sessions.discard(session)
-            if not room.sessions:
-                del self._rooms[(session.scope, thread_id)]
-        return True
+        if session.joined.pop(thread_id, None) is None or room is None:
+            return
+        room.sessions.discard(session)
+        if not room.sessions:
+            del self._rooms[(session.scope, thread_id)]
+        sender = session.identity
+        for stream_id in sorted(s for t, s in session.streams if t == thread_id):
+            ends.append(
+                (room.epoch, StreamEnd(thread_id=thread_id, sender=sender, stream_id=stream_id))
+            )
+        session.streams = {s for s in session.streams if s[0] != thread_id}
+        if thread_id in session.working:
+            session.working.discard(thread_id)
+            ends.append((room.epoch, Idle(thread_id=thread_id, sender=sender)))
+        if thread_id in session.present:
+            session.present.discard(thread_id)
+            if self._departed(session, thread_id):
+                ends.append((room.epoch, Left(thread_id=thread_id, sender=sender)))
 
     async def leave(self, session: Session, thread_id: str) -> None:
-        async with self._lock(session.scope, thread_id):
-            parted = self._part(session, thread_id)
-        if parted:
-            await self.shielded(self._parted(session, thread_id))
-
-    async def _parted(self, session: Session, thread_id: str) -> None:
-        for stream_id in sorted(s for t, s in session.streams if t == thread_id):
-            await self.signal(
-                session,
-                StreamEnd(thread_id=thread_id, sender=session.identity, stream_id=stream_id),
-            )
-        if thread_id in session.working:
-            await self.signal(session, Idle(thread_id=thread_id, sender=session.identity))
-        if thread_id in session.present:
-            session.present.discard(thread_id)
-            await self._depart(session, thread_id)
+        async with self._locked(session.scope, thread_id) as after:
+            self._part(session, thread_id, after.ends)
 
     async def away(self, session: Session, thread_id: str) -> None:
-        if thread_id in session.present:
+        async with self._lock(session.scope, thread_id):
+            room = self._rooms.get((session.scope, thread_id))
+            if room is None or thread_id not in session.present:
+                return
             session.present.discard(thread_id)
-            await self._depart(session, thread_id)
+            if self._departed(session, thread_id):
+                self._say(
+                    session.scope, room.epoch, Left(thread_id=thread_id, sender=session.identity)
+                )
 
     async def deliver(self, scope: str, event: Event, epoch: int) -> None:
         try:
@@ -501,108 +491,88 @@ class Hub:
                 await self._added_here(scope, thread, add.author, session.identity.id, add.seq)
 
     async def signal(self, session: Session, signal: Signal) -> None:
-        async with self._locked(session.scope, signal.thread_id):
-            if (
-                isinstance(signal, Working | StreamStart | StreamDelta)
-                and signal.thread_id not in session.joined
-            ):
+        scope, thread_id = session.scope, signal.thread_id
+        async with self._lock(scope, thread_id):
+            room = self._rooms.get((scope, thread_id))
+            if room is None or thread_id not in session.joined:
                 return
-            n = self._said(session, signal)
-        self._mirror(session.scope, signal, n)
+            key = (thread_id, getattr(signal, "stream_id", ""))
+            if isinstance(signal, StreamStart):
+                session.streams.add(key)
+            elif isinstance(signal, StreamEnd):
+                session.streams.discard(key)
+            elif isinstance(signal, Working):
+                session.working.add(thread_id)
+            elif isinstance(signal, Idle):
+                session.working.discard(thread_id)
+            self._say(scope, room.epoch, signal)
 
-    def _said(self, session: Session, signal: Signal) -> int:
-        key = (signal.thread_id, getattr(signal, "stream_id", ""))
-        if isinstance(signal, StreamStart):
-            session.streams.add(key)
-        elif isinstance(signal, StreamEnd):
-            session.streams.discard(key)
-        elif isinstance(signal, Working):
-            session.working.add(signal.thread_id)
-        elif isinstance(signal, Idle):
-            session.working.discard(signal.thread_id)
-        self._tell(
-            session.scope, signal.thread_id, self._visible(session.scope, signal, self.origin)
-        )
-        return next(self._sent)
+    def _say(self, scope: str, epoch: int, signal: Signal) -> None:
+        n = next(self._sent)
+        told, emptied = self.state.apply(scope, epoch, signal, self.origin, n)
+        self._tell(scope, signal.thread_id, epoch, told)
+        self._mirror(scope, epoch, signal, n)
+        if emptied:
+            self._snapshot(scope, signal.thread_id, epoch, [])
 
-    async def _fanout(
-        self, scope: str, signal: Signal, origin: str, n: int, epoch: int | None
-    ) -> None:
+    async def _fanout(self, scope: str, signal: Signal, origin: str, n: int, epoch: int) -> None:
         async with self._locked(scope, signal.thread_id) as after:
             if await self._current(scope, signal.thread_id, epoch, after):
-                self._tell(scope, signal.thread_id, self._visible(scope, signal, origin, n))
+                told, _ = self.state.apply(scope, epoch, signal, origin, n)
+                self._tell(scope, signal.thread_id, epoch, told)
 
-    async def _current(
-        self, scope: str, thread_id: str, epoch: int | None, after: _Aftermath
-    ) -> bool:
+    async def _refreshed(
+        self, scope: str, thread_id: str, origin: str, n: int, epoch: int, payload: dict[str, Any]
+    ) -> None:
+        async with self._locked(scope, thread_id) as after:
+            if await self._current(scope, thread_id, epoch, after):
+                part, parts = int(payload["part"]), int(payload["parts"])
+                told = self.state.part(
+                    scope, thread_id, epoch, origin, n, part, parts, payload["entries"]
+                )
+                self._tell(scope, thread_id, epoch, told)
+
+    async def _current(self, scope: str, thread_id: str, epoch: int, after: _Aftermath) -> bool:
         room = self._rooms.get((scope, thread_id))
-        if room is None or epoch is None or epoch == room.epoch:
+        if room is None or epoch == room.epoch:
             return True
         if epoch > room.epoch:
             await self._caught_up(scope, thread_id, room, after)
         return (scope, thread_id) not in self._rooms
 
-    def _stamped(self, scope: str, thread_id: str, payload: dict[str, Any]) -> dict[str, Any]:
+    def _tell(self, scope: str, thread_id: str, epoch: int, signals: list[Signal]) -> None:
         room = self._rooms.get((scope, thread_id))
-        return payload if room is None else {"e": room.epoch, **payload}
-
-    def _tell(self, scope: str, thread_id: str, signals: list[Signal]) -> None:
-        room = self._rooms.get((scope, thread_id))
-        held = [] if room is None else list(room.sessions)
+        if room is None or room.epoch != epoch:
+            return
         for signal in signals:
             payload = signal.model_dump(mode="json")
-            for session in held:
+            for session in room.sessions:
                 session.push_signal(payload)
 
-    def _visible(self, scope: str, signal: Signal, origin: str, n: int = 0) -> list[Signal]:
-        thread_id, sender = signal.thread_id, signal.sender
-        self._expire(scope, thread_id)
-        if isinstance(signal, Present):
-            before = self.state.is_present(scope, thread_id, sender.id)
-            self.state.apply(scope, signal, origin, n)
-            return [] if before else [signal]
-        held = self.state.holds(scope, signal, origin)
-        self.state.apply(scope, signal, origin, n)
-        if origin != self.origin:
-            if isinstance(signal, Idle | StreamEnd | Left) and not held:
-                return []
-            if isinstance(signal, StreamStart) and held:
-                return []
-            if isinstance(signal, StreamDelta) and not held:
-                return [self.state.started(scope, signal, origin), signal]
-        if isinstance(signal, Left) and self.state.is_present(scope, thread_id, sender.id):
-            return []
-        return [signal]
-
-    def _expire(self, scope: str, thread_id: str, forget: bool = False) -> None:
-        self._tell(scope, thread_id, self.state.expire(scope, thread_id, forget))
-
-    async def sweep(self, forget: bool = False) -> None:
-        for scope, thread_id in self.state.expiring(forget):
-            async with self._locked(scope, thread_id):
-                self._expire(scope, thread_id, forget)
+    def sweep(self, forget: bool = False) -> None:
+        for scope, thread_id, epoch, ends in self.state.expired(forget):
+            self._tell(scope, thread_id, epoch, ends)
 
     async def _arrive(self, session: Session, thread_id: str) -> None:
-        present = Present(thread_id=thread_id, sender=session.identity)
-        async with self._locked(session.scope, thread_id):
-            if thread_id not in session.joined or thread_id in session.present:
+        async with self._lock(session.scope, thread_id):
+            room = self._rooms.get((session.scope, thread_id))
+            if room is None or thread_id not in session.joined or thread_id in session.present:
                 return
             session.present.add(thread_id)
             key = (session.scope, thread_id, session.identity.id)
             self._local[key] = self._local.get(key, 0) + 1
-            if self._local[key] > 1:
-                return
-            n = self._said(session, present)
-        self._mirror(session.scope, present, n)
+            if self._local[key] == 1:
+                present = Present(thread_id=thread_id, sender=session.identity)
+                self._say(session.scope, room.epoch, present)
 
-    async def _depart(self, session: Session, thread_id: str) -> None:
+    def _departed(self, session: Session, thread_id: str) -> bool:
         key = (session.scope, thread_id, session.identity.id)
         count = self._local.get(key, 0) - 1
         if count > 0:
             self._local[key] = count
-            return
+            return False
         self._local.pop(key, None)
-        await self.signal(session, Left(thread_id=thread_id, sender=session.identity))
+        return True
 
     async def added(
         self, scope: str, thread: Thread, sender: Identity, identity: Identity, seq: int
@@ -624,8 +594,8 @@ class Hub:
     async def _added_here(
         self, scope: str, thread: Thread, sender: Identity, identity_id: str, seq: int | None
     ) -> None:
-        async with self._locked(scope, thread.id) as after:
-            self._outdated(scope, thread, after)
+        async with self._lock(scope, thread.id):
+            self._outdated(scope, thread)
         for session in list(self.sessions):
             if (
                 session.scope != scope
@@ -685,10 +655,10 @@ class Hub:
 
     async def _gone(self, scope: str, signal: ThreadDeleted, epoch: int) -> None:
         self._touch(scope, signal.thread_id)
-        async with self._locked(scope, signal.thread_id) as after:
+        async with self._lock(scope, signal.thread_id):
             room = self._rooms.get((scope, signal.thread_id))
             if room is not None and room.epoch == epoch:
-                after.emptied.update(self._wipe(scope, signal))
+                self._wipe(scope, signal)
 
     async def scope_deleted(self, scope: str, sender: Identity) -> None:
         self._publish(
@@ -702,9 +672,8 @@ class Hub:
             if held == scope:
                 await self._catch_up(scope, thread_id, sender)
 
-    def _wipe(self, scope: str, signal: ThreadDeleted) -> dict[str, list[dict[str, Any]]]:
+    def _wipe(self, scope: str, signal: ThreadDeleted) -> None:
         thread_id = signal.thread_id
-        items = self.state.delete(scope, thread_id)
         payload = signal.model_dump(mode="json")
         room = self._rooms.pop((scope, thread_id), None)
         for session in [] if room is None else room.sessions:
@@ -716,16 +685,14 @@ class Hub:
             session.streams = {s for s in session.streams if s[0] != thread_id}
         for key in [k for k in self._local if k[:2] == (scope, thread_id)]:
             del self._local[key]
-        return {thread_id: items} if items else {}
+        epoch = self.state.drop(scope, thread_id)
+        if epoch is not None:
+            self._snapshot(scope, thread_id, epoch, [])
 
     async def on_resume(self) -> None:
         await self.catch_up()
         await self.announce()
-
-    async def _emptied(self, scope: str, emptied: dict[str, list[dict[str, Any]]]) -> None:
-        head = {"kind": "refresh", "n": next(self._sent)}
-        for thread_id, items in emptied.items():
-            self._repeat(scope, thread_id, head, items)
+        self.request_announce()
 
     async def drop(self, session: Session) -> None:
         session.dropped = True
@@ -734,27 +701,33 @@ class Hub:
         self.sessions.discard(session)
 
     async def announce(self) -> None:
-        n = next(self._sent)
-        for (scope, thread_id), items in self.state.own().items():
-            head = self._stamped(scope, thread_id, {"kind": "refresh", "n": n})
-            self._repeat(scope, thread_id, head, items)
+        for scope, thread_id, epoch, entries in self.state.own():
+            self._snapshot(scope, thread_id, epoch, entries)
 
-    def _repeat(
-        self, scope: str, thread_id: str, head: dict[str, Any], items: list[dict[str, Any]]
+    def request_announce(self) -> None:
+        self._publish("", "", {"kind": "announce", "n": next(self._sent)})
+
+    def _snapshot(
+        self, scope: str, thread_id: str, epoch: int, entries: list[dict[str, Any]]
     ) -> None:
-        batch: list[dict[str, Any]] = []
-        for item in items:
-            if _size({"entries": [*batch, item]}) > MIRROR_BUDGET and batch:
-                self._publish(scope, thread_id, {**head, "entries": batch})
-                batch = []
-            batch.append(item)
-        if batch:
-            self._publish(scope, thread_id, {**head, "entries": batch})
+        parts: list[list[dict[str, Any]]] = [[]]
+        for entry in entries:
+            if _size({"entries": [entry]}) > MIRROR_BUDGET:
+                logger.warning(
+                    "hub: a state entry of %d bytes is too large to mirror", _size(entry)
+                )
+                continue
+            if parts[-1] and _size({"entries": [*parts[-1], entry]}) > MIRROR_BUDGET:
+                parts.append([])
+            parts[-1].append(entry)
+        head = {"kind": "refresh", "n": next(self._sent), "e": epoch, "parts": len(parts)}
+        for index, part in enumerate(parts):
+            self._publish(scope, thread_id, {**head, "part": index, "entries": part})
 
-    def _mirror(self, scope: str, signal: Signal, n: int) -> None:
+    def _mirror(self, scope: str, epoch: int, signal: Signal, n: int) -> None:
         if not self.linked:
             return
-        payload = self._stamped(scope, signal.thread_id, {"n": n, **signal.model_dump(mode="json")})
+        payload = {"n": n, "e": epoch, **signal.model_dump(mode="json")}
         if _size(payload) <= MIRROR_BUDGET:
             self._publish(scope, signal.thread_id, payload)
             return
@@ -781,17 +754,12 @@ class Hub:
             ):
                 session.push_signal(payload)
 
-    async def unlink(self) -> None:
+    def unlink(self) -> None:
         if not self.linked:
             return
+        for scope, thread_id, epoch, _ in self.state.own():
+            self._snapshot(scope, thread_id, epoch, [])
         self.linked = False
-        n = next(self._sent)
-        ends: list[asyncio.Task[None]] = []
-        for scope, signal in self.state.own_ends():
-            payload = {"n": n, **signal.model_dump(mode="json")}
-            if _size(payload) <= MIRROR_BUDGET:
-                ends.append(self._queued(self._notify(scope, signal.thread_id, payload)))
-        await asyncio.gather(*ends)
 
     def _publish(self, scope: str, thread_id: str, payload: dict[str, Any]) -> None:
         if self.linked:
@@ -809,16 +777,13 @@ class Hub:
             return
         try:
             n = int(payload.pop("n", 0))
-            epoch = payload.pop("e", None)
+            epoch = int(payload.pop("e", 0))
             kind = payload.get("kind")
+            if kind == "announce":
+                await self.announce()
+                return
             if kind == "refresh":
-                async with self._locked(scope, thread_id) as after:
-                    if await self._current(scope, thread_id, epoch, after):
-                        self._expire(scope, thread_id)
-                        refreshed = self.state.refresh(
-                            scope, thread_id, str(origin), payload["entries"], n
-                        )
-                        self._tell(scope, thread_id, refreshed)
+                await self._refreshed(scope, thread_id, str(origin), n, epoch, payload)
                 return
             if kind == "invited":
                 thread = await self.storage.get_thread(scope, thread_id)
@@ -844,7 +809,7 @@ class Hub:
                 return
             signal = SIGNALS.validate_python(payload)
             if isinstance(signal, ThreadDeleted):
-                await self._gone(scope, signal, int(epoch))
+                await self._gone(scope, signal, epoch)
                 return
             await self._fanout(scope, signal, str(origin), n, epoch)
         except Exception as error:
