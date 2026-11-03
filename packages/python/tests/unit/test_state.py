@@ -20,6 +20,7 @@ from rfnry_thread.postgres import PostgresStorage
 from rfnry_thread.server import Server
 from rfnry_thread.state import EXPIRY, LatestState
 
+from .conftest import say
 from .factories import ANA, BRUNO, HELPER
 from .notices import Muffled, Notice
 from .peer import Peer
@@ -439,3 +440,82 @@ async def test_the_last_connection_to_leave_a_thread_sends_one_empty_snapshot(po
     finally:
         await ana.close()
         await tab.close()
+
+
+async def streaming(
+    pool: Any, drop: Any = lambda notice: False
+) -> tuple[Muffled, Server, Server, Peer, Peer]:
+    muffled = Muffled(pool, drop)
+    near, far = Server(PostgresStorage(pool)), Server(muffled)
+    await near.start()
+    await far.start()
+    helper = await Peer.open(near, HELPER)
+    ana = await Peer.open(far, ANA)
+    await helper.call("thread.create", thread_id="t1")
+    await helper.call("member.add", thread_id="t1", identity=ANA.model_dump(mode="json"))
+    await helper.call("thread.join", thread_id="t1")
+    await ana.call("thread.join", thread_id="t1")
+    await ana.quiet()
+    await helper.call("signal.send", thread_id="t1", kind="stream.start", stream_id="s1")
+    return muffled, near, far, helper, ana
+
+
+def delta(helper: Peer, index: int, text: str) -> Any:
+    return helper.call(
+        "signal.send", thread_id="t1", kind="stream.delta", stream_id="s1", index=index, text=text
+    )
+
+
+async def test_a_remote_delta_that_skips_marks_the_stream_gapped_and_it_stops_growing(
+    pool: Any,
+) -> None:
+    muffled, near, far, helper, ana = await streaming(
+        pool, lambda notice: notice.payload.get("text") == "B"
+    )
+    try:
+        for index, text in enumerate("ABC"):
+            await delta(helper, index, text)
+        await ana.push("stream.start", timeout=2.0)
+        assert (await ana.push("stream.delta", timeout=2.0))["text"] == "A"
+        assert [p["kind"] for p in await ana.quiet(0.5)] == []
+        assert [n.payload["text"] for n in muffled.dropped] == ["B"]
+        await delta(helper, 3, "D")
+        assert [p["kind"] for p in await ana.quiet(0.5)] == []
+    finally:
+        await ana.close()
+        await helper.close()
+        await near.stop()
+        await far.stop()
+
+
+async def test_a_gapped_streams_end_and_message_still_arrive(pool: Any) -> None:
+    _, near, far, helper, ana = await streaming(
+        pool, lambda notice: notice.payload.get("text") == "B"
+    )
+    try:
+        for index, text in enumerate("ABC"):
+            await delta(helper, index, text)
+        await say(helper, "t1", "ABC", client_id="s1")
+        await helper.call("signal.send", thread_id="t1", kind="stream.end", stream_id="s1")
+        kinds = [p["kind"] for p in await ana.quiet(1.0)]
+        assert kinds == ["stream.start", "stream.delta", "message", "stream.end"]
+    finally:
+        await ana.close()
+        await helper.close()
+        await near.stop()
+        await far.stop()
+
+
+async def test_pieces_of_an_oversized_delta_continue_each_other(pool: Any) -> None:
+    _, near, far, helper, ana = await streaming(pool)
+    big = "x" * 9000
+    try:
+        await delta(helper, 0, big)
+        await delta(helper, 1, "!")
+        deltas = [p for p in await ana.quiet(1.0) if p["kind"] == "stream.delta"]
+        assert "".join(p["text"] for p in deltas) == big + "!"
+    finally:
+        await ana.close()
+        await helper.close()
+        await near.stop()
+        await far.stop()

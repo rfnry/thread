@@ -914,10 +914,7 @@ async def test_a_snapshot_from_a_replica_heard_from_again_announces_it_once(
     ]
     for n, signal in enumerate(later, 5):
         await far(hub, thread, signal, n)
-    assert senders(await pushes(ana, ana_out)) == [
-        ("stream.delta", "helper"),
-        ("stream.end", "helper"),
-    ]
+    assert senders(await pushes(ana, ana_out)) == [("stream.end", "helper")]
 
 
 async def test_unlinking_sends_an_empty_snapshot_per_thread_at_once_and_logs_each_that_fails(

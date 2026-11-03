@@ -26,6 +26,8 @@ class _Stream:
     start: StreamStart
     text: str = ""
     index: int = 0
+    d: int = 0
+    gapped: bool = False
 
 
 @dataclass
@@ -105,7 +107,7 @@ def _held(thread_id: str, item: dict[str, Any], was: _Held | None) -> _Held:
         else Working(thread_id=thread_id, sender=sender, label=working.get("label")),
         streams={
             s["stream_id"]: kept.get(s["stream_id"])
-            or _Stream(StreamStart(thread_id=thread_id, sender=sender, **s))
+            or _Stream(StreamStart(thread_id=thread_id, sender=sender, **s), gapped=True)
             for s in item.get("streams", [])
         },
     )
@@ -142,7 +144,13 @@ class LatestState:
             del self._slices[key]
 
     def apply(
-        self, scope: str, epoch: int, signal: Signal, origin: str, n: int
+        self,
+        scope: str,
+        epoch: int,
+        signal: Signal,
+        origin: str,
+        n: int,
+        d: int | None = None,
     ) -> tuple[list[Signal], bool]:
         kinds = Present | Left | Working | Idle | StreamStart | StreamDelta | StreamEnd
         if not isinstance(signal, kinds):
@@ -168,15 +176,27 @@ class LatestState:
             held.streams.setdefault(signal.stream_id, _Stream(signal))
         elif isinstance(signal, StreamDelta):
             stream = held.streams.get(signal.stream_id)
-            told = stream is not None
-            if stream is not None:
+            if stream is not None and d is not None and d != stream.d:
+                stream.gapped = True
+            told = stream is not None and not stream.gapped
+            if stream is not None and not stream.gapped:
                 stream.text, stream.index = stream.text + signal.text, signal.index
+                stream.d += d is not None
         else:
             told = held.streams.pop(signal.stream_id, None) is not None
         self._settle(key, origin, found)
         if told and isinstance(signal, Left) and sender.id in self._present(key, epoch):
             told = False
         return [signal] if told else [], had and not found.held
+
+    def counted(self, scope: str, signal: StreamDelta, pieces: int) -> int:
+        found = self._slices.get((scope, signal.thread_id), {}).get(self.origin)
+        held = None if found is None else found.held.get(signal.sender.id)
+        stream = None if held is None else held.streams.get(signal.stream_id)
+        if stream is None:
+            return 0
+        stream.d += pieces
+        return stream.d - pieces
 
     def replace(
         self,

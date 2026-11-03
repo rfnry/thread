@@ -515,10 +515,12 @@ class Hub:
         if emptied:
             self._snapshot(scope, signal.thread_id, epoch, [])
 
-    async def _fanout(self, scope: str, signal: Signal, origin: str, n: int, epoch: int) -> None:
+    async def _fanout(
+        self, scope: str, signal: Signal, origin: str, n: int, epoch: int, d: int | None = None
+    ) -> None:
         async with self._locked(scope, signal.thread_id) as after:
             if await self._current(scope, signal.thread_id, epoch, after):
-                told, _ = self.state.apply(scope, epoch, signal, origin, n)
+                told, _ = self.state.apply(scope, epoch, signal, origin, n, d)
                 self._tell(scope, signal.thread_id, epoch, told)
 
     async def _refreshed(
@@ -728,7 +730,11 @@ class Hub:
         if not self.linked:
             return
         payload = {"n": n, "e": epoch, **signal.model_dump(mode="json")}
-        if _size(payload) <= MIRROR_BUDGET:
+        whole = _size(payload) <= MIRROR_BUDGET
+        if isinstance(signal, StreamDelta):
+            pieces = 1 if whole else -(-len(signal.text) // PIECE)
+            payload["d"] = self.state.counted(scope, signal, pieces)
+        if whole:
             self._publish(scope, signal.thread_id, payload)
             return
         if not isinstance(signal, StreamDelta):
@@ -737,7 +743,12 @@ class Hub:
             )
             return
         for start in range(0, len(signal.text), PIECE):
-            piece = {**payload, "n": next(self._sent), "text": signal.text[start : start + PIECE]}
+            piece = {
+                **payload,
+                "n": next(self._sent),
+                "d": payload["d"] + start // PIECE,
+                "text": signal.text[start : start + PIECE],
+            }
             self._publish(scope, signal.thread_id, piece)
 
     async def marked(self, origin: Session, signal: Marked) -> None:
@@ -807,10 +818,11 @@ class Hub:
             if kind == "scope.deleted":
                 await self._scope_gone(scope, Identity.model_validate(payload["sender"]))
                 return
+            d = payload.pop("d", None)
             signal = SIGNALS.validate_python(payload)
             if isinstance(signal, ThreadDeleted):
                 await self._gone(scope, signal, epoch)
                 return
-            await self._fanout(scope, signal, str(origin), n, epoch)
+            await self._fanout(scope, signal, str(origin), n, epoch, None if d is None else int(d))
         except Exception as error:
             logger.warning("hub: a notice from replica %s failed: %s", origin, error)

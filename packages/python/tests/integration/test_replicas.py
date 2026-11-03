@@ -212,8 +212,7 @@ async def test_a_replica_heard_from_again_is_announced_again_and_ends_once(
         await helper.call("signal.send", thread_id="t1", kind="stream.end", stream_id="s1")
         await helper.call("signal.send", thread_id="t1", kind="idle")
         await helper.call("thread.leave", thread_id="t1")
-        assert await arrived(ana, 4, 2.0) == [
-            ("stream.delta", "helper"),
+        assert await arrived(ana, 3, 2.0) == [
             ("stream.end", "helper"),
             ("idle", "helper"),
             ("left", "helper"),

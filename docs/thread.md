@@ -378,7 +378,8 @@ exception inside the block, or a finishing message the server refuses, abandons 
 `StreamEnd` with no message before it means the stream was abandoned — unless the sender's socket
 dropped: its stream ends then, and the finishing message, whose `client_id` is the stream's id, may
 still follow. A delta may arrive in several pieces that share its `index`: `index` orders a piece
-and never identifies it. Only text streams; media arrives in the message.
+and never identifies it. On another replica a preview that misses a piece stops growing until its
+message arrives. Only text streams; media arrives in the message.
 
 ### Steps
 
@@ -557,7 +558,8 @@ keeps who is present, working and streaming, and every ten seconds sends the oth
 its own, whole, for each thread and its epoch: a newer snapshot replaces what they held from that
 replica, anything older than what they hold is dropped, and what the replacement changes — a signal
 they missed — is told to their connections. A stream a replica never heard start begins there with
-the next snapshot, without the text written before it. A replica that starts, or listens again, asks
+the next snapshot, without the text written before it. A preview there that misses a piece stays as it was
+until the finishing message settles the text. A replica that starts, or listens again, asks
 the others to send theirs at once. A missed hint costs latency, never an event: resume reads from
 storage.
 
