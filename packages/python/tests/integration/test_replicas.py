@@ -1070,8 +1070,10 @@ async def test_replicas_whose_listeners_come_back_empty_the_rooms_of_a_thread_de
     assert await storage.delete_thread("acme", "t1")
     killed = await terminate(pool, 2)
     await relistened(pool, killed, 2)
-    assert (await ana.push("thread.deleted", timeout=5.0))["sender"]["id"] == "system"
-    assert (await helper.push("thread.deleted", timeout=5.0))["sender"]["id"] == "system"
+    for peer, other in ((ana, "helper"), (helper, "ana")):
+        assert (await peer.push("thread.deleted", timeout=5.0))["sender"]["id"] == "system"
+        before, peer.pushes = peer.pushes, []
+        assert [(p["kind"], p["sender"]["id"]) for p in before] in ([], [("left", other)])
     await far.create_thread("acme", "t1")
     await far.add_member("acme", "t1", BRUNO)
     bruno = await Peer.open(far, BRUNO)
