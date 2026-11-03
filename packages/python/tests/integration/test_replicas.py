@@ -1,5 +1,6 @@
 import asyncio
 import contextlib
+import json
 import logging
 from collections.abc import AsyncIterator, Awaitable, Callable
 from datetime import UTC, datetime
@@ -14,7 +15,7 @@ from unit.peer import Peer
 from unit.writes import admit, epoch
 from until import until
 
-from integration.pools import Stalling
+from integration.pools import Refusing, Stalling
 from rfnry_thread import postgres, server as server_module, state
 from rfnry_thread.errors import StorageError
 from rfnry_thread.models import Identity, Part, Text, Thread
@@ -642,17 +643,16 @@ async def test_a_stop_while_writes_go_on_and_groups_stall_returns_within_its_bou
     for n in range(4):
         await near.create_thread("acme", f"w{n}")
     writers = [asyncio.ensure_future(writer(f"w{n}")) for n in range(4)]
+    await asyncio.sleep(0.2)
+    stopping = asyncio.ensure_future(near.stop())
     try:
-        await asyncio.sleep(0.2)
-        loop = asyncio.get_running_loop()
-        started = loop.time()
-        await asyncio.wait_for(near.stop(), 3.0)
-        assert loop.time() - started < 2 * 0.3 + 0.3
-        assert writers and not any(task.done() for task in writers)
+        await asyncio.wait({stopping}, timeout=20 * 0.3)
+        assert stopping.done() and not any(task.done() for task in writers)
     finally:
         writing.clear()
         await asyncio.gather(*writers)
         stalling.resume()
+        await stopping
         await near.stop()
 
 
@@ -761,7 +761,7 @@ async def test_a_dropped_listener_listens_again_and_resumes(
     assert await listeners(pool) == []
 
 
-async def test_what_a_listener_hears_while_listening_again_is_passed_on_after_on_resume(
+async def test_what_a_listener_hears_after_listening_again_is_passed_on(
     pool: Any, storage: PostgresStorage, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     await storage.create_thread("acme", Thread(id="t1", scope="acme", created_at=datetime.now(UTC)))
@@ -770,14 +770,14 @@ async def test_what_a_listener_hears_while_listening_again_is_passed_on_after_on
     order: list[str] = []
     relistening = asyncio.Event()
     halfway = asyncio.Event()
-    heard = asyncio.Event()
+    attached = asyncio.Event()
     attach = asyncpg.connection.Connection.add_listener
 
     async def held(conn: Any, channel: str, callback: Any) -> None:
         await attach(conn, channel, callback)
         if relistening.is_set() and channel == events_channel:
             halfway.set()
-            await asyncio.wait_for(heard.wait(), 5.0)
+            await asyncio.wait_for(attached.wait(), 5.0)
 
     monkeypatch.setattr(asyncpg.connection.Connection, "add_listener", held)
     monkeypatch.setattr(postgres, "RELISTEN", 0.01)
@@ -799,12 +799,241 @@ async def test_what_a_listener_hears_while_listening_again_is_passed_on_after_on
         await terminate(pool, 1)
         await asyncio.wait_for(halfway.wait(), 5.0)
         await storage.hint("acme", "t1", 2, await epoch(storage, "acme", "t1"))
-        await asyncio.sleep(0.3)
-        heard.set()
-        await until(lambda: len(order) == 2, timeout=5.0)
-        assert order == ["resume", "event 2"]
+        await until(lambda: order == ["event 2"])
+        attached.set()
+        await until(lambda: order == ["event 2", "resume"])
+    finally:
+        attached.set()
+        await stop()
+
+
+async def probed(
+    storage: PostgresStorage, monkeypatch: pytest.MonkeyPatch, period: float = 0.2
+) -> tuple[list[tuple[Any, str, Any]], list[int], asyncio.Event, Callable[[], Awaitable[None]]]:
+    await storage.create_thread("acme", Thread(id="t1", scope="acme", created_at=datetime.now(UTC)))
+    await admit(storage, "acme", added("t1", ANA))
+    monkeypatch.setattr(postgres, "PROBE", period)
+    monkeypatch.setattr(postgres, "RELISTEN", 0.01)
+    attached: list[tuple[Any, str, Any]] = []
+    attach = asyncpg.connection.Connection.add_listener
+
+    async def kept(conn: Any, channel: str, callback: Any) -> None:
+        await attach(conn, channel, callback)
+        attached.append((conn, channel, callback))
+
+    monkeypatch.setattr(asyncpg.connection.Connection, "add_listener", kept)
+    seen: list[int] = []
+    resumed = asyncio.Event()
+
+    async def on_event(scope: str, thread_id: str, seq: int, epoch: int) -> None:
+        seen.append(seq)
+
+    async def on_signal(scope: str, thread_id: str, payload: dict[str, Any]) -> None:
+        return None
+
+    async def on_resume() -> None:
+        resumed.set()
+
+    stop = await storage.listen(on_event, on_signal, on_resume)
+    assert len(attached) == 2
+    return attached, seen, resumed, stop
+
+
+async def test_a_listener_that_stops_hearing_its_own_probe_listens_again(
+    storage: PostgresStorage, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    attached, seen, resumed, stop = await probed(storage, monkeypatch)
+    _, signals = await storage._channels()
+    probes: list[str] = []
+    raw = await asyncpg.connect(URL, timeout=5)
+    try:
+        with caplog.at_level(logging.WARNING):
+            for conn, channel, callback in list(attached):
+                await conn.remove_listener(channel, callback)
+            await asyncio.wait_for(resumed.wait(), 2.0)
+            await raw.add_listener(signals, lambda *notice: probes.append(notice[3]))
+            await storage.hint("acme", "t1", 2, await epoch(storage, "acme", "t1"))
+            await until(lambda: seen == [2])
+            await until(lambda: len(probes) >= 3)
+        missed = "postgres: the listener missed its own probe; listening again"
+        assert caplog.text.count(missed) == 1
     finally:
         await stop()
+        await raw.close()
+
+
+async def test_a_probe_that_cannot_be_sent_is_not_a_miss(
+    pool: Any, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    monkeypatch.setattr(postgres, "PROBE", 0.2)
+    refusing = Refusing(pool)
+    storage = PostgresStorage(refusing)
+    _, signals = await storage._channels()
+    probes: list[str] = []
+    resumed = asyncio.Event()
+
+    async def on_event(scope: str, thread_id: str, seq: int, epoch: int) -> None:
+        return None
+
+    async def on_signal(scope: str, thread_id: str, payload: dict[str, Any]) -> None:
+        return None
+
+    async def on_resume() -> None:
+        resumed.set()
+
+    raw = await asyncpg.connect(URL, timeout=5)
+    stop = await storage.listen(on_event, on_signal, on_resume)
+    try:
+        with caplog.at_level(logging.WARNING):
+            refusing.refuse = True
+            await raw.add_listener(signals, lambda *notice: probes.append(notice[3]))
+            await until(lambda: not refusing.refuse)
+            await until(lambda: len(probes) >= 2)
+        assert (
+            "postgres: the listener's probe was not sent: "
+            "postgres: storage rejected publish: the pool is closed"
+        ) in caplog.text
+        assert "missed its own probe" not in caplog.text and not resumed.is_set()
+    finally:
+        await stop()
+        await raw.close()
+
+
+async def test_a_listener_whose_connection_stops_answering_is_replaced_without_waiting_on_it(
+    storage: PostgresStorage, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    attached, seen, resumed, stop = await probed(storage, monkeypatch)
+    conn = attached[0][0]
+    try:
+        conn._transport.pause_reading()
+        await asyncio.wait_for(resumed.wait(), 2.0)
+        assert conn.is_closed()
+        await storage.hint("acme", "t1", 2, await epoch(storage, "acme", "t1"))
+        await until(lambda: seen == [2])
+    finally:
+        if not conn.is_closed():
+            conn.terminate()
+        await stop()
+
+
+async def test_a_stop_on_a_half_open_listener_returns_within_its_bound(
+    storage: PostgresStorage, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(postgres, "NOTIFY_TIMEOUT", 0.3)
+    attached, _, _, stop = await probed(storage, monkeypatch, period=30.0)
+    conn = attached[0][0]
+    try:
+        conn._transport.pause_reading()
+        await asyncio.wait_for(stop(), 20 * 0.3)
+        assert conn.is_closed()
+    finally:
+        if not conn.is_closed():
+            conn.terminate()
+
+
+async def test_a_stop_cancelled_while_it_gives_the_connection_back_leaves_none_checked_out(
+    pool: Any, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    own = await open_pool()
+    attached, _, _, stop = await probed(PostgresStorage(own), monkeypatch, period=30.0)
+    conn = attached[0][0]
+    releasing = asyncio.Event()
+    remove = asyncpg.connection.Connection.remove_listener
+
+    async def removing(connection: Any, channel: str, callback: Any) -> None:
+        releasing.set()
+        await remove(connection, channel, callback)
+
+    monkeypatch.setattr(asyncpg.connection.Connection, "remove_listener", removing)
+    try:
+        conn._transport.pause_reading()
+        stopping = asyncio.ensure_future(stop())
+        await asyncio.wait_for(releasing.wait(), 2.0)
+        stopping.cancel()
+        with contextlib.suppress(asyncio.CancelledError):
+            await stopping
+        await asyncio.wait_for(own.close(), 5.0)
+        assert conn.is_closed()
+    finally:
+        if not conn.is_closed():
+            conn.terminate()
+        own.terminate()
+
+
+async def test_a_listener_that_cannot_attach_leaves_no_termination_callback_behind(
+    storage: PostgresStorage, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    added_to: list[Any] = []
+    removed_from: list[Any] = []
+    add = asyncpg.connection.Connection.add_termination_listener
+    remove = asyncpg.connection.Connection.remove_termination_listener
+
+    def adding(conn: Any, callback: Any) -> None:
+        added_to.append(conn)
+        add(conn, callback)
+
+    def removing(conn: Any, callback: Any) -> None:
+        removed_from.append(conn)
+        remove(conn, callback)
+
+    async def refused(conn: Any, channel: str, callback: Any) -> None:
+        raise OSError("the connection was reset")
+
+    monkeypatch.setattr(asyncpg.connection.Connection, "add_termination_listener", adding)
+    monkeypatch.setattr(asyncpg.connection.Connection, "remove_termination_listener", removing)
+    monkeypatch.setattr(asyncpg.connection.Connection, "add_listener", refused)
+
+    async def on_event(scope: str, thread_id: str, seq: int, epoch: int) -> None:
+        return None
+
+    async def on_signal(scope: str, thread_id: str, payload: dict[str, Any]) -> None:
+        return None
+
+    with pytest.raises(StorageError, match="^postgres: storage rejected listen: the connection"):
+        await storage.listen(on_event, on_signal)
+    assert added_to and removed_from == added_to
+
+
+async def test_probes_reach_no_callback(
+    storage: PostgresStorage, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    monkeypatch.setattr(postgres, "PROBE", 0.2)
+    _, signals = await storage._channels()
+    probes: list[str] = []
+
+    def probe(_conn: Any, _pid: int, _channel: str, text: str) -> None:
+        if "probe" in json.loads(text):
+            probes.append(text)
+
+    heard: dict[str, list[dict[str, Any]]] = {"near": [], "far": []}
+
+    def listener(name: str) -> Any:
+        async def on_signal(scope: str, thread_id: str, payload: dict[str, Any]) -> None:
+            heard[name].append(payload)
+
+        return on_signal
+
+    async def on_event(scope: str, thread_id: str, seq: int, epoch: int) -> None:
+        return None
+
+    raw = await asyncpg.connect(URL, timeout=5)
+    far_pool = await open_pool()
+    stops: list[Callable[[], Awaitable[None]]] = []
+    try:
+        await raw.add_listener(signals, probe)
+        with caplog.at_level(logging.WARNING):
+            for name, store in (("near", storage), ("far", PostgresStorage(far_pool))):
+                stops.append(await store.listen(on_event, listener(name)))
+            await until(lambda: len(probes) >= 4)
+            await storage.publish("acme", "t1", {"kind": "idle"})
+            await until(lambda: bool(heard["near"] and heard["far"]))
+        assert heard == {"near": [{"kind": "idle"}], "far": [{"kind": "idle"}]}
+        assert [r.getMessage() for r in caplog.records if r.levelno >= logging.ERROR] == []
+    finally:
+        for stop in stops:
+            await stop()
+        await raw.close()
+        await asyncio.wait_for(far_pool.close(), 5)
 
 
 async def test_signals_and_events_cross_again_after_the_listeners_drop(

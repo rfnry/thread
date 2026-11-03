@@ -162,10 +162,12 @@ async def start(self) -> None: ...
 
 Links this server to the other replicas on the same storage: it listens for their events and
 signals, mirrors its own signals to them, repeats its own presence, working and streams every ten
-seconds, and catches every thread its connections have open up from storage on each notice for it,
-every ten seconds, before it returns and when a dropped listener is back, then repeats its own
-state. Every server hints the others of each event it stores, started or not. Calling it again does
-nothing. Raises `StorageError` when the storage cannot listen.
+seconds, and catches the threads its connections have open up from storage: each on a notice for
+it, and all of them in a pass every ten seconds, before it returns and whenever it listens again —
+after its listening connection drops or misses the notice it sends itself every ten seconds — then
+repeats its own state. A pass skips a thread whose catch-up, join or write is under way, which that
+work or the next pass catches up. Every server hints the others of each event it stores, started or
+not. Calling it again does nothing. Raises `StorageError` when the storage cannot listen.
 
 ### `Server.stop`
 
@@ -177,8 +179,10 @@ Sends the other replicas the end of what this server's connections announced —
 and `Left` — together, waits for every notice this server had still to send when it was called,
 hints of its last writes among them, then stops listening to them, gives the listening connection
 back, and ends their state for this server's connections. Each group of notices is bounded by ten
-seconds. Call it before the pool closes: ends it cannot send reach the others only when they forget
-this server, within forty seconds.
+seconds, and it waits for at most two: the one going out when it is called and the one holding what
+was queued behind it. Giving the connection back is bounded by ten seconds too: one that does not
+answer is closed. Call it before the pool closes: ends it cannot send reach the others only
+when they forget this server, within forty seconds.
 
 ### `Server.create_thread`
 
@@ -1554,8 +1558,9 @@ never waits for one notice before it sends the next, both take their place in th
 the moment they are called, before they first wait, and the storage sends them in that order.
 `listen` takes an `OnEvent`, `on_event(scope, thread_id, seq, epoch)`, called for each `hint`, and
 an `OnSignal`, `on_signal(scope, thread_id, payload)`, called for each `publish`, by any server on
-the storage, and an `OnResume`, `on_resume()`, called once a dropped listener is back and before
-anything it heard since is passed on; it returns a
+the storage, and an `OnResume`, `on_resume()`, called each time the listener is attached again
+after it lost its connection; what it hears is passed on as it arrives, before `on_resume` as well
+as after; it returns a
 `Stop`, `stop()`, that ends it, and all four are async functions returning `None`. Raises
 `NotFoundError`, from `add_member`, `remove_member`, `append_event` and `list_threads` with a `before` id or a `Thread` without `last_seq`, when the
 scope holds no such thread, and `StorageError`, from `create_thread`, when the thread's scope is not
@@ -1579,19 +1584,26 @@ pool's `search_path`, which the `rfnry-thread` command creates and upgrades. `ch
 `ConfigurationError` naming the command to run when that schema holds no thread tables (naming
 tables `initialize()` made in another schema to move with `upgrade --from`), is behind or ahead of
 this version, holds tables `initialize()` made in 0.1.1 or earlier, or is one whose schema or tables
-the pool's role cannot use, or holds a search half set up. With search set up by
-`rfnry-thread set --search`, triggers keep `thread_texts` — each message's current text, and each
-thread's metadata strings under `seq` 0 — in step with every append and every change of metadata,
-and `query` and `search` read its trigram index in the pool's schema, each planned for its own words
-and read with its messages in one snapshot; without it they raise `ConfigurationError` naming the
-command. `hint` and `publish` each send a `NOTIFY`, on two channels named for the connection's
-current schema, so deployments in different schemas of one database do not hear each other and
-replicas sharing a schema do. A write sends none. The notices waiting when one goes out are sent
-together in one transaction, in the order they were sent, so one storage's notices arrive in order
-and a busy one sends them in groups; a group the database does not take within ten seconds fails
-each of its notices with `StorageError`, and the next group goes out. `listen` holds one connection
-from the pool, taking another with jittered backoff when it drops. Raises `StorageError` when the
-database fails, and from `publish`, when a notification is over 7900 bytes.
+the pool's role cannot use, or holds a search half set up. It never reads the notification queue:
+only `rfnry-thread check` reports `the notification queue is N% full — a session that LISTENs is not
+reading or a long transaction holds the queue`, once Postgres' notification queue is half full. With
+search set up by `rfnry-thread set --search`, triggers keep `thread_texts` — each message's current
+text, and each thread's metadata strings under `seq` 0 — in step with every append and every change
+of metadata, and `query` and `search` read its trigram index in the pool's schema, each planned for
+its own words and read with its messages in one snapshot; without it they raise `ConfigurationError`
+naming the command. `hint` and `publish` each send a `NOTIFY`, on two channels named for the
+connection's current schema, so deployments in different schemas of one database do not hear each
+other and replicas sharing a schema do. A write sends none. The notices waiting when one goes out
+are sent together in one transaction, in the order they were sent, so one storage's notices arrive
+in order and a busy one sends them in groups; a group the database does not take within ten seconds
+fails each of its notices with `StorageError`, and the next group goes out. `listen` holds one
+connection from the pool and sends itself a notice every ten seconds, through another connection, to
+hear on that one; no callback sees it. When the connection drops, or one notice has not come back by
+the next, it takes another with jittered backoff, logging `postgres: the listener missed its own
+probe; listening again` and closing the old one in the second case. Its `stop()` gives the
+connection back within ten seconds, closing it when it does not answer. `LISTEN` needs a session
+connection, so a pool behind PgBouncer's transaction pooling keeps logging that warning. Raises
+`StorageError` when the database fails, and from `publish`, when a notification is over 7900 bytes.
 
 ## Errors
 

@@ -558,21 +558,32 @@ changes — a signal another replica missed — is told to that replica's connec
 costs latency, never an event: resume reads from storage.
 
 A notice about a thread carries its epoch, and every replica catches each thread its connections
-have open up from storage: on a notice for it, every ten seconds for all of them in one read, on
-`start()`, and when its `LISTEN` connection comes back after a drop (it takes another with jittered
-backoff). Catching up reads the thread's row and the events past each connection's position in one
-snapshot. A missing row or another epoch is a thread deleted, or deleted and made again under the
-same id: its connections are sent `ThreadDeleted` and leave it, and nothing of the new thread
-reaches them — a signal from a newer epoch first catches their room up, and one from an older epoch
-is dropped. Otherwise they are sent what they missed, and a member removed meanwhile receives its
-`MemberRemoved` and leaves. A lost notice costs at most ten seconds, never an event; the
-`thread.deleted` and `scope.deleted` notices only act sooner. A read that fails is tried again by
-whatever next reaches the thread, a ten-second pass leaves a thread still busy with a catch-up, a
-join or a write to the next one, a pass still running after ten seconds is stopped and started
-over at the next, and a pass that fails is logged and the next one runs. Give the pool a
-`command_timeout`, so a read the database never answers ends. A replica that misses an `invited`
-notice gives no `Invited`, and a follower no `Joined`, until the connection follows again. `start()`
-holds one connection from the pool for `LISTEN`; `stop()` gives it back.
+have open up from storage: on a notice for it, and in a pass over all of them, in one read, every
+ten seconds, on `start()` and whenever it listens again. Catching up reads the thread's row and the
+events past each connection's position in one snapshot. A missing row or another epoch is a thread
+deleted, or deleted and made again under the same id: its connections are sent `ThreadDeleted` and
+leave it, and nothing of the new thread reaches them — a signal from a newer epoch first catches
+their room up, and one from an older epoch is dropped. Otherwise they are sent what they missed, and
+a member removed meanwhile receives its `MemberRemoved` and leaves. A lost notice costs at most ten
+seconds, never an event; the `thread.deleted` and `scope.deleted` notices only act sooner. A read
+that fails is tried again by whatever next reaches the thread. Every pass — the ten-second one, the
+one on `start()` and the one after listening again — leaves a thread still busy with a catch-up, a
+join or a write to that work, whose traffic or the next pass catches it up; a pass still running
+after ten seconds is stopped and started over at the next, and a pass that fails is logged and the
+next one runs. Give the pool a `command_timeout`, so a read the database never answers ends. A
+replica that misses an `invited` notice gives no `Invited`, and a follower no `Joined`, until the
+connection follows again.
+
+`start()` holds one connection from the pool for `LISTEN`; `stop()` gives it back, or closes it when
+it does not answer within ten seconds. That connection can drop, or stay open and stop delivering,
+so every ten seconds the replica sends itself a notice through another connection of the pool and
+listens for it on this one; no handler sees it. When one has not come back by the next, it logs
+`postgres: the listener missed its own probe; listening again` and closes the connection. After that
+or a drop it takes another with jittered backoff, passes on what it hears there as it arrives, then
+catches its threads up and repeats its own state: a notice heard before that pass is checked against
+the epoch like any other, and the pass brings what was missed meanwhile. `LISTEN` needs a session
+connection: a pool behind PgBouncer's transaction pooling never hears its probe, so it keeps logging
+that warning.
 
 A replica that goes away ends, for the others' connections, what its own had announced, as if they
 had dropped: `StreamEnd` for each open stream, `Idle` for the work, and `Left` for each identity no
@@ -920,7 +931,11 @@ server = Server(storage)
 version and the command that fixes it: no thread schema on the pool's `search_path`, a schema behind
 or ahead of this version, tables an earlier version's `initialize()` made, or a schema or tables the
 pool's role cannot use. When the pool's first schema is another library's, it points at thread's own
-schema instead of offering that one.
+schema instead of offering that one. `rfnry-thread check` also reports Postgres' notification queue
+half full or more — a session that `LISTEN`s is not reading, or a long transaction holds the queue,
+and once it is full no replica's notice goes out. `check()` leaves the queue out: it is an alarm
+for the operator, and replicas that refused to start over it would crash-loop through the incident
+that filled it.
 
 A version of thread that changes its tables ships a migration, and the schema follows it in place,
 its data kept:
@@ -928,7 +943,7 @@ its data kept:
 ```sh
 rfnry-thread upgrade --schema thread --sql    # what would run
 rfnry-thread upgrade --schema thread          # lists the steps, asks, runs them in one transaction
-rfnry-thread check --schema thread            # exits 0 when the schema fits this version
+rfnry-thread check --schema thread            # exits 0 when the schema fits and the queue is not half full
 ```
 
 Take a snapshot and stop the app instances running the old version first: `upgrade` reminds you,

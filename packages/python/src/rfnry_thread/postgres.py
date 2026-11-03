@@ -2,11 +2,13 @@ import asyncio
 import contextlib
 import hashlib
 import json
+import logging
 import random
 from collections.abc import AsyncIterator, Awaitable, Callable, Sequence
 from contextlib import asynccontextmanager
 from datetime import datetime
 from typing import Any, Literal, cast
+from uuid import uuid4
 
 from rfnry_thread import migrations
 from rfnry_thread.errors import (
@@ -37,12 +39,15 @@ EVENTS_PREFIX = "thread_events_"
 SIGNALS_PREFIX = "thread_signals_"
 NOTIFY_LIMIT = 7900
 NOTIFY_TIMEOUT = 10.0
+PROBE = 10.0
 RELISTEN = 0.5
 RELISTEN_CAP = 30.0
 _THREAD = "scope, id, metadata, created_at, history, epoch"
 _MAKE = "scope, id, metadata, created_at, history"
 _Channel = Literal["events", "signals"]
 _Notice = tuple[_Channel, str, asyncio.Future[None]]
+
+logger = logging.getLogger(__name__)
 
 
 def _json(value: Any) -> Any:
@@ -849,26 +854,22 @@ class PostgresStorage:
         tasks: set[asyncio.Future[None]] = set()
         lost = asyncio.Event()
         held: list[Any] = [None]
-        waiting: list[list[tuple[str, str]] | None] = [None]
+        unanswered: list[str | None] = [None]
 
         def track(work: Awaitable[None]) -> None:
             future = asyncio.ensure_future(work)
             tasks.add(future)
             future.add_done_callback(tasks.discard)
 
-        def dispatch(channel: str, text: str) -> None:
+        def receive(_connection: Any, _pid: int, channel: str, text: str) -> None:
             data = json.loads(text)
-            if channel == events_channel:
+            if "probe" in data:
+                if data["probe"] == unanswered[0]:
+                    unanswered[0] = None
+            elif channel == events_channel:
                 track(on_event(data["s"], data["t"], int(data["q"]), int(data["e"])))
             else:
                 track(on_signal(data["s"], data["t"], data["p"]))
-
-        def receive(_connection: Any, _pid: int, channel: str, text: str) -> None:
-            heard = waiting[0]
-            if heard is None:
-                dispatch(channel, text)
-            else:
-                heard.append((channel, text))
 
         def terminated(_connection: Any) -> None:
             lost.set()
@@ -881,6 +882,8 @@ class PostgresStorage:
                 await conn.add_listener(signals_channel, receive)
             except BaseException:
                 with contextlib.suppress(Exception):
+                    conn.remove_termination_listener(terminated)
+                with contextlib.suppress(Exception):
                     await self._pool.release(conn)
                 raise
             held[0] = conn
@@ -889,43 +892,69 @@ class PostgresStorage:
             conn, held[0] = held[0], None
             if conn is None:
                 return
-            with contextlib.suppress(Exception):
-                conn.remove_termination_listener(terminated)
-                await conn.remove_listener(events_channel, receive)
-                await conn.remove_listener(signals_channel, receive)
-            with contextlib.suppress(Exception):
-                await self._pool.release(conn)
+            try:
+                async with asyncio.timeout(NOTIFY_TIMEOUT):
+                    with contextlib.suppress(Exception):
+                        conn.remove_termination_listener(terminated)
+                        await conn.remove_listener(events_channel, receive)
+                        await conn.remove_listener(signals_channel, receive)
+                    with contextlib.suppress(Exception):
+                        await self._pool.release(conn)
+            except BaseException as error:
+                with contextlib.suppress(Exception):
+                    conn.terminate()
+                if not isinstance(error, TimeoutError):
+                    raise
 
         async def relisten() -> None:
             while True:
                 await lost.wait()
                 lost.clear()
                 await release()
-                waiting[0] = []
                 attempt = 0
                 while held[0] is None:
                     await asyncio.sleep(random.random() * min(RELISTEN_CAP, RELISTEN * 2**attempt))
                     attempt += 1
                     with contextlib.suppress(Exception):
                         await attach()
-                resumed = None
+                unanswered[0] = None
                 if on_resume is not None:
                     with contextlib.suppress(Exception):
-                        resumed = on_resume()
-                heard, waiting[0] = waiting[0] or [], None
-                for channel, text in heard:
-                    dispatch(channel, text)
-                if resumed is not None:
-                    track(resumed)
+                        track(on_resume())
+
+        async def probe() -> None:
+            while True:
+                await asyncio.sleep(PROBE)
+                conn = held[0]
+                if conn is None or lost.is_set():
+                    continue
+                if unanswered[0] is not None:
+                    logger.warning("postgres: the listener missed its own probe; listening again")
+                    with contextlib.suppress(Exception):
+                        conn.remove_termination_listener(terminated)
+                        conn.terminate()
+                    lost.set()
+                    continue
+                token = unanswered[0] = uuid4().hex
+                try:
+                    await self._send("signals", json.dumps({"probe": token}))
+                except Exception as error:
+                    if unanswered[0] == token:
+                        unanswered[0] = None
+                    logger.warning("postgres: the listener's probe was not sent: %s", error)
 
         async with self._guard("listen"):
             await attach()
-        watcher = asyncio.get_running_loop().create_task(relisten())
+        loop = asyncio.get_running_loop()
+        watcher = loop.create_task(relisten())
+        prober = loop.create_task(probe())
 
         async def stop() -> None:
             watcher.cancel()
-            with contextlib.suppress(asyncio.CancelledError):
-                await watcher
+            prober.cancel()
+            for task in (watcher, prober):
+                with contextlib.suppress(asyncio.CancelledError):
+                    await task
             await release()
             for future in list(tasks):
                 future.cancel()
