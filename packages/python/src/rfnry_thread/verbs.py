@@ -193,7 +193,9 @@ class Verbs:
         await self._hub.added(scope, thread, by, added.identity, added.seq)
 
     async def _admit(self, scope: str, thread: Thread, identity: Identity, by: Identity) -> Member:
-        member, added = await self._storage.add_member(scope, self._added(thread.id, identity, by))
+        member, added = await self._storage.add_member(
+            scope, self._added(thread.id, identity, by), thread.epoch
+        )
         if added is not None:
             await self._hub.shielded(self._admitted(scope, thread, by, added))
         return member
@@ -247,7 +249,7 @@ class Verbs:
         self, actor: Identity, scope: str, thread_id: str, metadata: dict[str, Any]
     ) -> Thread:
         _thread_metadata(metadata)
-        await self.thread(actor, scope, thread_id, "manage")
+        current = await self.thread(actor, scope, thread_id, "manage")
         event = ThreadUpdated(
             id=uuid.uuid4().hex,
             thread_id=thread_id,
@@ -256,7 +258,7 @@ class Verbs:
             client_id=uuid.uuid4().hex,
             metadata=metadata,
         )
-        result = await self._storage.update_thread(scope, event)
+        result = await self._storage.update_thread(scope, event, current.epoch)
         if result is None:
             raise NotFoundError(f"server: thread {thread_id!r} was not found")
         thread, stored = result
@@ -265,8 +267,9 @@ class Verbs:
 
     async def delete_thread(self, actor: Identity, scope: str, thread_id: str) -> None:
         await self.thread(actor, scope, thread_id, "delete")
-        await self._storage.delete_thread(scope, thread_id)
-        await self._hub.shielded(self._hub.deleted(scope, thread_id, actor))
+        epoch = await self._storage.delete_thread(scope, thread_id)
+        if epoch is not None:
+            await self._hub.shielded(self._hub.deleted(scope, thread_id, epoch, actor))
 
     async def add_member(
         self, actor: Identity, scope: str, thread_id: str, identity: Identity
@@ -291,7 +294,7 @@ class Verbs:
             client_id=uuid.uuid4().hex,
             identity=Identity(role="user", id=identity_id),
         )
-        stored = await self._storage.remove_member(scope, event)
+        stored = await self._storage.remove_member(scope, event, thread.epoch)
         if stored is None:
             raise NotFoundError(f"server: {identity_id!r} is not a member of thread {thread_id!r}")
         await self._hub.shielded(self._hub.deliver(scope, stored, thread.epoch))
@@ -526,7 +529,7 @@ class Verbs:
             if sent is not None:
                 return sent
             event = await self._redacted(self._redact, actor, thread, event)
-        stored, created = await self._storage.append_event(scope, event)
+        stored, created = await self._storage.append_event(scope, event, thread.epoch)
         if created:
             await self._hub.shielded(self._hub.deliver(scope, stored, thread.epoch))
         return stored

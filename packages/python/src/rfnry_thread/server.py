@@ -446,14 +446,13 @@ class Server:
     async def start(self) -> None:
         if self._stop is not None:
             return
-        doubted = self._hub.doubt()
         self._stop = await self._storage.listen(
             self._hub.on_event, self._hub.on_signal, self._hub.on_resume
         )
         self._hub.linked = True
         self._refresher = asyncio.get_running_loop().create_task(self._refresh())
-        if doubted:
-            await self._hub.resync()
+        await self._hub.catch_up()
+        await self._hub.announce()
 
     async def stop(self) -> None:
         if self._refresher is not None:
@@ -472,7 +471,12 @@ class Server:
     async def _refresh(self) -> None:
         while True:
             await asyncio.sleep(REFRESH)
-            await self._hub.recheck()
+            try:
+                await asyncio.wait_for(self._hub.catch_up(), REFRESH)
+            except TimeoutError:
+                logger.warning(
+                    "server: a catch-up pass took longer than %g s and was stopped", REFRESH
+                )
             await self._hub.announce()
             await self._hub.sweep()
 

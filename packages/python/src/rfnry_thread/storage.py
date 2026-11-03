@@ -54,16 +54,18 @@ class Storage(Protocol):
     ) -> list[Message]: ...
 
     async def update_thread(
-        self, scope: str, updated: ThreadUpdated
+        self, scope: str, updated: ThreadUpdated, epoch: int
     ) -> tuple[Thread, ThreadUpdated] | None: ...
 
-    async def delete_thread(self, scope: str, thread_id: str) -> bool: ...
+    async def delete_thread(self, scope: str, thread_id: str) -> int | None: ...
 
     async def add_member(
-        self, scope: str, added: MemberAdded
+        self, scope: str, added: MemberAdded, epoch: int
     ) -> tuple[Member, MemberAdded | None]: ...
 
-    async def remove_member(self, scope: str, removed: MemberRemoved) -> MemberRemoved | None: ...
+    async def remove_member(
+        self, scope: str, removed: MemberRemoved, epoch: int
+    ) -> MemberRemoved | None: ...
 
     async def list_members(self, scope: str, thread_id: str) -> list[Member]: ...
 
@@ -73,6 +75,10 @@ class Storage(Protocol):
         self, scope: str, thread_id: str, identity_id: str
     ) -> tuple[int, int, int] | None: ...
 
+    async def heads(
+        self, keys: Sequence[tuple[str, str]]
+    ) -> dict[tuple[str, str], tuple[int, int]]: ...
+
     async def mark(
         self, scope: str, thread_id: str, identity_id: str, seq: int, back: bool = False
     ) -> tuple[int, int, bool]: ...
@@ -81,7 +87,7 @@ class Storage(Protocol):
 
     async def baseline_marks(self, scope: str, identity_id: str) -> int: ...
 
-    async def append_event(self, scope: str, event: Event) -> tuple[Event, bool]: ...
+    async def append_event(self, scope: str, event: Event, epoch: int) -> tuple[Event, bool]: ...
 
     async def list_events(
         self,
@@ -93,6 +99,10 @@ class Storage(Protocol):
         kinds: Sequence[str] | None = None,
         floor: int = 0,
     ) -> list[Event]: ...
+
+    async def tail(
+        self, scope: str, thread_id: str, since: int, floor: int, limit: int
+    ) -> tuple[int, int, list[Event]] | None: ...
 
     async def get_event(
         self, scope: str, thread_id: str, event_id: str, floor: int = 0

@@ -17,6 +17,7 @@ from .factories import ANA, BRUNO, HELPER, lookalike, message
 from .hubkit import open_session
 from .legacy import unreachable
 from .peer import Peer
+from .writes import append
 
 
 async def room(server: Server, *members: Identity) -> Peer:
@@ -358,7 +359,8 @@ async def test_listing_by_activity_lists_a_thread_once_when_the_page_it_ended_on
     ana = await archive(storage, ("a1", False), ("a2", False), ("r1", True), ("a3", False))
 
     async def move(page: list[Thread]) -> None:
-        await storage.append_event(
+        await append(
+            storage,
             "acme",
             message(1, "up").model_copy(
                 update={"thread_id": page[-1].id, "created_at": verbs.now()}

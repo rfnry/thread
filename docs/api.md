@@ -160,12 +160,11 @@ does not fit or the scope is empty.
 async def start(self) -> None: ...
 ```
 
-Links this server to the other replicas on the same storage: it listens for their events and signals
-and repeats its own presence, working and streams every ten seconds. When its listener drops, it
-listens again, checks every thread its connections have open against storage before anything more
-reaches them, and repeats its own state; started with connections already open, after `stop()` or
-before a first `start()`, it does the same before it returns, since it heard nothing meanwhile.
-Calling it again does nothing. Raises `StorageError` when the storage cannot listen.
+Links this server to the other replicas on the same storage: it listens for their events and signals,
+repeats its own presence, working and streams every ten seconds, and catches every thread its
+connections have open up from storage on each notice for it, every ten seconds, before it returns
+and when a dropped listener is back, then repeats its own state. Calling it again does nothing.
+Raises `StorageError` when the storage cannot listen.
 
 ### `Server.stop`
 
@@ -302,10 +301,10 @@ async def delete_scope(self, scope: str) -> int: ...
 Removes every thread, member and event of the scope, with search its `thread_texts`, and returns
 how many rows it removed. Connections still open in the scope, on every replica, are sent
 `ThreadDeleted` for each thread they joined or followed and leave it; a thread made again under the
-same id reaches them as new, with `Invited`, or `Joined` for a follower. A replica whose `LISTEN`
-was down when the notice went out sends the `ThreadDeleted` when it listens again, and hands a
-thread made again meanwhile to its connections when they follow again. Raises `InputError` when the
-scope is empty.
+same id reaches them as new, with `Invited`, or `Joined` for a follower. A replica that misses the
+notice sends the `ThreadDeleted` within ten seconds, and hands a thread made again meanwhile, whose
+`invited` notice it also missed, to its connections when they follow again. Raises `InputError` when
+the scope is empty.
 
 ### `Server.verify_absent`
 
@@ -1429,16 +1428,18 @@ class Storage(Protocol):
     ) -> list[Message]: ...
 
     async def update_thread(
-        self, scope: str, updated: ThreadUpdated
+        self, scope: str, updated: ThreadUpdated, epoch: int
     ) -> tuple[Thread, ThreadUpdated] | None: ...
 
-    async def delete_thread(self, scope: str, thread_id: str) -> bool: ...
+    async def delete_thread(self, scope: str, thread_id: str) -> int | None: ...
 
     async def add_member(
-        self, scope: str, added: MemberAdded
+        self, scope: str, added: MemberAdded, epoch: int
     ) -> tuple[Member, MemberAdded | None]: ...
 
-    async def remove_member(self, scope: str, removed: MemberRemoved) -> MemberRemoved | None: ...
+    async def remove_member(
+        self, scope: str, removed: MemberRemoved, epoch: int
+    ) -> MemberRemoved | None: ...
 
     async def list_members(self, scope: str, thread_id: str) -> list[Member]: ...
 
@@ -1448,6 +1449,10 @@ class Storage(Protocol):
         self, scope: str, thread_id: str, identity_id: str
     ) -> tuple[int, int, int] | None: ...
 
+    async def heads(
+        self, keys: Sequence[tuple[str, str]]
+    ) -> dict[tuple[str, str], tuple[int, int]]: ...
+
     async def mark(
         self, scope: str, thread_id: str, identity_id: str, seq: int, back: bool = False
     ) -> tuple[int, int, bool]: ...
@@ -1456,7 +1461,7 @@ class Storage(Protocol):
 
     async def baseline_marks(self, scope: str, identity_id: str) -> int: ...
 
-    async def append_event(self, scope: str, event: Event) -> tuple[Event, bool]: ...
+    async def append_event(self, scope: str, event: Event, epoch: int) -> tuple[Event, bool]: ...
 
     async def list_events(
         self,
@@ -1468,6 +1473,10 @@ class Storage(Protocol):
         kinds: Sequence[str] | None = None,
         floor: int = 0,
     ) -> list[Event]: ...
+
+    async def tail(
+        self, scope: str, thread_id: str, since: int, floor: int, limit: int
+    ) -> tuple[int, int, list[Event]] | None: ...
 
     async def get_event(
         self, scope: str, thread_id: str, event_id: str, floor: int = 0
@@ -1495,7 +1504,9 @@ append-only: an event is removed only with its thread or its scope. `check` only
 and its event are one write: `create_thread` given a `creator`, `add_member`, `remove_member` and
 `update_thread` take the event, and store the row, the event at the thread's next `seq` (taken under
 the thread's lock), the new member's mark and the notice in one transaction, so a failure leaves
-none of them. `create_thread` raises `StorageError` when the `creator` belongs to another thread, and returns the thread and whether it is new; with a `creator`, a new
+none of them. `add_member`, `remove_member`, `update_thread` and `append_event` take the `epoch` the
+caller read the thread at, and raise `NotFoundError` when the thread's row holds another, so a
+write meant for one incarnation of a thread never lands in one made again under its id. `create_thread` raises `StorageError` when the `creator` belongs to another thread, and returns the thread and whether it is new; with a `creator`, a new
 thread's first event (`seq` 1) is that `MemberAdded`, its membership and its mark at 0, and an
 existing thread comes back with `False` and nothing else written. `add_member` returns the member
 and the event stored, `None` with the existing member when it already was one (nothing written);
@@ -1525,6 +1536,11 @@ floor and the thread's `epoch` when `identity_id` is a member of it, `None` othe
 a connection. The floor is 0 in a thread whose `history` is `"all"`, and in a `"since_added"` one
 the `seq` of the member's `MemberAdded` event; `list_events`
 and `get_event` given a `floor` leave out events below it and edits and retractions of them.
+`tail` returns a thread's last `seq`, its `epoch` and at most `limit` events after `since`, up to
+that last `seq` and left out below `floor` the same way, in `seq` order and all from one snapshot,
+so the events are always of the epoch it returns; `None` when the scope holds no such thread.
+`heads` returns the last `seq` and the `epoch` of each listed thread that exists, in one read.
+`delete_thread` returns the `epoch` of the thread it removed, `None` when there was none.
 `listen` takes an `OnEvent`, `on_event(scope, thread_id, seq, epoch)`, and an `OnSignal`,
 `on_signal(scope, thread_id, payload)`, called for what any server on the storage appends or
 publishes, and an `OnResume`, `on_resume()`, called once a dropped listener is back and before

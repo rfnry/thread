@@ -459,7 +459,8 @@ async def test_a_session_closed_during_an_add_is_not_left_in_the_room(
     holder["helper"] = helper
     await server.create_thread("acme", "t1")
     await server.add_member("acme", "t1", HELPER)
-    assert session not in server._hub._rooms.get(("acme", "t1"), set())
+    room = server._hub._rooms.get(("acme", "t1"))
+    assert room is None or session not in room.sessions
 
 
 async def test_a_session_dropped_inside_the_storage_reads_of_an_enter_is_not_left_in_the_room(
@@ -479,7 +480,8 @@ async def test_a_session_dropped_inside_the_storage_reads_of_an_enter_is_not_lef
 
     monkeypatch.setattr(storage, "head", head)
     await server.add_member("acme", "t1", HELPER)
-    assert session not in server._hub._rooms.get(("acme", "t1"), set())
+    room = server._hub._rooms.get(("acme", "t1"))
+    assert room is None or session not in room.sessions
     assert "t1" not in session.joined
 
 
@@ -846,8 +848,8 @@ async def test_a_removal_delivered_inside_a_gap_cuts_the_removed_connection(
     real = storage.remove_member
     sent: list[int] = []
 
-    async def remove(scope: str, event: Any) -> Any:
-        stored = await real(scope, event)
+    async def remove(scope: str, event: Any, epoch: int) -> Any:
+        stored = await real(scope, event, epoch)
         if stored is not None:
             monkeypatch.setattr(storage, "remove_member", real)
             sent.append((await say(helper, "t1", "concurrent"))["seq"])

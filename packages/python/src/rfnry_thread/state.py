@@ -114,9 +114,6 @@ class LatestState:
             if slot[0] == self.origin
         ]
 
-    def threads(self, scope: str) -> list[str]:
-        return [thread_id for held, thread_id in self._threads if held == scope]
-
     def _store(self, key: tuple[str, str], slot: tuple[str, str], entry: _Entry) -> None:
         entries = self._threads.setdefault(key, {})
         if entry.empty() and slot[0] == self.origin:
@@ -202,11 +199,10 @@ class LatestState:
                     ended.append((scope, Left(thread_id=thread_id, sender=entry.sender)))
         return ended
 
-    def snapshot(self, scope: str, thread_id: str, expired: bool = False) -> list[Signal]:
+    def snapshot(self, scope: str, thread_id: str) -> list[Signal]:
         present: dict[str, Signal] = {}
         rest: list[Signal] = []
-        held = self._threads.get((scope, thread_id), {}).values()
-        for entry in list(held) if expired else self._live(scope, thread_id):
+        for entry in self._live(scope, thread_id):
             if entry.present:
                 present.setdefault(
                     entry.sender.id, Present(thread_id=thread_id, sender=entry.sender)
@@ -311,60 +307,3 @@ class LatestState:
             if was.present and not self.is_present(scope, thread_id, sender.id):
                 told.append(Left(thread_id=thread_id, sender=sender))
         return told
-
-
-def changes(thread_id: str, before: list[Signal], now: list[Signal]) -> list[Signal]:
-    was_present, was_working, was_streaming = _held(before)
-    present, working, streaming = _held(now)
-    told: list[Signal] = []
-    for key, (start, delta) in was_streaming.items():
-        if key not in streaming or not _continues(delta, streaming[key][1]):
-            told.append(StreamEnd(thread_id=thread_id, sender=start.sender, stream_id=key[1]))
-    told.extend(
-        Idle(thread_id=thread_id, sender=w.sender)
-        for i, w in was_working.items()
-        if i not in working
-    )
-    told.extend(
-        Left(thread_id=thread_id, sender=s) for i, s in was_present.items() if i not in present
-    )
-    told.extend(
-        Present(thread_id=thread_id, sender=s) for i, s in present.items() if i not in was_present
-    )
-    told.extend(w for i, w in working.items() if was_working.get(i) != w)
-    for key, (start, delta) in streaming.items():
-        held = was_streaming.get(key)
-        if held is None or not _continues(held[1], delta):
-            told.extend([start] if delta is None else [start, delta])
-            continue
-        known = "" if held[1] is None else held[1].text
-        if delta is not None and len(delta.text) > len(known):
-            told.append(delta.model_copy(update={"text": delta.text[len(known) :]}))
-    return told
-
-
-def _held(
-    signals: list[Signal],
-) -> tuple[
-    dict[str, Identity],
-    dict[str, Working],
-    dict[tuple[str, str], tuple[StreamStart, StreamDelta | None]],
-]:
-    present: dict[str, Identity] = {}
-    working: dict[str, Working] = {}
-    streaming: dict[tuple[str, str], tuple[StreamStart, StreamDelta | None]] = {}
-    for signal in signals:
-        if isinstance(signal, Present):
-            present[signal.sender.id] = signal.sender
-        elif isinstance(signal, Working):
-            working[signal.sender.id] = signal
-        elif isinstance(signal, StreamStart):
-            streaming[(signal.sender.id, signal.stream_id)] = (signal, None)
-        elif isinstance(signal, StreamDelta):
-            key = (signal.sender.id, signal.stream_id)
-            streaming[key] = (streaming[key][0], signal)
-    return present, working, streaming
-
-
-def _continues(before: StreamDelta | None, now: StreamDelta | None) -> bool:
-    return ("" if now is None else now.text).startswith("" if before is None else before.text)

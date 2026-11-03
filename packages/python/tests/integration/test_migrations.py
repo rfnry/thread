@@ -8,6 +8,7 @@ import asyncpg
 import pytest
 from database import URL, Schemas, admin, quoted
 from unit.factories import ANA, AT, added
+from unit.writes import admit, append
 
 from rfnry_thread import migrations
 from rfnry_thread.errors import ConfigurationError, InputError, StorageError
@@ -79,9 +80,10 @@ async def initialized(schemas: Schemas) -> tuple[str, Any]:
 
 async def written(storage: PostgresStorage) -> None:
     await storage.create_thread("acme", Thread(id="t1", scope="acme", metadata={}, created_at=AT))
-    await storage.add_member("acme", added("t1", ANA))
+    await admit(storage, "acme", added("t1", ANA))
     for n, minutes in enumerate((5, 0)):
-        await storage.append_event(
+        await append(
+            storage,
             "acme",
             Message(
                 id=f"m{n}",

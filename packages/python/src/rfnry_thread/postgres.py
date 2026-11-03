@@ -80,6 +80,11 @@ def _visible(floor: int) -> str:
     )
 
 
+def _unchanged(thread_id: str, locked: tuple[int, int], epoch: int) -> None:
+    if locked[1] != epoch:
+        raise NotFoundError(f"postgres: thread {thread_id!r} was not found")
+
+
 def _count(status: str) -> int:
     return int(status.rsplit(" ", 1)[-1])
 
@@ -428,12 +433,13 @@ class PostgresStorage:
         return [found[key] for key in sorted(found)]
 
     async def update_thread(
-        self, scope: str, updated: ThreadUpdated
+        self, scope: str, updated: ThreadUpdated, epoch: int
     ) -> tuple[Thread, ThreadUpdated] | None:
         async with self._guard("update_thread"), self._pool.acquire() as conn, conn.transaction():
             locked = await self._locked(conn, scope, updated.thread_id)
             if locked is None:
                 return None
+            _unchanged(updated.thread_id, locked, epoch)
             stored = await self._append(conn, scope, updated, *locked)
             row = await conn.fetchrow(
                 "UPDATE thread_threads SET metadata = $3::jsonb WHERE scope = $1 AND id = $2 "
@@ -444,18 +450,23 @@ class PostgresStorage:
             )
         return _thread(row), stored
 
-    async def delete_thread(self, scope: str, thread_id: str) -> bool:
+    async def delete_thread(self, scope: str, thread_id: str) -> int | None:
         async with self._guard("delete_thread"), self._pool.acquire() as conn:
-            status = await conn.execute(
-                "DELETE FROM thread_threads WHERE scope = $1 AND id = $2", scope, thread_id
+            epoch = await conn.fetchval(
+                "DELETE FROM thread_threads WHERE scope = $1 AND id = $2 RETURNING epoch",
+                scope,
+                thread_id,
             )
-        return _count(status) > 0
+        return None if epoch is None else int(epoch)
 
-    async def add_member(self, scope: str, added: MemberAdded) -> tuple[Member, MemberAdded | None]:
+    async def add_member(
+        self, scope: str, added: MemberAdded, epoch: int
+    ) -> tuple[Member, MemberAdded | None]:
         async with self._guard("add_member"), self._pool.acquire() as conn, conn.transaction():
             locked = await self._locked(conn, scope, added.thread_id)
             if locked is None:
                 raise NotFoundError(f"postgres: thread {added.thread_id!r} was not found")
+            _unchanged(added.thread_id, locked, epoch)
             existing = await conn.fetchval(
                 "SELECT body FROM thread_members "
                 "WHERE scope = $1 AND thread_id = $2 AND identity_id = $3",
@@ -469,11 +480,14 @@ class PostgresStorage:
             member = await self._admitted(conn, scope, added.created_at, stored)
         return member, stored
 
-    async def remove_member(self, scope: str, removed: MemberRemoved) -> MemberRemoved | None:
+    async def remove_member(
+        self, scope: str, removed: MemberRemoved, epoch: int
+    ) -> MemberRemoved | None:
         async with self._guard("remove_member"), self._pool.acquire() as conn, conn.transaction():
             locked = await self._locked(conn, scope, removed.thread_id)
             if locked is None:
                 raise NotFoundError(f"postgres: thread {removed.thread_id!r} was not found")
+            _unchanged(removed.thread_id, locked, epoch)
             body = await conn.fetchval(
                 "DELETE FROM thread_members WHERE scope = $1 AND thread_id = $2 "
                 "AND identity_id = $3 RETURNING body",
@@ -547,6 +561,21 @@ class PostgresStorage:
             )
         return None if row is None else (int(row["last_seq"]), int(row["floor"]), int(row["epoch"]))
 
+    async def heads(
+        self, keys: Sequence[tuple[str, str]]
+    ) -> dict[tuple[str, str], tuple[int, int]]:
+        async with self._guard("heads"), self._pool.acquire() as conn:
+            rows = await conn.fetch(
+                "SELECT t.scope, t.id, t.last_seq, t.epoch "
+                "FROM unnest($1::text[], $2::text[]) AS k(scope, id) "
+                "JOIN thread_threads t ON t.scope = k.scope AND t.id = k.id",
+                [scope for scope, _ in keys],
+                [thread_id for _, thread_id in keys],
+            )
+        return {
+            (row["scope"], row["id"]): (int(row["last_seq"]), int(row["epoch"])) for row in rows
+        }
+
     async def is_member(self, scope: str, thread_id: str, identity_id: str) -> bool:
         async with self._guard("is_member"), self._pool.acquire() as conn:
             return bool(
@@ -558,7 +587,7 @@ class PostgresStorage:
                 )
             )
 
-    async def append_event(self, scope: str, event: Event) -> tuple[Event, bool]:
+    async def append_event(self, scope: str, event: Event, epoch: int) -> tuple[Event, bool]:
         async with self._guard("append_event"), self._pool.acquire() as conn, conn.transaction():
             locked = None
             if event.author.role != "system":
@@ -576,11 +605,12 @@ class PostgresStorage:
                 locked = await self._locked(conn, scope, event.thread_id)
                 if locked is None:
                     raise NotFoundError(f"postgres: thread {event.thread_id!r} was not found")
-                if event.author.role != "system":
+                if locked[1] == epoch and event.author.role != "system":
                     raise ForbiddenError(
                         f"postgres: {event.author.id!r} is not a member of thread "
                         f"{event.thread_id!r}"
                     )
+            _unchanged(event.thread_id, locked, epoch)
             existing = await conn.fetchval(
                 "SELECT body FROM thread_events WHERE scope = $1 AND thread_id = $2 AND author_id = $3 AND client_id = $4",
                 scope,
@@ -668,6 +698,27 @@ class PostgresStorage:
             )
         events = [_event(row["body"]) for row in rows]
         return events if since is not None else events[::-1]
+
+    async def tail(
+        self, scope: str, thread_id: str, since: int, floor: int, limit: int
+    ) -> tuple[int, int, list[Event]] | None:
+        async with self._guard("tail"), self._pool.acquire() as conn:
+            rows = await conn.fetch(
+                "SELECT t.last_seq, t.epoch, e.body FROM thread_threads t "
+                "LEFT JOIN LATERAL (SELECT e.seq, e.body FROM thread_events e "
+                "WHERE e.scope = t.scope AND e.thread_id = t.id AND e.seq > $3 "
+                f"AND e.seq <= t.last_seq AND {_visible(4)} ORDER BY e.seq LIMIT $5) e ON true "
+                "WHERE t.scope = $1 AND t.id = $2 ORDER BY e.seq",
+                scope,
+                thread_id,
+                since,
+                floor,
+                max(limit, 0),
+            )
+        if not rows:
+            return None
+        events = [_event(row["body"]) for row in rows if row["body"] is not None]
+        return int(rows[0]["last_seq"]), int(rows[0]["epoch"]), events
 
     async def get_event(
         self, scope: str, thread_id: str, event_id: str, floor: int = 0

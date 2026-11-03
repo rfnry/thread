@@ -10,6 +10,7 @@ from database import SCHEMA, URL, open_pool
 from unit.conftest import say
 from unit.factories import ANA, BRUNO, HELPER, added
 from unit.peer import Peer
+from unit.writes import admit, append
 from until import until
 
 from rfnry_thread import postgres, server as server_module, state
@@ -559,7 +560,7 @@ async def test_a_dropped_listener_listens_again_and_resumes(
     pool: Any, storage: PostgresStorage
 ) -> None:
     await storage.create_thread("acme", Thread(id="t1", scope="acme", created_at=datetime.now(UTC)))
-    await storage.add_member("acme", added("t1", ANA))
+    await admit(storage, "acme", added("t1", ANA))
     seen: list[int] = []
     heard: list[dict[str, Any]] = []
     resumed = asyncio.Event()
@@ -578,7 +579,8 @@ async def test_a_dropped_listener_listens_again_and_resumes(
     await relistened(pool, killed, 1)
     await asyncio.wait_for(resumed.wait(), 5.0)
     await storage.publish("acme", "t1", {"kind": "idle"})
-    await storage.append_event(
+    await append(
+        storage,
         "acme",
         Message(
             id="m1",
@@ -598,7 +600,7 @@ async def test_what_a_listener_hears_while_listening_again_is_passed_on_after_on
     pool: Any, storage: PostgresStorage, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     await storage.create_thread("acme", Thread(id="t1", scope="acme", created_at=datetime.now(UTC)))
-    await storage.add_member("acme", added("t1", ANA))
+    await admit(storage, "acme", added("t1", ANA))
     events_channel, _ = await storage._channels()
     order: list[str] = []
     relistening = asyncio.Event()
@@ -631,7 +633,8 @@ async def test_what_a_listener_hears_while_listening_again_is_passed_on_after_on
         relistening.set()
         await terminate(pool, 1)
         await asyncio.wait_for(halfway.wait(), 5.0)
-        await storage.append_event(
+        await append(
+            storage,
             "acme",
             Message(
                 id="m1",

@@ -8,7 +8,7 @@ from rfnry_thread.models import (
     StreamStart,
     Working,
 )
-from rfnry_thread.state import EXPIRY, LatestState, changes
+from rfnry_thread.state import EXPIRY, LatestState
 
 from .factories import ANA, HELPER
 
@@ -206,48 +206,4 @@ def test_a_deleted_thread_is_forgotten_and_an_older_repeat_cannot_bring_it_back(
     assert cache.refresh("acme", "t1", "far", repeat, 4) == []
     assert cache.present("acme", "t1") == []
     now[0] = EXPIRY + 1
-    assert cache.expire("acme", "t1") == [] and cache.threads("acme") == []
-
-
-def test_changes_tell_what_ended_started_or_grew_between_two_snapshots() -> None:
-    def stream(stream_id: str, text: str, index: int = 0) -> list[Signal]:
-        return [
-            StreamStart(thread_id="t1", sender=HELPER, stream_id=stream_id),
-            StreamDelta(thread_id="t1", sender=HELPER, stream_id=stream_id, index=index, text=text),
-        ]
-
-    before: list[Signal] = [
-        Present(thread_id="t1", sender=ANA),
-        Working(thread_id="t1", sender=HELPER, label="Reading"),
-        *stream("s1", "Hel"),
-        *stream("s2", "old"),
-        StreamStart(thread_id="t1", sender=HELPER, stream_id="s3"),
-    ]
-    now: list[Signal] = [
-        Present(thread_id="t1", sender=HELPER),
-        Working(thread_id="t1", sender=HELPER, label="Writing"),
-        *stream("s1", "Hello", 1),
-        *stream("s2", "new"),
-    ]
-    assert changes("t1", before, now) == [
-        StreamEnd(thread_id="t1", sender=HELPER, stream_id="s2"),
-        StreamEnd(thread_id="t1", sender=HELPER, stream_id="s3"),
-        Left(thread_id="t1", sender=ANA),
-        Present(thread_id="t1", sender=HELPER),
-        Working(thread_id="t1", sender=HELPER, label="Writing"),
-        StreamDelta(thread_id="t1", sender=HELPER, stream_id="s1", index=1, text="lo"),
-        *stream("s2", "new"),
-    ]
-    assert changes("t1", now, now) == []
-    assert changes("t1", [Working(thread_id="t1", sender=HELPER)], []) == [
-        Idle(thread_id="t1", sender=HELPER)
-    ]
-
-
-def test_a_snapshot_may_keep_what_has_expired_but_is_not_yet_ended() -> None:
-    now = [0.0]
-    cache = state(now)
-    cache.apply("acme", Present(thread_id="t1", sender=ANA), "far")
-    now[0] = EXPIRY + 1
-    assert cache.snapshot("acme", "t1") == []
-    assert cache.snapshot("acme", "t1", expired=True) == [Present(thread_id="t1", sender=ANA)]
+    assert cache.expire("acme", "t1") == [] and cache.expiring(forget=True) == []
