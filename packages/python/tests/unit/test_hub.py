@@ -36,6 +36,7 @@ from .factories import ANA, AT, BRUNO, HELPER, added, message, removed
 from .hubkit import kinds, open_session, pushes
 from .legacy import enroll
 from .peer import Peer
+from .writes import admit, append, epoch, expel
 
 
 async def setup(
@@ -45,7 +46,7 @@ async def setup(
     for identity in (ANA, HELPER, BRUNO):
         await enroll(storage, "t1", identity)
     for n in range(1, events + 1):
-        await storage.append_event("acme", message(n, f"m{n}"))
+        await append(storage, "acme", message(n, f"m{n}"))
     return Hub(storage, replay_limit), thread
 
 
@@ -93,17 +94,17 @@ async def test_delivery_drops_repeats_and_fills_gaps_from_storage(storage: Postg
     await hub.join(session, thread, None)
     await pushes(session, recorder)
     for n in (2, 3, 4):
-        await storage.append_event("acme", message(n, f"m{n}"))
+        await append(storage, "acme", message(n, f"m{n}"))
     fourth = (await storage.list_events("acme", "t1", since=3))[0]
-    await hub.deliver("acme", fourth)
-    await hub.deliver("acme", fourth)
+    await hub.deliver("acme", fourth, thread.epoch)
+    await hub.deliver("acme", fourth, thread.epoch)
     assert [p["seq"] for p in await pushes(session, recorder)] == [2, 3, 4]
 
 
 async def test_a_notice_is_read_only_when_a_session_is_behind(storage: PostgresStorage) -> None:
     hub, thread = await setup(storage)
     reads: list[int] = []
-    original = storage.list_events
+    original = storage.tail
 
     async def counted(*args: Any, **kwargs: Any) -> Any:
         reads.append(1)
@@ -112,11 +113,12 @@ async def test_a_notice_is_read_only_when_a_session_is_behind(storage: PostgresS
     session, recorder = open_session(HELPER)
     await hub.join(session, thread, None)
     await pushes(session, recorder)
-    storage.list_events = counted  # type: ignore[method-assign]
-    stored, _ = await storage.append_event("acme", message(1, "hi"))
-    await hub.on_event("acme", "t1", stored.seq)
-    await hub.on_event("acme", "t1", stored.seq)
-    await hub.on_event("acme", "other-thread", 1)
+    other, _ = await storage.create_thread("acme", Thread(id="t2", scope="acme", created_at=AT))
+    storage.tail = counted  # type: ignore[method-assign]
+    stored, _ = await append(storage, "acme", message(1, "hi"))
+    await hub.on_event("acme", "t1", stored.seq, thread.epoch)
+    await hub.on_event("acme", "t1", stored.seq, thread.epoch)
+    await hub.on_event("acme", "t2", 1, other.epoch)
     assert [p["seq"] for p in await pushes(session, recorder)] == [1]
     assert len(reads) == 1
 
@@ -128,15 +130,16 @@ async def test_a_removed_member_is_cut_off_after_the_event(storage: PostgresStor
     await hub.join(bruno, thread, None)
     await hub.join(helper, thread, None)
     await pushes(bruno, bruno_recorder)
-    removal, _ = await storage.append_event(
+    removal, _ = await append(
+        storage,
         "acme",
         MemberRemoved(
             id="r", thread_id="t1", author=ANA, created_at=AT, client_id="r", identity=BRUNO
         ),
     )
-    await hub.deliver("acme", removal)
-    after, _ = await storage.append_event("acme", message(2, "after"))
-    await hub.deliver("acme", after)
+    await hub.deliver("acme", removal, thread.epoch)
+    after, _ = await append(storage, "acme", message(2, "after"))
+    await hub.deliver("acme", after, thread.epoch)
     assert kinds(await pushes(bruno, bruno_recorder)) == ["member_removed"]
     assert "t1" not in bruno.joined
     assert kinds(await pushes(helper, helper_recorder))[-3:] == [
@@ -152,8 +155,8 @@ async def _bruno_in(
     thread, _ = await storage.create_thread(
         "acme", Thread(id="t1", scope="acme", created_at=AT, history=history)
     )
-    await storage.add_member("acme", added("t1", ANA, ANA))
-    await storage.add_member("acme", added("t1", BRUNO, ANA))
+    await admit(storage, "acme", added("t1", ANA, ANA))
+    await admit(storage, "acme", added("t1", BRUNO, ANA))
     hub = Hub(storage, 500)
     bruno, recorder = open_session(BRUNO)
     bruno.following = following
@@ -161,6 +164,12 @@ async def _bruno_in(
     await asyncio.wait_for(hub.join(bruno, thread, None), 5)
     await pushes(bruno, recorder)
     return hub, bruno, recorder
+
+
+async def _epoch(storage: PostgresStorage) -> int:
+    thread = await storage.get_thread("acme", "t1")
+    assert thread is not None
+    return thread.epoch
 
 
 def _seqs(found: list[dict[str, Any]]) -> list[int]:
@@ -176,18 +185,18 @@ async def test_a_member_removed_and_added_again_inside_a_gap_is_handed_the_threa
     storage: PostgresStorage, history: Any, floor: int
 ) -> None:
     hub, bruno, recorder = await _bruno_in(storage, history)
-    await storage.append_event("acme", message(3, "before"))
-    await storage.remove_member("acme", removed("t1", BRUNO, ANA))
-    await storage.add_member("acme", added("t1", BRUNO, ANA))
-    last, _ = await storage.append_event("acme", message(6, "after"))
-    await asyncio.wait_for(hub.deliver("acme", last), 5)
+    await append(storage, "acme", message(3, "before"))
+    await expel(storage, "acme", removed("t1", BRUNO, ANA))
+    await admit(storage, "acme", added("t1", BRUNO, ANA))
+    last, _ = await append(storage, "acme", message(6, "after"))
+    await asyncio.wait_for(hub.deliver("acme", last, await _epoch(storage)), 5)
     found = await pushes(bruno, recorder)
     assert _kinds(found) == ["message", "member_removed", "member_added", "message", "joined"]
     assert _seqs(found) == [3, 4, 5, 6]
     assert bruno.joined == {"t1": 6}
     assert bruno.floors.get("t1", 0) == floor
-    later, _ = await storage.append_event("acme", message(7, "live"))
-    await asyncio.wait_for(hub.deliver("acme", later), 5)
+    later, _ = await append(storage, "acme", message(7, "live"))
+    await asyncio.wait_for(hub.deliver("acme", later, await _epoch(storage)), 5)
     assert _seqs(await pushes(bruno, recorder)) == [7]
 
 
@@ -195,11 +204,11 @@ async def test_a_session_not_following_is_invited_after_the_gap_removed_it(
     storage: PostgresStorage,
 ) -> None:
     hub, bruno, recorder = await _bruno_in(storage, "all", following=False)
-    await storage.append_event("acme", message(3, "before"))
-    await storage.remove_member("acme", removed("t1", BRUNO, ANA))
-    await storage.add_member("acme", added("t1", BRUNO, ANA))
-    last, _ = await storage.append_event("acme", message(6, "after"))
-    await asyncio.wait_for(hub.deliver("acme", last), 5)
+    await append(storage, "acme", message(3, "before"))
+    await expel(storage, "acme", removed("t1", BRUNO, ANA))
+    await admit(storage, "acme", added("t1", BRUNO, ANA))
+    last, _ = await append(storage, "acme", message(6, "after"))
+    await asyncio.wait_for(hub.deliver("acme", last, await _epoch(storage)), 5)
     found = await pushes(bruno, recorder)
     assert _kinds(found) == ["message", "member_removed", "invited"]
     assert "t1" not in bruno.joined
@@ -215,11 +224,11 @@ async def test_two_sessions_of_one_identity_cut_by_a_gap_are_each_invited_once(
     hub.sessions.add(second)
     await asyncio.wait_for(hub.join(second, thread, None), 5)
     await pushes(second, second_recorder)
-    await storage.append_event("acme", message(3, "before"))
-    await storage.remove_member("acme", removed("t1", BRUNO, ANA))
-    await storage.add_member("acme", added("t1", BRUNO, ANA))
-    last, _ = await storage.append_event("acme", message(6, "after"))
-    await asyncio.wait_for(hub.deliver("acme", last), 5)
+    await append(storage, "acme", message(3, "before"))
+    await expel(storage, "acme", removed("t1", BRUNO, ANA))
+    await admit(storage, "acme", added("t1", BRUNO, ANA))
+    last, _ = await append(storage, "acme", message(6, "after"))
+    await asyncio.wait_for(hub.deliver("acme", last, await _epoch(storage)), 5)
     for session, recorder in ((first, first_recorder), (second, second_recorder)):
         assert _kinds(await pushes(session, recorder)).count("invited") == 1
 
@@ -228,14 +237,14 @@ async def test_a_gap_that_ends_with_the_member_removed_is_not_handed_the_thread_
     storage: PostgresStorage,
 ) -> None:
     hub, bruno, recorder = await _bruno_in(storage)
-    await storage.append_event("acme", message(3, "before"))
-    await storage.remove_member("acme", removed("t1", BRUNO, ANA))
-    await storage.append_event("acme", message(5, "while out"))
-    await storage.add_member("acme", added("t1", BRUNO, ANA))
-    await storage.append_event("acme", message(7, "back"))
-    await storage.remove_member("acme", removed("t1", BRUNO, ANA))
-    last, _ = await storage.append_event("acme", message(9, "after"))
-    await asyncio.wait_for(hub.deliver("acme", last), 5)
+    await append(storage, "acme", message(3, "before"))
+    await expel(storage, "acme", removed("t1", BRUNO, ANA))
+    await append(storage, "acme", message(5, "while out"))
+    await admit(storage, "acme", added("t1", BRUNO, ANA))
+    await append(storage, "acme", message(7, "back"))
+    await expel(storage, "acme", removed("t1", BRUNO, ANA))
+    last, _ = await append(storage, "acme", message(9, "after"))
+    await asyncio.wait_for(hub.deliver("acme", last, await _epoch(storage)), 5)
     assert _seqs(await pushes(bruno, recorder)) == [3, 4]
     assert "t1" not in bruno.joined
 
@@ -244,13 +253,13 @@ async def test_a_re_add_already_followed_by_a_removal_in_storage_is_not_handed_a
     storage: PostgresStorage,
 ) -> None:
     hub, bruno, recorder = await _bruno_in(storage)
-    await storage.append_event("acme", message(3, "before"))
-    await storage.remove_member("acme", removed("t1", BRUNO, ANA))
-    await storage.append_event("acme", message(5, "while out"))
-    await storage.add_member("acme", added("t1", BRUNO, ANA))
-    live, _ = await storage.append_event("acme", message(7, "back"))
-    await storage.remove_member("acme", removed("t1", BRUNO, ANA))
-    await asyncio.wait_for(hub.deliver("acme", live), 5)
+    await append(storage, "acme", message(3, "before"))
+    await expel(storage, "acme", removed("t1", BRUNO, ANA))
+    await append(storage, "acme", message(5, "while out"))
+    await admit(storage, "acme", added("t1", BRUNO, ANA))
+    live, _ = await append(storage, "acme", message(7, "back"))
+    await expel(storage, "acme", removed("t1", BRUNO, ANA))
+    await asyncio.wait_for(hub.deliver("acme", live, await _epoch(storage)), 5)
     assert _seqs(await pushes(bruno, recorder)) == [3, 4]
     assert "t1" not in bruno.joined
 
@@ -260,9 +269,9 @@ async def test_a_change_to_what_the_new_floor_excludes_never_reaches_a_re_added_
     storage: PostgresStorage, kind: str
 ) -> None:
     hub, bruno, recorder = await _bruno_in(storage)
-    old, _ = await storage.append_event("acme", message(3, "before"))
-    await storage.remove_member("acme", removed("t1", BRUNO, ANA))
-    await storage.add_member("acme", added("t1", BRUNO, ANA))
+    old, _ = await append(storage, "acme", message(3, "before"))
+    await expel(storage, "acme", removed("t1", BRUNO, ANA))
+    await admit(storage, "acme", added("t1", BRUNO, ANA))
     if kind == "edit":
         change: Edit | Retract = Edit(
             id="x6",
@@ -277,9 +286,9 @@ async def test_a_change_to_what_the_new_floor_excludes_never_reaches_a_re_added_
         change = Retract(
             id="x6", thread_id="t1", author=ANA, created_at=AT, client_id="x6", target=old.id
         )
-    await storage.append_event("acme", change)
-    last, _ = await storage.append_event("acme", message(7, "back"))
-    await asyncio.wait_for(hub.deliver("acme", last), 5)
+    await append(storage, "acme", change)
+    last, _ = await append(storage, "acme", message(7, "back"))
+    await asyncio.wait_for(hub.deliver("acme", last, await _epoch(storage)), 5)
     assert _seqs(await pushes(bruno, recorder)) == [3, 4, 5, 7]
     assert bruno.joined == {"t1": 7}
 
@@ -288,11 +297,11 @@ async def test_a_re_add_that_is_the_live_event_hands_the_thread_again(
     storage: PostgresStorage,
 ) -> None:
     hub, bruno, recorder = await _bruno_in(storage)
-    await storage.append_event("acme", message(3, "before"))
-    await storage.remove_member("acme", removed("t1", BRUNO, ANA))
-    _, live = await storage.add_member("acme", added("t1", BRUNO, ANA))
+    await append(storage, "acme", message(3, "before"))
+    await expel(storage, "acme", removed("t1", BRUNO, ANA))
+    _, live = await admit(storage, "acme", added("t1", BRUNO, ANA))
     assert live is not None
-    await asyncio.wait_for(hub.deliver("acme", live), 5)
+    await asyncio.wait_for(hub.deliver("acme", live, await _epoch(storage)), 5)
     found = await pushes(bruno, recorder)
     assert _seqs(found) == [3, 4, 5]
     assert _kinds(found)[-1] == "joined"
@@ -333,7 +342,7 @@ async def test_two_connections_of_one_member_are_one_presence(storage: PostgresS
     assert await pushes(helper, helper_recorder) == []
     await hub.drop(tab_two)
     assert kinds(await pushes(helper, helper_recorder)) == ["left"]
-    assert hub.state.present("acme", "t1") == [HELPER]
+    assert hub.state.present("acme", "t1", thread.epoch) == [HELPER]
 
 
 async def test_a_dropped_connection_ends_its_streams_and_work(storage: PostgresStorage) -> None:
@@ -347,7 +356,7 @@ async def test_a_dropped_connection_ends_its_streams_and_work(storage: PostgresS
     await pushes(ana, recorder)
     await hub.drop(helper)
     assert kinds(await pushes(ana, recorder)) == ["stream.end", "idle", "left"]
-    assert [s.kind for s in hub.state.snapshot("acme", "t1")] == ["present"]
+    assert [s.kind for s in hub.state.snapshot("acme", "t1", thread.epoch)] == ["present"]
 
 
 async def test_leaving_ends_its_streams_and_work_in_that_thread_only(
@@ -367,13 +376,58 @@ async def test_leaving_ends_its_streams_and_work_in_that_thread_only(
     await pushes(ana, recorder)
     await hub.leave(helper, "t1")
     assert kinds(await pushes(ana, recorder)) == ["stream.end", "idle", "left"]
-    assert [s.kind for s in hub.state.snapshot("acme", "t1")] == ["present"]
-    assert [s.kind for s in hub.state.snapshot("acme", "t2")] == [
+    assert [s.kind for s in hub.state.snapshot("acme", "t1", thread.epoch)] == ["present"]
+    assert [s.kind for s in hub.state.snapshot("acme", "t2", other.epoch)] == [
         "present",
         "working",
         "stream.start",
     ]
     assert (helper.working, helper.streams) == ({"t2"}, {("t2", "s1")})
+
+
+async def test_a_member_cut_and_joined_again_before_its_ends_go_out_keeps_what_it_started_since(
+    storage: PostgresStorage, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    hub, thread = await setup(storage)
+    ana, ana_out = open_session(ANA)
+    helper, _ = open_session(HELPER)
+    await hub.join(ana, thread, None)
+    await hub.join(helper, thread, None)
+    await hub.signal(helper, Working(thread_id="t1", sender=HELPER, label="Old"))
+    await hub.signal(helper, StreamStart(thread_id="t1", sender=HELPER, stream_id="s1"))
+    await pushes(ana, ana_out)
+    await expel(storage, "acme", removed("t1", HELPER))
+    _, back = await admit(storage, "acme", added("t1", HELPER))
+    assert back is not None
+    reached, release = gated(storage, monkeypatch, "tail")
+    catching = asyncio.create_task(hub.on_event("acme", "t1", back.seq, thread.epoch))
+    await asyncio.wait_for(reached.wait(), 5)
+    rejoining = asyncio.create_task(hub.join(helper, thread, None))
+    await asyncio.sleep(0)
+    release.set()
+    await asyncio.wait_for(asyncio.gather(catching, rejoining), 5)
+    await hub.signal(helper, Working(thread_id="t1", sender=HELPER, label="New"))
+    await hub.signal(helper, StreamStart(thread_id="t1", sender=HELPER, stream_id="s2"))
+    assert kinds(await pushes(ana, ana_out)) == [
+        "member_removed",
+        "member_added",
+        "stream.end",
+        "idle",
+        "left",
+        "present",
+        "working",
+        "stream.start",
+    ]
+    held = [
+        (s.kind, s.sender.id, getattr(s, "label", None) or getattr(s, "stream_id", None))
+        for s in hub.state.snapshot("acme", "t1", thread.epoch)
+    ]
+    assert held == [
+        ("present", "ana", None),
+        ("present", "helper", None),
+        ("working", "helper", "New"),
+        ("stream.start", "helper", "s2"),
+    ]
 
 
 async def test_an_invitation_reaches_only_connections_not_in_the_thread(
@@ -411,6 +465,7 @@ async def test_an_add_is_published_as_an_invitation_with_its_seq(storage: Postgr
             "sender": ANA.model_dump(mode="json"),
             "to": "bruno",
             "seq": 3,
+            "e": thread.epoch,
         }
     ]
 
@@ -423,7 +478,12 @@ async def test_an_invitation_without_a_seq_invites_and_hands_followers_the_threa
     following, following_recorder = open_session(BRUNO)
     following.following = True
     hub.sessions.update({plain, following})
-    notice = {"kind": "invited", "thread_id": "t1", "sender": ANA.model_dump(mode="json")}
+    notice = {
+        "kind": "invited",
+        "thread_id": "t1",
+        "sender": ANA.model_dump(mode="json"),
+        "e": thread.epoch,
+    }
     await hub.on_signal("acme", "t1", {"o": "older", **notice, "to": "bruno"})
     assert kinds(await pushes(plain, plain_recorder)) == ["invited"]
     await following.outbound.drain()
@@ -432,7 +492,7 @@ async def test_an_invitation_without_a_seq_invites_and_hands_followers_the_threa
 
 
 async def test_an_invited_notice_for_a_non_member_is_ignored(storage: PostgresStorage) -> None:
-    hub, _ = await setup(storage, events=2)
+    hub, thread = await setup(storage, events=2)
     mallory = Identity(id="mallory", role="user", name="Mallory")
     plain, plain_recorder = open_session(mallory)
     following, following_recorder = open_session(mallory)
@@ -445,14 +505,15 @@ async def test_an_invited_notice_for_a_non_member_is_ignored(storage: PostgresSt
         "sender": ANA.model_dump(mode="json"),
         "to": "mallory",
         "seq": 3,
+        "e": thread.epoch,
     }
     await hub.on_signal("acme", "t1", dict(notice))
     assert await pushes(plain, plain_recorder) == []
     await following.outbound.drain()
     assert following_recorder.frames == []
     assert "t1" not in plain.joined and "t1" not in following.joined
-    await storage.add_member("acme", added("t1", mallory))
-    await storage.remove_member("acme", removed("t1", mallory))
+    await admit(storage, "acme", added("t1", mallory))
+    await expel(storage, "acme", removed("t1", mallory))
     await hub.on_signal("acme", "t1", dict(notice))
     assert await pushes(plain, plain_recorder) == []
     await following.outbound.drain()
@@ -465,9 +526,9 @@ async def test_deletion_tells_the_room_and_empties_it(storage: PostgresStorage) 
     ana, recorder = open_session(ANA)
     await hub.join(ana, thread, None)
     await pushes(ana, recorder)
-    await hub.deleted("acme", "t1", ANA)
+    await hub.deleted("acme", "t1", thread.epoch, ANA)
     assert kinds(await pushes(ana, recorder)) == ["thread.deleted"]
-    assert ana.joined == {} and hub.state.snapshot("acme", "t1") == []
+    assert ana.joined == {} and hub.state.snapshot("acme", "t1", thread.epoch) == []
 
 
 async def test_deleting_a_scope_tells_each_joined_connection_and_empties_its_rooms(
@@ -489,6 +550,7 @@ async def test_deleting_a_scope_tells_each_joined_connection_and_empties_its_roo
     await elsewhere.call("thread.join", thread_id="t1")
     for peer in (ana, bruno, elsewhere):
         await peer.quiet()
+    old, other = await _epoch(storage), await epoch(storage, "other", "t1")
     await server.delete_scope("acme")
     told = sorted((p["kind"], p["thread_id"], p["sender"]["id"]) for p in await ana.quiet())
     assert told == [("thread.deleted", "t1", "system"), ("thread.deleted", "t2", "system")]
@@ -502,12 +564,13 @@ async def test_deleting_a_scope_tells_each_joined_connection_and_empties_its_roo
         if s.scope == "acme"
     ]
     assert left == [({}, {}, set(), set(), set())] * 2
-    assert hub.state.snapshot("acme", "t1") == [] and hub.state.own().keys() == {("other", "t1")}
+    assert hub.state.snapshot("acme", "t1", old) == []
+    assert [(scope, thread_id) for scope, thread_id, _, _ in hub.state.own()] == [("other", "t1")]
     with pytest.raises(ForbiddenError, match="^server: signals need a join"):
         await bruno.call("signal.send", thread_id="t1", kind="idle")
     await say(elsewhere, "t1", "still here")
     assert [p["kind"] for p in await elsewhere.quiet()] == ["message"]
-    assert hub.state.present("other", "t1") == [ANA]
+    assert hub.state.present("other", "t1", other) == [ANA]
 
 
 async def test_a_thread_made_again_after_its_scope_was_deleted_is_handed_over_as_new(
@@ -568,7 +631,7 @@ async def test_an_invitation_crossing_the_deletion_of_its_scope_is_handed_over_a
     checked: list[str] = []
     release = asyncio.Event()
 
-    async def held(scope: str, thread_id: str, identity_id: str) -> tuple[int, int] | None:
+    async def held(scope: str, thread_id: str, identity_id: str) -> tuple[int, int, int] | None:
         found = await head(scope, thread_id, identity_id)
         if thread_id == "t0":
             reading.append(thread_id)
@@ -589,10 +652,10 @@ async def test_an_invitation_crossing_the_deletion_of_its_scope_is_handed_over_a
     wipe = {"o": "near", "kind": "scope.deleted", "sender": SYSTEM.model_dump(mode="json")}
     deleting = asyncio.create_task(hub.on_signal("acme", "", wipe))
     await asyncio.sleep(0)
-    await storage.create_thread("acme", Thread(id="t1", scope="acme", created_at=AT))
+    made, _ = await storage.create_thread("acme", Thread(id="t1", scope="acme", created_at=AT))
     inviting = []
     for identity in (ANA, HELPER):
-        _, event = await storage.add_member("acme", added("t1", identity))
+        _, event = await admit(storage, "acme", added("t1", identity))
         assert event is not None
         invited = {
             "o": "near",
@@ -601,6 +664,7 @@ async def test_an_invitation_crossing_the_deletion_of_its_scope_is_handed_over_a
             "sender": SYSTEM.model_dump(mode="json"),
             "to": identity.id,
             "seq": event.seq,
+            "e": made.epoch,
         }
         inviting.append(asyncio.create_task(hub.on_signal("acme", "t1", invited)))
     await until(lambda: sorted(checked) == ["ana", "helper"])
@@ -631,7 +695,7 @@ async def test_joins_and_a_signal_crossing_the_deletion_of_their_scope_leave_not
     reading: list[str] = []
     release = asyncio.Event()
 
-    async def held(scope: str, thread_id: str, identity_id: str) -> tuple[int, int] | None:
+    async def held(scope: str, thread_id: str, identity_id: str) -> tuple[int, int, int] | None:
         found = await head(scope, thread_id, identity_id)
         reading.append(thread_id)
         await release.wait()
@@ -655,7 +719,7 @@ async def test_joins_and_a_signal_crossing_the_deletion_of_their_scope_leave_not
     *joins, deleted, signalled = await asyncio.wait_for(done, 2.0)
     assert all(isinstance(j, Joined | NotFoundError) for j in joins)
     assert (deleted, signalled) == (None, None)
-    assert hub.state.own() == {} and hub._local == {} and hub._rooms == {}
+    assert hub.state.own() == [] and hub._local == {} and hub._rooms == {}
     assert kinds(await pushes(ana, ana_recorder)) == ["thread.deleted"]
     assert kinds(await pushes(bruno, bruno_recorder)) == ["present", "thread.deleted"]
     assert kinds(await pushes(helper, helper_recorder)) == ["present", "thread.deleted"]
@@ -675,13 +739,17 @@ async def test_linked_hubs_mirror_signals_and_drop_their_own(storage: PostgresSt
     await near.join(speaker, thread, None)
     await far.join(listener, thread, None)
     await until(
-        lambda: len(near.state.present("acme", "t1")) == len(far.state.present("acme", "t1")) == 2
+        lambda: (
+            len(near.state.present("acme", "t1", thread.epoch))
+            == len(far.state.present("acme", "t1", thread.epoch))
+            == 2
+        )
     )
     await pushes(speaker, speaker_recorder)
     await pushes(listener, listener_recorder)
     working = Working(thread_id="t1", sender=HELPER, label="Reading")
     await near.signal(speaker, working)
-    await until(lambda: far.state.snapshot("acme", "t1")[-1] == working)
+    await until(lambda: far.state.snapshot("acme", "t1", thread.epoch)[-1] == working)
     await asyncio.sleep(0.1)
     assert kinds(await pushes(listener, listener_recorder)) == ["working"]
     assert kinds(await pushes(speaker, speaker_recorder)) == ["working"]
@@ -736,25 +804,26 @@ async def test_announce_teaches_another_replica_who_is_here(storage: PostgresSto
     for hub in (near, far):
         hub.linked = True
         stops.append(await storage.listen(hub.on_event, hub.on_signal))
-    assert far.state.present("acme", "t1") == []
+    assert far.state.present("acme", "t1", thread.epoch) == []
     await near.announce()
-    await until(lambda: far.state.present("acme", "t1") == [ANA])
+    await until(lambda: far.state.present("acme", "t1", thread.epoch) == [ANA])
     for stop in stops:
         await stop()
 
 
-async def far(hub: Hub, signal: Signal) -> None:
-    await hub.on_signal("acme", "t1", {"o": "far", **signal.model_dump(mode="json")})
+async def far(hub: Hub, thread: Thread, signal: Signal, n: int) -> None:
+    payload = {"o": "far", "n": n, "e": thread.epoch, **signal.model_dump(mode="json")}
+    await hub.on_signal("acme", "t1", payload)
 
 
-async def went_silent(hub: Hub) -> None:
+async def went_silent(hub: Hub, thread: Thread) -> None:
     signals: list[Signal] = [
         Present(thread_id="t1", sender=HELPER),
         Working(thread_id="t1", sender=HELPER),
         StreamStart(thread_id="t1", sender=HELPER, stream_id="s1", in_reply_to="e1"),
     ]
-    for signal in signals:
-        await far(hub, signal)
+    for n, signal in enumerate(signals, 1):
+        await far(hub, thread, signal, n)
     now = hub.state._clock()
     hub.state._clock = lambda: now + EXPIRY + 1
 
@@ -763,24 +832,37 @@ def senders(payloads: list[dict[str, Any]]) -> list[tuple[str, str]]:
     return [(p["kind"], p["sender"]["id"]) for p in payloads]
 
 
-async def test_a_joiner_after_a_replica_went_silent_sees_neither_its_state_nor_its_end(
+async def test_a_silent_replicas_state_is_ended_once_by_the_tick_and_its_late_ends_tell_nothing(
     storage: PostgresStorage,
 ) -> None:
     hub, thread = await setup(storage)
     ana, ana_out = open_session(ANA)
     await hub.join(ana, thread, None)
-    await went_silent(hub)
+    await went_silent(hub, thread)
     await pushes(ana, ana_out)
     bruno, bruno_out = open_session(BRUNO)
     await hub.join(bruno, thread, None)
-    await hub.sweep()
-    assert senders(await pushes(ana, ana_out)) == [
-        ("stream.end", "helper"),
-        ("idle", "helper"),
-        ("left", "helper"),
+    assert senders(await pushes(bruno, bruno_out)) == [
+        ("present", "ana"),
+        ("present", "helper"),
+        ("working", "helper"),
+        ("stream.start", "helper"),
         ("present", "bruno"),
     ]
-    assert senders(await pushes(bruno, bruno_out)) == [("present", "ana"), ("present", "bruno")]
+    hub.sweep()
+    ends = [("stream.end", "helper"), ("idle", "helper"), ("left", "helper")]
+    assert senders(await pushes(ana, ana_out)) == [("present", "bruno"), *ends]
+    assert senders(await pushes(bruno, bruno_out)) == ends
+    late: list[Signal] = [
+        StreamDelta(thread_id="t1", sender=HELPER, stream_id="s1", index=1, text="more"),
+        StreamEnd(thread_id="t1", sender=HELPER, stream_id="s1"),
+        Idle(thread_id="t1", sender=HELPER),
+        Left(thread_id="t1", sender=HELPER),
+    ]
+    for n, signal in enumerate(late, 4):
+        await far(hub, thread, signal, n)
+    hub.sweep()
+    assert await pushes(ana, ana_out) == [] and await pushes(bruno, bruno_out) == []
 
 
 async def test_a_leave_after_a_replica_went_silent_is_one_left(storage: PostgresStorage) -> None:
@@ -789,10 +871,10 @@ async def test_a_leave_after_a_replica_went_silent_is_one_left(storage: Postgres
     helper, _ = open_session(HELPER)
     await hub.join(ana, thread, None)
     await hub.join(helper, thread, None)
-    await went_silent(hub)
+    await went_silent(hub, thread)
     await pushes(ana, ana_out)
     await hub.leave(helper, "t1")
-    await hub.sweep()
+    hub.sweep()
     assert senders(await pushes(ana, ana_out)) == [
         ("stream.end", "helper"),
         ("idle", "helper"),
@@ -800,104 +882,80 @@ async def test_a_leave_after_a_replica_went_silent_is_one_left(storage: Postgres
     ]
 
 
-async def test_a_replica_heard_from_after_its_sweep_is_announced_again_and_ends_once(
+async def test_a_snapshot_from_a_replica_heard_from_again_announces_it_once(
     storage: PostgresStorage,
 ) -> None:
     hub, thread = await setup(storage)
     ana, ana_out = open_session(ANA)
     await hub.join(ana, thread, None)
-    await went_silent(hub)
-    await pushes(ana, ana_out)
-    await hub.sweep()
-    told = [senders(await pushes(ana, ana_out))]
-    late: list[Signal] = [
-        StreamDelta(thread_id="t1", sender=HELPER, stream_id="s1", index=1, text="more"),
-        StreamEnd(thread_id="t1", sender=HELPER, stream_id="s1"),
-        Idle(thread_id="t1", sender=HELPER),
-        Left(thread_id="t1", sender=HELPER),
-    ]
-    starts: list[str | None] = []
-    for signal in late:
-        await far(hub, signal)
-        found = await pushes(ana, ana_out)
-        starts.extend(p.get("in_reply_to") for p in found if p["kind"] == "stream.start")
-        told.append(senders(found))
-    assert starts == ["e1"]
-    assert told == [
-        [("stream.end", "helper"), ("idle", "helper"), ("left", "helper")],
-        [("stream.start", "helper"), ("stream.delta", "helper")],
-        [("stream.end", "helper")],
-        [],
-        [],
-    ]
-
-
-async def test_a_repeat_from_a_silent_replica_ends_its_state_then_announces_it_once(
-    storage: PostgresStorage,
-) -> None:
-    hub, thread = await setup(storage)
-    ana, ana_out = open_session(ANA)
-    await hub.join(ana, thread, None)
-    await went_silent(hub)
+    await went_silent(hub, thread)
+    hub.sweep()
     await pushes(ana, ana_out)
     entry = {
         "sender": HELPER.model_dump(mode="json"),
         "present": True,
         "working": {"label": None},
-        "streams": [{"stream_id": "s1", "in_reply_to": None}],
+        "streams": [{"stream_id": "s1", "in_reply_to": "e1"}],
     }
-    await hub.on_signal("acme", "t1", {"o": "far", "kind": "refresh", "entries": [entry]})
-    told = [senders(await pushes(ana, ana_out))]
-    await far(hub, StreamStart(thread_id="t1", sender=HELPER, stream_id="s1"))
-    told.append(senders(await pushes(ana, ana_out)))
-    assert told == [
-        [
-            ("stream.end", "helper"),
-            ("idle", "helper"),
-            ("left", "helper"),
-            ("present", "helper"),
-            ("working", "helper"),
-            ("stream.start", "helper"),
-        ],
-        [],
+    snapshot = {"o": "far", "kind": "refresh", "n": 4, "e": thread.epoch, "part": 0, "parts": 1}
+    await hub.on_signal("acme", "t1", {**snapshot, "entries": [entry]})
+    told = await pushes(ana, ana_out)
+    assert senders(told) == [
+        ("present", "helper"),
+        ("working", "helper"),
+        ("stream.start", "helper"),
     ]
+    assert told[-1]["in_reply_to"] == "e1"
+    later: list[Signal] = [
+        StreamStart(thread_id="t1", sender=HELPER, stream_id="s1"),
+        StreamDelta(thread_id="t1", sender=HELPER, stream_id="s1", index=1, text="more"),
+        StreamEnd(thread_id="t1", sender=HELPER, stream_id="s1"),
+        StreamEnd(thread_id="t1", sender=HELPER, stream_id="s1"),
+    ]
+    for n, signal in enumerate(later, 5):
+        await far(hub, thread, signal, n)
+    assert senders(await pushes(ana, ana_out)) == [("stream.end", "helper")]
 
 
-async def test_the_ends_a_silent_replica_sends_late_are_told_once(
-    storage: PostgresStorage,
-) -> None:
-    hub, thread = await setup(storage)
-    ana, ana_out = open_session(ANA)
-    await hub.join(ana, thread, None)
-    await went_silent(hub)
-    await pushes(ana, ana_out)
-    told = []
-    for signal in (Idle(thread_id="t1", sender=HELPER), Left(thread_id="t1", sender=HELPER)):
-        await far(hub, signal)
-        told.append(senders(await pushes(ana, ana_out)))
-    await hub.sweep()
-    told.append(senders(await pushes(ana, ana_out)))
-    assert told == [[("stream.end", "helper"), ("idle", "helper"), ("left", "helper")], [], []]
-
-
-async def test_unlinking_stops_at_the_first_failed_publish(
+async def test_unlinking_sends_an_empty_snapshot_per_thread_at_once_and_logs_each_that_fails(
     storage: PostgresStorage, caplog: pytest.LogCaptureFixture
 ) -> None:
     hub, thread = await setup(storage)
-    for identity in (ANA, HELPER, BRUNO):
-        session, _ = open_session(identity)
-        await hub.join(session, thread, None)
-    attempts: list[dict[str, Any]] = []
+    threads = [thread]
+    for thread_id in ("t2", "t3"):
+        made, _ = await storage.create_thread(
+            "acme", Thread(id=thread_id, scope="acme", created_at=AT)
+        )
+        await enroll(storage, thread_id, ANA)
+        threads.append(made)
+    session, _ = open_session(ANA)
+    for made in threads:
+        await hub.join(session, made, None)
+    attempts: list[tuple[str, dict[str, Any]]] = []
+    closed = asyncio.Event()
 
     async def closing(scope: str, thread_id: str, payload: dict[str, Any]) -> None:
-        attempts.append(payload)
+        attempts.append((thread_id, payload))
+        await closed.wait()
         raise StorageError("postgres: storage rejected publish: pool is closing")
 
     storage.publish = closing  # type: ignore[method-assign]
     hub.linked = True
     with caplog.at_level(logging.WARNING, logger="rfnry_thread.hub"):
-        await hub.unlink()
-    assert len(attempts) == 1 and len(caplog.records) == 1 and not hub.linked
+        hub.unlink()
+        assert not hub.linked
+        assert [(t, p["kind"], p["e"], p["entries"]) for t, p in attempts] == [
+            (made.id, "refresh", made.epoch, []) for made in threads
+        ]
+        draining = asyncio.ensure_future(hub.drain())
+        await asyncio.sleep(0.05)
+        assert not draining.done()
+        closed.set()
+        await asyncio.wait_for(draining, 2.0)
+    assert [r.getMessage() for r in caplog.records] == [
+        "hub: mirroring to other replicas failed: postgres: storage rejected publish: "
+        "pool is closing"
+    ] * 3
 
 
 async def test_a_leave_sent_right_after_a_join_leaves(storage: PostgresStorage) -> None:
@@ -968,7 +1026,9 @@ async def test_a_leave_sent_behind_a_full_window_of_requests_still_follows_its_j
     assert [a for a in answers if a != "get"] == ["join", "leave"]
     session = next(iter(server._hub.sessions))
     assert "t1" not in session.joined
-    assert "ana" not in [i.id for i in server._hub.state.present("acme", "t1")]
+    assert "ana" not in [
+        i.id for i in server._hub.state.present("acme", "t1", await _epoch(storage))
+    ]
     await ana.end.close(1000, "")
 
 
@@ -1019,32 +1079,34 @@ async def test_a_leave_during_a_gap_fill_stays_left(storage: PostgresStorage) ->
     await hub.join(session, thread, None)
     await pushes(session, recorder)
     for n in (3, 4):
-        await storage.append_event("acme", message(n, f"m{n}"))
+        await append(storage, "acme", message(n, f"m{n}"))
     fourth = (await storage.list_events("acme", "t1", since=3))[0]
     reading = asyncio.Event()
     release = asyncio.Event()
-    read = storage.list_events
+    read = storage.tail
 
     async def paused(*args: Any, **kwargs: Any) -> Any:
         reading.set()
         await release.wait()
         return await read(*args, **kwargs)
 
-    storage.list_events = paused  # type: ignore[method-assign]
-    delivering = asyncio.create_task(hub.deliver("acme", fourth))
+    storage.tail = paused  # type: ignore[method-assign]
+    delivering = asyncio.create_task(hub.deliver("acme", fourth, thread.epoch))
     await reading.wait()
-    storage.list_events = read  # type: ignore[method-assign]
+    storage.tail = read  # type: ignore[method-assign]
     leaving = asyncio.create_task(hub.leave(session, "t1"))
     await asyncio.sleep(0)
     assert not leaving.done()
     release.set()
     await asyncio.gather(delivering, leaving)
     assert "t1" not in session.joined
-    assert session not in hub._rooms.get(("acme", "t1"), set())
+    room = hub._rooms.get(("acme", "t1"))
+    assert room is None or session not in room.sessions
     await hub.join(session, thread, None)
     await pushes(session, recorder)
-    await storage.append_event("acme", message(5, "m5", BRUNO))
-    await hub.deliver("acme", (await storage.list_events("acme", "t1", since=4))[0])
+    await append(storage, "acme", message(5, "m5", BRUNO))
+    fifth = (await storage.list_events("acme", "t1", since=4))[0]
+    await hub.deliver("acme", fifth, thread.epoch)
     assert [p["seq"] for p in await pushes(session, recorder)] == [5]
 
 
@@ -1056,13 +1118,14 @@ async def test_a_removed_member_gets_nothing_after_the_removal_even_when_deliver
     other, _ = open_session(HELPER)
     await hub.join(session, thread, None)
     await pushes(session, recorder)
-    removal, _ = await storage.append_event(
+    removal, _ = await append(
+        storage,
         "acme",
         MemberRemoved(
             id="r", thread_id="t1", author=BRUNO, created_at=AT, client_id="r", identity=ANA
         ),
     )
-    after, _ = await storage.append_event("acme", message(4, "after", BRUNO))
+    after, _ = await append(storage, "acme", message(4, "after", BRUNO))
     reading = asyncio.Event()
     release = asyncio.Event()
     head = storage.head
@@ -1076,8 +1139,8 @@ async def test_a_removed_member_gets_nothing_after_the_removal_even_when_deliver
     joining = asyncio.create_task(hub.join(other, thread, None))
     await reading.wait()
     storage.head = head  # type: ignore[method-assign]
-    first = asyncio.create_task(hub.deliver("acme", removal))
-    second = asyncio.create_task(hub.deliver("acme", after))
+    first = asyncio.create_task(hub.deliver("acme", removal, thread.epoch))
+    second = asyncio.create_task(hub.deliver("acme", after, thread.epoch))
     await asyncio.sleep(0)
     release.set()
     await asyncio.gather(joining, first, second)
@@ -1132,16 +1195,16 @@ async def test_an_event_is_stored_and_served_though_one_connection_fails_to_catc
     await second.call("thread.join", thread_id="t1")
     behind = next(s for s in server._hub.sessions if s.identity.id == HELPER.id)
     behind.joined["t1"] -= 1
-    listing = storage.list_events
+    listing = storage.tail
     armed = [True]
 
-    async def flaky(*args: Any, **kwargs: Any) -> Any:
-        if armed and kwargs.get("since") == behind.joined["t1"]:
+    async def flaky(scope: str, thread_id: str, since: int, floor: int, limit: int) -> Any:
+        if armed and since == behind.joined["t1"]:
             armed.pop()
-            raise StorageError("postgres: storage rejected list_events: connection reset")
-        return await listing(*args, **kwargs)
+            raise StorageError("postgres: storage rejected tail: connection reset")
+        return await listing(scope, thread_id, since, floor, limit)
 
-    monkeypatch.setattr(storage, "list_events", flaky)
+    monkeypatch.setattr(storage, "tail", flaky)
     with caplog.at_level(logging.WARNING, logger="rfnry_thread.hub"):
         stored = await say(ana, "t1", "hello")
     assert stored["seq"] > 0 and not armed
@@ -1158,11 +1221,10 @@ def gated(
     calls = [0]
 
     async def held(*args: Any, **kwargs: Any) -> Any:
-        if name != "list_events" or kwargs.get("before") is not None:
-            calls[0] += 1
-            if calls[0] == after + 1:
-                reached.set()
-                await release.wait()
+        calls[0] += 1
+        if calls[0] == after + 1:
+            reached.set()
+            await release.wait()
         return await real(*args, **kwargs)
 
     monkeypatch.setattr(storage, name, held)
@@ -1176,41 +1238,39 @@ async def test_a_member_cut_by_a_fan_out_that_is_cancelled_is_out_of_the_room_an
     bruno, bruno_recorder = open_session(BRUNO)
     helper, helper_recorder = open_session(HELPER)
     await hub.join(bruno, thread, None)
+    await append(storage, "acme", message(1, "before helper", HELPER))
     await hub.join(helper, thread, None)
     await pushes(bruno, bruno_recorder)
-    room = hub._room
-    monkeypatch.setattr(
-        hub,
-        "_room",
-        lambda scope, thread_id: sorted(room(scope, thread_id), key=lambda s: s is helper),
-    )
-    await storage.remove_member("acme", removed("t1", BRUNO, ANA))
-    await storage.append_event("acme", message(2, "while out", HELPER))
-    live, _ = await storage.append_event("acme", message(3, "live", HELPER))
-    real = storage.list_events
-    reached, _ = gated(storage, monkeypatch, "list_events", after=1)
-    delivering = asyncio.create_task(hub.deliver("acme", live))
+    await expel(storage, "acme", removed("t1", BRUNO, ANA))
+    await append(storage, "acme", message(3, "while out", HELPER))
+    live, _ = await append(storage, "acme", message(4, "live", HELPER))
+    real = storage.tail
+    reached, _ = gated(storage, monkeypatch, "tail", after=1)
+    delivering = asyncio.create_task(hub.deliver("acme", live, thread.epoch))
     await asyncio.wait_for(reached.wait(), 5)
     delivering.cancel()
     with pytest.raises(asyncio.CancelledError):
         await delivering
-    monkeypatch.setattr(storage, "list_events", real)
-    assert bruno not in room("acme", "t1") and "t1" not in bruno.joined
-    await until(lambda: [i.id for i in hub.state.present("acme", "t1")] == [HELPER.id])
-    after, _ = await storage.append_event("acme", message(4, "after the removal", HELPER))
-    await asyncio.wait_for(hub.deliver("acme", after), 5)
-    assert kinds(await pushes(bruno, bruno_recorder)) == ["member_removed"]
+    monkeypatch.setattr(storage, "tail", real)
+    assert "t1" not in bruno.joined
+    await until(
+        lambda: [i.id for i in hub.state.present("acme", "t1", thread.epoch)] == [HELPER.id]
+    )
+    after, _ = await append(storage, "acme", message(5, "after the removal", HELPER))
+    await asyncio.wait_for(hub.deliver("acme", after, thread.epoch), 5)
+    assert kinds(await pushes(bruno, bruno_recorder)) == ["message", "member_removed"]
 
 
 async def test_a_member_removed_and_added_again_is_handed_the_thread_though_the_fan_out_is_cancelled(
     storage: PostgresStorage, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     hub, bruno, recorder = await _bruno_in(storage, "all")
-    await storage.remove_member("acme", removed("t1", BRUNO, ANA))
-    await storage.add_member("acme", added("t1", BRUNO, ANA))
-    live, _ = await storage.append_event("acme", message(5, "after"))
+    await expel(storage, "acme", removed("t1", BRUNO, ANA))
+    await admit(storage, "acme", added("t1", BRUNO, ANA))
+    live, _ = await append(storage, "acme", message(5, "after"))
+    epoch = await _epoch(storage)
     reached, release = gated(storage, monkeypatch, "is_member")
-    delivering = asyncio.create_task(hub.deliver("acme", live))
+    delivering = asyncio.create_task(hub.deliver("acme", live, epoch))
     await asyncio.wait_for(reached.wait(), 5)
     delivering.cancel()
     with pytest.raises(asyncio.CancelledError):
@@ -1220,30 +1280,50 @@ async def test_a_member_removed_and_added_again_is_handed_the_thread_though_the_
     assert "joined" in _kinds(await pushes(bruno, recorder))
 
 
-async def test_a_member_removed_and_added_again_is_handed_the_thread_though_the_check_that_found_it_fails_after(
+async def test_a_member_removed_and_added_again_is_handed_the_thread_though_the_catch_up_that_found_it_fails_after(
     storage: PostgresStorage, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     hub, bruno, recorder = await _bruno_in(storage, "all")
+    await expel(storage, "acme", removed("t1", BRUNO, ANA))
+    await admit(storage, "acme", added("t1", BRUNO, ANA))
     thread = await storage.get_thread("acme", "t1")
     assert thread is not None
-    await storage.remove_member("acme", removed("t1", BRUNO, ANA))
-    await storage.add_member("acme", added("t1", BRUNO, ANA))
-    hub._unchecked.add(("acme", "t1"))
-    head = storage.head
-    armed = [True]
-
-    async def flaky(*args: Any) -> Any:
-        if armed:
-            armed.pop()
-            raise StorageError("postgres: storage rejected head: connection reset")
-        return await head(*args)
-
-    monkeypatch.setattr(storage, "head", flaky)
     ana, _ = open_session(ANA)
-    with pytest.raises(StorageError):
-        await asyncio.wait_for(hub.join(ana, thread, None), 5)
+    await hub.join(ana, thread, None)
+    tail = storage.tail
+
+    async def flaky(scope: str, thread_id: str, since: int, floor: int, limit: int) -> Any:
+        if since == ana.joined["t1"]:
+            raise StorageError("postgres: storage rejected tail: connection reset")
+        return await tail(scope, thread_id, since, floor, limit)
+
+    monkeypatch.setattr(storage, "tail", flaky)
+    await asyncio.wait_for(hub.on_event("acme", "t1", 4, thread.epoch), 5)
     await until(lambda: bruno.joined.get("t1") == 4)
     assert _kinds(await pushes(bruno, recorder))[-1] == "joined"
+
+
+async def test_a_member_cut_and_added_again_is_not_handed_a_thread_made_again_meanwhile(
+    storage: PostgresStorage, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    hub, bruno, recorder = await _bruno_in(storage, "all")
+    writer = Server(storage)
+    epoch = await _epoch(storage)
+    await writer.remove_member("acme", "t1", BRUNO)
+    await writer.add_member("acme", "t1", BRUNO)
+    reached, release = gated(storage, monkeypatch, "is_member")
+    delivering = asyncio.create_task(hub.on_event("acme", "t1", 4, epoch))
+    await asyncio.wait_for(reached.wait(), 5)
+    await writer.delete_thread("acme", "t1")
+    await writer.create_thread("acme", "t1")
+    for identity in (ANA, BRUNO):
+        await writer.add_member("acme", "t1", identity)
+    for n in range(3):
+        await writer.update_thread("acme", "t1", {"n": n})
+    release.set()
+    await asyncio.wait_for(delivering, 5)
+    assert _kinds(await pushes(bruno, recorder)) == ["member_removed"]
+    assert "t1" not in bruno.joined
 
 
 async def test_a_write_reaches_the_others_though_the_writers_socket_drops_while_it_is_delivered(
@@ -1258,7 +1338,7 @@ async def test_a_write_reaches_the_others_though_the_writers_socket_drops_while_
     await helper.quiet()
     behind = next(s for s in server._hub.sessions if s.identity.id == HELPER.id)
     behind.joined["t1"] -= 1
-    reached, release = gated(storage, monkeypatch, "list_events")
+    reached, release = gated(storage, monkeypatch, "tail")
     writer = await Peer.open(server, ANA)
     await writer.end.send_text(
         encode(
@@ -1283,7 +1363,7 @@ async def test_a_write_reaches_the_others_though_the_writers_socket_drops_while_
     ]
 
 
-async def test_an_edit_whose_target_cannot_be_read_after_it_is_stored_is_acknowledged_and_caught_up_later(
+async def test_an_edit_that_cannot_be_caught_up_after_it_is_stored_is_acknowledged_and_caught_up_later(
     storage: PostgresStorage,
     monkeypatch: pytest.MonkeyPatch,
     caplog: pytest.LogCaptureFixture,
@@ -1296,14 +1376,12 @@ async def test_an_edit_whose_target_cannot_be_read_after_it_is_stored_is_acknowl
     await bruno.call("thread.join", thread_id="t1")
     first = await say(ana, "t1", "first")
     await bruno.quiet()
-    get_event = storage.get_event
+    tail = storage.tail
 
-    async def flaky(scope: str, thread_id: str, event_id: str, floor: int = 0) -> Any:
-        if floor == 0:
-            raise StorageError("postgres: storage rejected get_event: connection reset")
-        return await get_event(scope, thread_id, event_id, floor)
+    async def failing(scope: str, thread_id: str, since: int, floor: int, limit: int) -> Any:
+        raise StorageError("postgres: storage rejected tail: connection reset")
 
-    monkeypatch.setattr(storage, "get_event", flaky)
+    monkeypatch.setattr(storage, "tail", failing)
     with caplog.at_level(logging.WARNING, logger="rfnry_thread.hub"):
         edit = await ana.call(
             "event.send",
@@ -1315,8 +1393,8 @@ async def test_an_edit_whose_target_cannot_be_read_after_it_is_stored_is_acknowl
         )
     assert edit["event"]["kind"] == "edit"
     assert await bruno.quiet() == []
-    assert any("hub: catching connection" in r.getMessage() for r in caplog.records)
-    monkeypatch.setattr(storage, "get_event", get_event)
+    assert "hub: catching thread 't1' up from storage failed" in caplog.text
+    monkeypatch.setattr(storage, "tail", tail)
     await say(ana, "t1", "next")
     assert [p["kind"] for p in await bruno.quiet()] == ["edit", "message"]
 
@@ -1327,23 +1405,23 @@ async def test_a_join_that_crosses_the_threads_deletion_or_its_own_removal_is_re
 ) -> None:
     hub, thread = await setup(storage, events=2)
     session, recorder = open_session(BRUNO)
-    reached, release = gated(storage, monkeypatch, "list_events")
+    reached, release = gated(storage, monkeypatch, "tail")
     joining = asyncio.create_task(hub.join(session, thread, 0))
     await asyncio.wait_for(reached.wait(), 5)
     if crossing == "deleted":
         await storage.delete_thread("acme", "t1")
-        other = asyncio.create_task(hub.deleted("acme", "t1", ANA))
+        other = asyncio.create_task(hub.deleted("acme", "t1", thread.epoch, ANA))
     else:
-        removal = await storage.remove_member("acme", removed("t1", BRUNO, ANA))
+        removal = await expel(storage, "acme", removed("t1", BRUNO, ANA))
         assert removal is not None
-        other = asyncio.create_task(hub.deliver("acme", removal))
+        other = asyncio.create_task(hub.deliver("acme", removal, thread.epoch))
     await asyncio.sleep(0.05)
     release.set()
     with pytest.raises(NotFoundError, match="^server: thread 't1' was not found$"):
         await asyncio.wait_for(joining, 5)
     await asyncio.wait_for(other, 5)
     assert "t1" not in session.joined and "t1" not in session.present
-    assert hub._room("acme", "t1") == []
+    assert ("acme", "t1") not in hub._rooms
 
 
 async def test_a_join_since_past_where_a_connection_already_is_says_truncated(
@@ -1367,22 +1445,20 @@ async def test_a_follow_answers_no_join_for_a_thread_deleted_or_left_by_its_remo
     hub, thread = await setup(storage, events=2)
     second, _ = await storage.create_thread("acme", Thread(id="t2", scope="acme", created_at=AT))
     await enroll(storage, "t2", BRUNO)
-    await storage.append_event(
-        "acme", message(1, "m1", BRUNO).model_copy(update={"thread_id": "t2"})
-    )
+    await append(storage, "acme", message(1, "m1", BRUNO).model_copy(update={"thread_id": "t2"}))
     session, _ = open_session(BRUNO)
     session.following = True
-    reached, release = gated(storage, monkeypatch, "list_events")
+    reached, release = gated(storage, monkeypatch, "tail")
     following = asyncio.create_task(hub.follow(session, [(thread, None), (second, 0)], set()))
     await asyncio.wait_for(reached.wait(), 5)
     assert "t1" in session.joined
     if crossing == "deleted":
         await storage.delete_thread("acme", "t1")
-        await asyncio.wait_for(hub.deleted("acme", "t1", ANA), 5)
+        await asyncio.wait_for(hub.deleted("acme", "t1", thread.epoch, ANA), 5)
     else:
-        removal = await storage.remove_member("acme", removed("t1", BRUNO, ANA))
+        removal = await expel(storage, "acme", removed("t1", BRUNO, ANA))
         assert removal is not None
-        await asyncio.wait_for(hub.deliver("acme", removal), 5)
+        await asyncio.wait_for(hub.deliver("acme", removal, thread.epoch), 5)
     assert "t1" not in session.joined
     release.set()
     answered = await asyncio.wait_for(following, 5)

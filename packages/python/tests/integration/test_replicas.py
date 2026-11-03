@@ -1,5 +1,7 @@
 import asyncio
 import contextlib
+import json
+import logging
 from collections.abc import AsyncIterator, Awaitable, Callable
 from datetime import UTC, datetime
 from typing import Any
@@ -10,11 +12,13 @@ from database import SCHEMA, URL, open_pool
 from unit.conftest import say
 from unit.factories import ANA, BRUNO, HELPER, added
 from unit.peer import Peer
+from unit.writes import admit, epoch
 from until import until
 
+from integration.pools import Refusing, Stalling
 from rfnry_thread import postgres, server as server_module, state
 from rfnry_thread.errors import StorageError
-from rfnry_thread.models import Identity, Message, Part, Text, Thread
+from rfnry_thread.models import Identity, Part, Text, Thread
 from rfnry_thread.postgres import PostgresStorage
 from rfnry_thread.server import Server
 
@@ -208,13 +212,46 @@ async def test_a_replica_heard_from_again_is_announced_again_and_ends_once(
         await helper.call("signal.send", thread_id="t1", kind="stream.end", stream_id="s1")
         await helper.call("signal.send", thread_id="t1", kind="idle")
         await helper.call("thread.leave", thread_id="t1")
-        assert await arrived(ana, 4, 2.0) == [
-            ("stream.delta", "helper"),
+        assert await arrived(ana, 3, 2.0) == [
             ("stream.end", "helper"),
             ("idle", "helper"),
             ("left", "helper"),
         ]
         assert await ana.quiet(1.0) == []
+
+
+async def test_a_replica_stopped_and_started_again_with_its_connections_open_is_announced_again_and_ends_once(
+    storage: PostgresStorage, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    async with briefly(storage, monkeypatch) as (near, far):
+        ana, helper = await room(near, far)
+        try:
+            await busy(ana, helper)
+            await far.stop()
+            assert await arrived(ana, 3, 2.0) == [
+                ("stream.end", "helper"),
+                ("idle", "helper"),
+                ("left", "helper"),
+            ]
+            await far.start()
+            assert await arrived(ana, 3, 2.0) == [
+                ("present", "helper"),
+                ("working", "helper"),
+                ("stream.start", "helper"),
+            ]
+            assert await present(ana) == ["ana", "helper"]
+            await helper.call("signal.send", thread_id="t1", kind="stream.end", stream_id="s1")
+            await helper.call("signal.send", thread_id="t1", kind="idle")
+            await helper.call("thread.leave", thread_id="t1")
+            assert await arrived(ana, 3, 2.0) == [
+                ("stream.end", "helper"),
+                ("idle", "helper"),
+                ("left", "helper"),
+            ]
+            assert await ana.quiet(1.0) == []
+        finally:
+            await ana.close()
+            await helper.close()
 
 
 async def test_a_stopped_replica_ends_the_others_state_for_its_own_connections(
@@ -282,10 +319,11 @@ async def test_a_repeat_taken_before_a_leave_does_not_bring_the_presence_back(
 
 
 async def test_deleting_a_scope_empties_its_rooms_on_the_other_replica(
-    replicas: tuple[Server, Server],
+    replicas: tuple[Server, Server], storage: PostgresStorage
 ) -> None:
     near, far = replicas
     ana, helper = await room(near, far)
+    old = await epoch(storage, "acme", "t1")
     elsewhere = await Peer.open(far, HELPER, scope="other")
     await elsewhere.call("thread.create", thread_id="t1")
     await elsewhere.call("thread.join", thread_id="t1")
@@ -297,7 +335,7 @@ async def test_deleting_a_scope_empties_its_rooms_on_the_other_replica(
     assert await arrived(ana, 1, 2.0) == [("thread.deleted", "system")]
     assert await arrived(helper, 1, 2.0) == [("thread.deleted", "system")]
     for server in (near, far):
-        assert server._hub.state.present("acme", "t1") == []
+        assert server._hub.state.present("acme", "t1", old) == []
         assert [key for key in server._hub._rooms if key[0] == "acme"] == []
     await near.create_thread("acme", "t1")
     await near.add_member("acme", "t1", HELPER)
@@ -305,7 +343,7 @@ async def test_deleting_a_scope_empties_its_rooms_on_the_other_replica(
     await helper.call("thread.join", thread_id="t1")
     assert await present(helper) == ["helper"]
     assert await elsewhere.quiet(0.3) == []
-    assert far._hub.state.present("other", "t1") == [HELPER]
+    assert far._hub.state.present("other", "t1", await epoch(storage, "other", "t1")) == [HELPER]
 
 
 async def first_repeat_held(far: Server, step: Callable[[list[str]], Awaitable[None]]) -> None:
@@ -336,14 +374,16 @@ async def heard_since(near: Server, far: Server) -> None:
     elsewhere = await Peer.open(far, HELPER, scope="other")
     await elsewhere.call("thread.create", thread_id="t1")
     await elsewhere.call("thread.join", thread_id="t1")
-    await until(lambda: near._hub.state.present("other", "t1") == [HELPER])
+    other = await epoch(far._hub.storage, "other", "t1")
+    await until(lambda: near._hub.state.present("other", "t1", other) == [HELPER])
 
 
-async def made_again(near: Server, ana: Peer) -> list[str]:
+async def made_again(near: Server, ana: Peer) -> tuple[list[str], list[str]]:
     await near.create_thread("acme", "t1")
     await near.add_member("acme", "t1", ANA)
     await ana.call("thread.join", thread_id="t1")
-    return await present(ana)
+    told = [p["sender"]["id"] for p in await ana.quiet() if p["kind"] == "present"]
+    return told, await present(ana)
 
 
 async def test_a_repeat_taken_before_a_scope_was_deleted_does_not_bring_its_state_back(
@@ -351,6 +391,7 @@ async def test_a_repeat_taken_before_a_scope_was_deleted_does_not_bring_its_stat
 ) -> None:
     near, far = replicas
     ana, helper = await room(near, far)
+    old = await epoch(near._hub.storage, "acme", "t1")
 
     async def wipe(sent: list[str]) -> None:
         await near.delete_scope("acme")
@@ -359,8 +400,8 @@ async def test_a_repeat_taken_before_a_scope_was_deleted_does_not_bring_its_stat
 
     await first_repeat_held(far, wipe)
     await heard_since(near, far)
-    assert near._hub.state.present("acme", "t1") == []
-    assert await made_again(near, ana) == ["ana"]
+    assert near._hub.state.present("acme", "t1", old) == []
+    assert await made_again(near, ana) == (["ana"], ["ana"])
 
 
 async def test_a_repeat_taken_before_a_leave_does_not_bring_the_presence_back_after_a_wipe(
@@ -377,8 +418,17 @@ async def test_a_repeat_taken_before_a_leave_does_not_bring_the_presence_back_af
 
     await first_repeat_held(far, leave_then_wipe)
     await heard_since(near, far)
-    assert near._hub.state.present("acme", "t1") == []
-    assert await made_again(near, ana) == ["ana"]
+    assert await made_again(near, ana) == (["ana"], ["ana"])
+    bruno = await Peer.open(near, BRUNO)
+    await near.add_member("acme", "t1", BRUNO)
+    await bruno.call("thread.join", thread_id="t1")
+    await bruno.quiet()
+    await ana.quiet()
+    now = near._hub.state._clock()
+    near._hub.state._clock = lambda: now + state.EXPIRY + 1
+    near._hub.sweep()
+    assert await ana.quiet() == [] and await bruno.quiet() == []
+    await bruno.close()
 
 
 async def test_a_cancelled_stop_still_gives_the_listening_connection_back(
@@ -465,6 +515,179 @@ async def test_a_second_replica_receives_only_the_redacted_form(storage: Postgre
         await far_pool.close()
 
 
+class Unhinted(PostgresStorage):
+    def __init__(self, pool: Any) -> None:
+        super().__init__(pool)
+        self.tried: list[tuple[str, str, int, int]] = []
+
+    async def hint(self, scope: str, thread_id: str, seq: int, epoch: int) -> None:
+        self.tried.append((scope, thread_id, seq, epoch))
+        raise StorageError("postgres: storage rejected publish: the notification queue is full")
+
+
+async def test_a_write_succeeds_when_its_hint_cannot_be_sent(
+    storage: PostgresStorage, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    monkeypatch.setattr(server_module, "REFRESH", 0.3)
+    near_pool = await open_pool()
+    unhinted = Unhinted(near_pool)
+    near, far = Server(unhinted), Server(storage)
+    await near.start()
+    await far.start()
+    try:
+        ana, helper = await room(near, far)
+        unhinted.tried.clear()
+        with caplog.at_level(logging.WARNING):
+            sent = await say(ana, "t1", "unhinted")
+            assert (await ana.push("message", timeout=1.0))["id"] == sent["id"]
+            pushed = await helper.push("message", timeout=2.0)
+        assert pushed["id"] == sent["id"] and pushed["seq"] == sent["seq"]
+        thread = await storage.get_thread("acme", "t1")
+        assert thread is not None
+        assert unhinted.tried == [("acme", "t1", sent["seq"], thread.epoch)]
+        assert (
+            "hub: hinting other replicas failed: postgres: storage rejected publish: "
+            "the notification queue is full"
+        ) in caplog.text
+    finally:
+        await near.stop()
+        await far.stop()
+        await asyncio.wait_for(near_pool.close(), 5)
+
+
+async def test_a_write_is_answered_while_its_hint_cannot_be_sent(
+    pool: Any, storage: PostgresStorage
+) -> None:
+    stalling = Stalling(pool)
+    near, far = Server(PostgresStorage(stalling)), Server(storage)
+    await near.start()
+    await far.start()
+    try:
+        ana, helper = await room(near, far)
+        stalling.stall()
+        sent = await asyncio.wait_for(say(ana, "t1", "answered"), 1.0)
+        assert (await ana.push("message", timeout=1.0))["id"] == sent["id"]
+        await until(lambda: stalling.holding)
+        assert await helper.quiet(0.3) == []
+        stalling.resume()
+        assert (await helper.push("message", timeout=1.0))["id"] == sent["id"]
+    finally:
+        stalling.resume()
+        await near.stop()
+        await far.stop()
+
+
+async def test_no_request_waits_on_a_notice(pool: Any, storage: PostgresStorage) -> None:
+    stalling = Stalling(pool)
+    near, far = Server(PostgresStorage(stalling)), Server(storage)
+    await near.start()
+    await far.start()
+    try:
+        ana, helper = await room(near, far)
+        stalling.stall()
+        sent = await asyncio.wait_for(say(ana, "t1", "first"), 1.0)
+        await until(lambda: stalling.holding)
+        for step in (
+            {"method": "thread.create", "thread_id": "t2"},
+            {"method": "member.add", "thread_id": "t2", "identity": BRUNO.model_dump(mode="json")},
+            {"method": "thread.update", "thread_id": "t2", "metadata": {"n": 1}},
+            {"method": "member.remove", "thread_id": "t2", "identity_id": "bruno"},
+            {"method": "signal.send", "thread_id": "t1", "kind": "working", "label": "Busy"},
+            {"method": "thread.mark", "thread_id": "t1", "seq": sent["seq"]},
+            {"method": "thread.leave", "thread_id": "t1"},
+            {"method": "thread.delete", "thread_id": "t2"},
+        ):
+            await asyncio.wait_for(ana.call(**step), 1.0)
+        assert stalling.holding
+        stalling.resume()
+        assert (await helper.push("message", timeout=1.0))["id"] == sent["id"]
+        assert (await helper.push("left", timeout=1.0))["sender"]["id"] == "ana"
+    finally:
+        stalling.resume()
+        await near.stop()
+        await far.stop()
+
+
+async def test_a_stop_right_after_a_write_still_hints_it(storage: PostgresStorage) -> None:
+    near_pool = await open_pool()
+    stalling = Stalling(near_pool)
+    near, far = Server(PostgresStorage(stalling)), Server(storage)
+    await near.start()
+    await far.start()
+    try:
+        helper = await Peer.open(far, HELPER)
+        await near.create_thread("acme", "t1")
+        await near.add_member("acme", "t1", HELPER)
+        await helper.call("thread.join", thread_id="t1")
+        await helper.quiet()
+        stalling.stall()
+        await near.update_thread("acme", "t1", {"last": True})
+        stopping = asyncio.ensure_future(near.stop())
+        await until(lambda: stalling.holding)
+        await asyncio.sleep(0.1)
+        assert not stopping.done()
+        stalling.resume()
+        await asyncio.wait_for(stopping, 2.0)
+        await asyncio.wait_for(near_pool.close(), 5)
+        assert (await helper.push("thread_updated", timeout=1.0))["metadata"] == {"last": True}
+    finally:
+        stalling.resume()
+        await near.stop()
+        await far.stop()
+        await asyncio.wait_for(near_pool.close(), 5)
+
+
+async def test_a_stop_while_writes_go_on_and_groups_stall_returns_within_its_bound(
+    pool: Any, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(postgres, "NOTIFY_TIMEOUT", 0.3)
+    stalling = Stalling(pool)
+    near = Server(PostgresStorage(stalling))
+    await near.start()
+    writing = asyncio.Event()
+    writing.set()
+
+    async def writer(thread_id: str) -> None:
+        while writing.is_set():
+            stalling.stall()
+            await near.update_thread("acme", thread_id, {"at": thread_id})
+
+    for n in range(4):
+        await near.create_thread("acme", f"w{n}")
+    writers = [asyncio.ensure_future(writer(f"w{n}")) for n in range(4)]
+    await asyncio.sleep(0.2)
+    stopping = asyncio.ensure_future(near.stop())
+    try:
+        await asyncio.wait({stopping}, timeout=20 * 0.3)
+        assert stopping.done() and not any(task.done() for task in writers)
+    finally:
+        writing.clear()
+        await asyncio.gather(*writers)
+        stalling.resume()
+        await stopping
+        await near.stop()
+
+
+async def test_a_server_never_started_still_hints_its_writes(storage: PostgresStorage) -> None:
+    writer_pool = await open_pool()
+    near, writer = Server(storage), Server(PostgresStorage(writer_pool))
+    await near.start()
+    try:
+        ana = await Peer.open(near, ANA)
+        await ana.call("thread.create", thread_id="t1")
+        await ana.call("member.add", thread_id="t1", identity=HELPER.model_dump(mode="json"))
+        await ana.call("thread.join", thread_id="t1")
+        await ana.quiet()
+        helper = await Peer.open(writer, HELPER)
+        sent = await say(helper, "t1", "from a writer")
+        assert (await ana.push("message", timeout=1.0))["id"] == sent["id"]
+        await writer.update_thread("acme", "t1", {"written": True})
+        assert (await ana.push("thread_updated", timeout=1.0))["metadata"] == {"written": True}
+    finally:
+        await near.stop()
+        await asyncio.wait_for(writer_pool.close(), 5)
+
+
 async def test_signals_are_mirrored_through_notify(replicas: tuple[Server, Server]) -> None:
     ana, helper = await room(*replicas)
     await helper.call("signal.send", thread_id="t1", kind="working", label="Reading")
@@ -525,12 +748,12 @@ async def test_a_dropped_listener_listens_again_and_resumes(
     pool: Any, storage: PostgresStorage
 ) -> None:
     await storage.create_thread("acme", Thread(id="t1", scope="acme", created_at=datetime.now(UTC)))
-    await storage.add_member("acme", added("t1", ANA))
+    await admit(storage, "acme", added("t1", ANA))
     seen: list[int] = []
     heard: list[dict[str, Any]] = []
     resumed = asyncio.Event()
 
-    async def on_event(scope: str, thread_id: str, seq: int) -> None:
+    async def on_event(scope: str, thread_id: str, seq: int, epoch: int) -> None:
         seen.append(seq)
 
     async def on_signal(scope: str, thread_id: str, payload: dict[str, Any]) -> None:
@@ -544,44 +767,34 @@ async def test_a_dropped_listener_listens_again_and_resumes(
     await relistened(pool, killed, 1)
     await asyncio.wait_for(resumed.wait(), 5.0)
     await storage.publish("acme", "t1", {"kind": "idle"})
-    await storage.append_event(
-        "acme",
-        Message(
-            id="m1",
-            thread_id="t1",
-            author=ANA,
-            created_at=datetime.now(UTC),
-            client_id="c1",
-            content=[Text(text="back")],
-        ),
-    )
+    await storage.hint("acme", "t1", 2, await epoch(storage, "acme", "t1"))
     await until(lambda: heard == [{"kind": "idle"}] and seen == [2])
     await stop()
     assert await listeners(pool) == []
 
 
-async def test_what_a_listener_hears_while_listening_again_is_passed_on_after_on_resume(
+async def test_what_a_listener_hears_after_listening_again_is_passed_on(
     pool: Any, storage: PostgresStorage, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     await storage.create_thread("acme", Thread(id="t1", scope="acme", created_at=datetime.now(UTC)))
-    await storage.add_member("acme", added("t1", ANA))
+    await admit(storage, "acme", added("t1", ANA))
     events_channel, _ = await storage._channels()
     order: list[str] = []
     relistening = asyncio.Event()
     halfway = asyncio.Event()
-    heard = asyncio.Event()
+    attached = asyncio.Event()
     attach = asyncpg.connection.Connection.add_listener
 
     async def held(conn: Any, channel: str, callback: Any) -> None:
         await attach(conn, channel, callback)
         if relistening.is_set() and channel == events_channel:
             halfway.set()
-            await asyncio.wait_for(heard.wait(), 5.0)
+            await asyncio.wait_for(attached.wait(), 5.0)
 
     monkeypatch.setattr(asyncpg.connection.Connection, "add_listener", held)
     monkeypatch.setattr(postgres, "RELISTEN", 0.01)
 
-    def on_event(scope: str, thread_id: str, seq: int) -> Awaitable[None]:
+    def on_event(scope: str, thread_id: str, seq: int, epoch: int) -> Awaitable[None]:
         order.append(f"event {seq}")
         return asyncio.sleep(0)
 
@@ -597,23 +810,242 @@ async def test_what_a_listener_hears_while_listening_again_is_passed_on_after_on
         relistening.set()
         await terminate(pool, 1)
         await asyncio.wait_for(halfway.wait(), 5.0)
-        await storage.append_event(
-            "acme",
-            Message(
-                id="m1",
-                thread_id="t1",
-                author=ANA,
-                created_at=datetime.now(UTC),
-                client_id="c1",
-                content=[Text(text="while listening again")],
-            ),
-        )
-        await asyncio.sleep(0.3)
-        heard.set()
-        await until(lambda: len(order) == 2, timeout=5.0)
-        assert order == ["resume", "event 2"]
+        await storage.hint("acme", "t1", 2, await epoch(storage, "acme", "t1"))
+        await until(lambda: order == ["event 2"])
+        attached.set()
+        await until(lambda: order == ["event 2", "resume"])
+    finally:
+        attached.set()
+        await stop()
+
+
+async def probed(
+    storage: PostgresStorage, monkeypatch: pytest.MonkeyPatch, period: float = 0.2
+) -> tuple[list[tuple[Any, str, Any]], list[int], asyncio.Event, Callable[[], Awaitable[None]]]:
+    await storage.create_thread("acme", Thread(id="t1", scope="acme", created_at=datetime.now(UTC)))
+    await admit(storage, "acme", added("t1", ANA))
+    monkeypatch.setattr(postgres, "PROBE", period)
+    monkeypatch.setattr(postgres, "RELISTEN", 0.01)
+    attached: list[tuple[Any, str, Any]] = []
+    attach = asyncpg.connection.Connection.add_listener
+
+    async def kept(conn: Any, channel: str, callback: Any) -> None:
+        await attach(conn, channel, callback)
+        attached.append((conn, channel, callback))
+
+    monkeypatch.setattr(asyncpg.connection.Connection, "add_listener", kept)
+    seen: list[int] = []
+    resumed = asyncio.Event()
+
+    async def on_event(scope: str, thread_id: str, seq: int, epoch: int) -> None:
+        seen.append(seq)
+
+    async def on_signal(scope: str, thread_id: str, payload: dict[str, Any]) -> None:
+        return None
+
+    async def on_resume() -> None:
+        resumed.set()
+
+    stop = await storage.listen(on_event, on_signal, on_resume)
+    assert len(attached) == 2
+    return attached, seen, resumed, stop
+
+
+async def test_a_listener_that_stops_hearing_its_own_probe_listens_again(
+    storage: PostgresStorage, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    attached, seen, resumed, stop = await probed(storage, monkeypatch)
+    _, signals = await storage._channels()
+    probes: list[str] = []
+    raw = await asyncpg.connect(URL, timeout=5)
+    try:
+        with caplog.at_level(logging.WARNING):
+            for conn, channel, callback in list(attached):
+                await conn.remove_listener(channel, callback)
+            await asyncio.wait_for(resumed.wait(), 2.0)
+            await raw.add_listener(signals, lambda *notice: probes.append(notice[3]))
+            await storage.hint("acme", "t1", 2, await epoch(storage, "acme", "t1"))
+            await until(lambda: seen == [2])
+            await until(lambda: len(probes) >= 3)
+        missed = "postgres: the listener missed its own probe; listening again"
+        assert caplog.text.count(missed) == 1
     finally:
         await stop()
+        await raw.close()
+
+
+async def test_a_probe_that_cannot_be_sent_is_not_a_miss(
+    pool: Any, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    monkeypatch.setattr(postgres, "PROBE", 0.2)
+    refusing = Refusing(pool)
+    storage = PostgresStorage(refusing)
+    _, signals = await storage._channels()
+    probes: list[str] = []
+    resumed = asyncio.Event()
+
+    async def on_event(scope: str, thread_id: str, seq: int, epoch: int) -> None:
+        return None
+
+    async def on_signal(scope: str, thread_id: str, payload: dict[str, Any]) -> None:
+        return None
+
+    async def on_resume() -> None:
+        resumed.set()
+
+    raw = await asyncpg.connect(URL, timeout=5)
+    stop = await storage.listen(on_event, on_signal, on_resume)
+    try:
+        with caplog.at_level(logging.WARNING):
+            refusing.refuse = True
+            await raw.add_listener(signals, lambda *notice: probes.append(notice[3]))
+            await until(lambda: not refusing.refuse)
+            await until(lambda: len(probes) >= 2)
+        assert (
+            "postgres: the listener's probe was not sent: "
+            "postgres: storage rejected publish: the pool is closed"
+        ) in caplog.text
+        assert "missed its own probe" not in caplog.text and not resumed.is_set()
+    finally:
+        await stop()
+        await raw.close()
+
+
+async def test_a_listener_whose_connection_stops_answering_is_replaced_without_waiting_on_it(
+    storage: PostgresStorage, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    attached, seen, resumed, stop = await probed(storage, monkeypatch)
+    conn = attached[0][0]
+    try:
+        conn._transport.pause_reading()
+        await asyncio.wait_for(resumed.wait(), 2.0)
+        assert conn.is_closed()
+        await storage.hint("acme", "t1", 2, await epoch(storage, "acme", "t1"))
+        await until(lambda: seen == [2])
+    finally:
+        if not conn.is_closed():
+            conn.terminate()
+        await stop()
+
+
+async def test_a_stop_on_a_half_open_listener_returns_within_its_bound(
+    storage: PostgresStorage, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(postgres, "NOTIFY_TIMEOUT", 0.3)
+    attached, _, _, stop = await probed(storage, monkeypatch, period=30.0)
+    conn = attached[0][0]
+    try:
+        conn._transport.pause_reading()
+        await asyncio.wait_for(stop(), 20 * 0.3)
+        assert conn.is_closed()
+    finally:
+        if not conn.is_closed():
+            conn.terminate()
+
+
+async def test_a_stop_cancelled_while_it_gives_the_connection_back_leaves_none_checked_out(
+    pool: Any, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    own = await open_pool()
+    attached, _, _, stop = await probed(PostgresStorage(own), monkeypatch, period=30.0)
+    conn = attached[0][0]
+    releasing = asyncio.Event()
+    remove = asyncpg.connection.Connection.remove_listener
+
+    async def removing(connection: Any, channel: str, callback: Any) -> None:
+        releasing.set()
+        await remove(connection, channel, callback)
+
+    monkeypatch.setattr(asyncpg.connection.Connection, "remove_listener", removing)
+    try:
+        conn._transport.pause_reading()
+        stopping = asyncio.ensure_future(stop())
+        await asyncio.wait_for(releasing.wait(), 2.0)
+        stopping.cancel()
+        with contextlib.suppress(asyncio.CancelledError):
+            await stopping
+        await asyncio.wait_for(own.close(), 5.0)
+        assert conn.is_closed()
+    finally:
+        if not conn.is_closed():
+            conn.terminate()
+        own.terminate()
+
+
+async def test_a_listener_that_cannot_attach_leaves_no_termination_callback_behind(
+    storage: PostgresStorage, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    added_to: list[Any] = []
+    removed_from: list[Any] = []
+    add = asyncpg.connection.Connection.add_termination_listener
+    remove = asyncpg.connection.Connection.remove_termination_listener
+
+    def adding(conn: Any, callback: Any) -> None:
+        added_to.append(conn)
+        add(conn, callback)
+
+    def removing(conn: Any, callback: Any) -> None:
+        removed_from.append(conn)
+        remove(conn, callback)
+
+    async def refused(conn: Any, channel: str, callback: Any) -> None:
+        raise OSError("the connection was reset")
+
+    monkeypatch.setattr(asyncpg.connection.Connection, "add_termination_listener", adding)
+    monkeypatch.setattr(asyncpg.connection.Connection, "remove_termination_listener", removing)
+    monkeypatch.setattr(asyncpg.connection.Connection, "add_listener", refused)
+
+    async def on_event(scope: str, thread_id: str, seq: int, epoch: int) -> None:
+        return None
+
+    async def on_signal(scope: str, thread_id: str, payload: dict[str, Any]) -> None:
+        return None
+
+    with pytest.raises(StorageError, match="^postgres: storage rejected listen: the connection"):
+        await storage.listen(on_event, on_signal)
+    assert added_to and removed_from == added_to
+
+
+async def test_probes_reach_no_callback(
+    storage: PostgresStorage, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    monkeypatch.setattr(postgres, "PROBE", 0.2)
+    _, signals = await storage._channels()
+    probes: list[str] = []
+
+    def probe(_conn: Any, _pid: int, _channel: str, text: str) -> None:
+        if "probe" in json.loads(text):
+            probes.append(text)
+
+    heard: dict[str, list[dict[str, Any]]] = {"near": [], "far": []}
+
+    def listener(name: str) -> Any:
+        async def on_signal(scope: str, thread_id: str, payload: dict[str, Any]) -> None:
+            heard[name].append(payload)
+
+        return on_signal
+
+    async def on_event(scope: str, thread_id: str, seq: int, epoch: int) -> None:
+        return None
+
+    raw = await asyncpg.connect(URL, timeout=5)
+    far_pool = await open_pool()
+    stops: list[Callable[[], Awaitable[None]]] = []
+    try:
+        await raw.add_listener(signals, probe)
+        with caplog.at_level(logging.WARNING):
+            for name, store in (("near", storage), ("far", PostgresStorage(far_pool))):
+                stops.append(await store.listen(on_event, listener(name)))
+            await until(lambda: len(probes) >= 4)
+            await storage.publish("acme", "t1", {"kind": "idle"})
+            await until(lambda: bool(heard["near"] and heard["far"]))
+        assert heard == {"near": [{"kind": "idle"}], "far": [{"kind": "idle"}]}
+        assert [r.getMessage() for r in caplog.records if r.levelno >= logging.ERROR] == []
+    finally:
+        for stop in stops:
+            await stop()
+        await raw.close()
+        await asyncio.wait_for(far_pool.close(), 5)
 
 
 async def test_signals_and_events_cross_again_after_the_listeners_drop(
@@ -690,7 +1122,7 @@ async def test_deployments_in_different_schemas_do_not_hear_each_other(
 
             return on_signal
 
-        async def on_event(scope: str, thread_id: str, seq: int) -> None:
+        async def on_event(scope: str, thread_id: str, seq: int, epoch: int) -> None:
             events.append(seq)
 
         for name, store in (("near", storage), ("sibling", sibling), ("foreign", foreign)):

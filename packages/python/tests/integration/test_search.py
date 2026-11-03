@@ -9,6 +9,7 @@ import asyncpg
 import pytest
 from database import URL, Schemas, admin, quoted
 from unit.factories import ANA, AT, BRUNO, added, updated
+from unit.writes import admit, append, revise
 
 from rfnry_thread import migrations
 from rfnry_thread.errors import ConfigurationError, InputError, StorageError
@@ -45,13 +46,14 @@ async def room(
         ),
     )
     for identity in members:
-        await storage.add_member("acme", added(thread_id, identity))
+        await admit(storage, "acme", added(thread_id, identity))
 
 
 async def say(
     storage: PostgresStorage, thread_id: str, text: str, minutes: int = 0, author: Any = ANA
 ) -> Message:
-    stored, _ = await storage.append_event(
+    stored, _ = await append(
+        storage,
         "acme",
         Message(
             id=f"{thread_id}-{text}",
@@ -68,7 +70,8 @@ async def say(
 
 async def change(storage: PostgresStorage, kind: Any, target: Message, text: str = "") -> None:
     fields: dict[str, Any] = {"content": [Text(text=text)]} if kind is Edit else {}
-    await storage.append_event(
+    await append(
+        storage,
         "acme",
         kind(
             id=f"{kind.__name__}-{target.id}-{text}",
@@ -139,7 +142,7 @@ async def test_the_index_follows_a_threads_metadata_as_it_is_made_and_changed(
     _, storage, pool = await made(schemas)
     await room(storage, "t1", {"title": "Pump order", "tags": ["urgent"]})
     assert await listed(storage, "pump") == ["t1"]
-    await storage.update_thread("acme", updated("t1", {"title": "Valve order"}))
+    await revise(storage, "acme", updated("t1", {"title": "Valve order"}))
     assert await listed(storage, "pump") == []
     assert await listed(storage, "urgent") == []
     assert await listed(storage, "valve") == ["t1"]
@@ -278,7 +281,7 @@ async def test_a_since_added_member_finds_only_what_it_may_read(schemas: Schemas
     _, storage, _ = await made(schemas)
     await room(storage, "t1", {"title": "Hiring plans"}, history="since_added")
     await say(storage, "t1", "before the add, secret")
-    await storage.add_member("acme", added("t1", BRUNO))
+    await admit(storage, "acme", added("t1", BRUNO))
     after = await say(storage, "t1", "after the add, open")
     for word, ana, bruno in (
         ("secret", ["t1"], []),
@@ -287,7 +290,7 @@ async def test_a_since_added_member_finds_only_what_it_may_read(schemas: Schemas
     ):
         assert [t.id for t in await storage.list_threads("acme", "ana", query=word)] == ana
         assert [t.id for t in await storage.list_threads("acme", "bruno", query=word)] == bruno
-    _, floor = await storage.head("acme", "t1", "bruno") or (0, 0)
+    _, floor, _ = await storage.head("acme", "t1", "bruno") or (0, 0, 0)
     found = await storage.search("acme", "t1", "the add", floor=floor)
     assert [m.id for m in found] == [after.id]
 
@@ -509,7 +512,7 @@ async def test_thread_texts_takes_the_owner_and_grants_thread_events_has(schemas
                 await room(storage, f"t-{role}", {"title": "Pumps"})
                 sent = await say(storage, f"t-{role}", "a pump leaks")
                 await change(storage, Edit, sent, "a pump leaks oil")
-                await storage.update_thread("acme", updated(f"t-{role}", {"title": "Valves"}))
+                await revise(storage, "acme", updated(f"t-{role}", {"title": "Valves"}))
                 found = await storage.search("acme", f"t-{role}", "oil")
                 assert [m.id for m in found] == [sent.id]
                 assert await storage.delete_thread("acme", f"t-{role}")

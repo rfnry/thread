@@ -31,7 +31,7 @@ from rfnry_thread.models import (
 from rfnry_thread.postgres import PostgresStorage
 from rfnry_thread.server import Server
 
-from .factories import AT, BRUNO
+from .factories import BRUNO
 from .test_client import drain, said, widen_arrival
 
 ANA_HEADERS = {"Authorization": "Bearer ana"}
@@ -642,7 +642,7 @@ async def test_a_rejoin_into_a_thread_made_again_announces_the_join_then_its_eve
     await bruno.send("t1", "first")
     await drain(ana)
     ana._cursors["t1"] = 40
-    ana._made["t1"] = AT
+    ana._epochs["t1"] = 0
     await widen_arrival(live.server, "ana", bruno, "raced")
     await drop_and_reopen(live, ana)
     await bruno.send("t1", "after")
@@ -664,7 +664,7 @@ async def test_a_refollow_into_threads_made_again_announces_each_join_then_its_e
     await ana.follow()
     await drain(ana)
     ana._cursors.update({"t1": 40, "t2": 40})
-    ana._made.update({"t1": AT, "t2": AT})
+    ana._epochs.update({"t1": 0, "t2": 0})
     enter = live.server._hub._enter
 
     async def slow(session: Any, thread: Any, *args: Any) -> Any:
@@ -782,8 +782,8 @@ async def test_a_followed_thread_left_stays_left_after_a_drop_until_joined_or_fo
     ana._request = record  # type: ignore[method-assign]
     await drop_and_reopen(live, ana)
     assert [m for m, _ in sent] == ["thread.follow"]
-    made = (await bruno.get_thread("t1")).created_at
-    assert sent[0][1]["left"] == {"t1": {"seq": 2, "created_at": made}}
+    made = (await bruno.get_thread("t1")).epoch
+    assert sent[0][1]["left"] == {"t1": {"seq": 2, "epoch": made}}
     await bruno.send("t1", "after the drop")
     await bruno.send("t2", "elsewhere")
     items = await drain(ana)
@@ -903,23 +903,27 @@ async def test_leaving_a_thread_twice_keeps_it_left_after_a_drop(live: Live) -> 
     assert [j.thread.id for j in items if isinstance(j, Joined)] == ["t2"]
 
 
-async def test_a_leave_made_while_the_refollow_is_in_flight_holds(live: Live) -> None:
+async def test_a_leave_made_while_the_refollow_is_in_flight_is_sent_once_it_is_answered(
+    live: Live,
+) -> None:
     ana, bruno, _ = await followed_and_left(live)
     request = ana._request
+    leaves: list[asyncio.Task[None]] = []
 
     async def leave_meanwhile(method: str, payload: dict[str, Any]) -> dict[str, Any]:
         if method == "thread.follow":
-            await ana.leave("t1")
+            leaves.append(asyncio.ensure_future(ana.leave("t1")))
         return await request(method, payload)
 
     ana._request = leave_meanwhile  # type: ignore[method-assign]
     await drop_and_reopen(live, ana)
+    await asyncio.gather(*leaves)
     ana._request = request  # type: ignore[method-assign]
     await bruno.send("t1", "left")
     await bruno.send("t2", "followed")
     items = await drain(ana)
     assert [first_text(m) for m in items if isinstance(m, Message)] == ["followed"]
-    assert [j.thread.id for j in items if isinstance(j, Joined)] == ["t2"]
+    assert sorted(j.thread.id for j in items if isinstance(j, Joined)) == ["t1", "t2"]
     await drop_and_reopen(live, ana)
     await bruno.send("t1", "still left")
     assert [first_text(m) for m in await drain(ana) if isinstance(m, Message)] == []

@@ -96,6 +96,7 @@ class Thread(BaseModel):
     scope: str
     metadata: dict[str, Any] = {}
     created_at: datetime
+    epoch: int = 0
     history: History = "all"
     last_seq: int | None = None
     last_message_at: datetime | None = None

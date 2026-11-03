@@ -92,14 +92,14 @@ class _Update(_Ref):
 
 class _Join(_Ref):
     since: Seq | None = None
-    created_at: datetime | None = None
+    epoch: Seq | None = None
     resume: bool = False
     away: bool = False
 
 
 class _Position(_Args):
     seq: Seq
-    created_at: datetime | None = None
+    epoch: Seq | None = None
 
 
 class _Follow(_Args):
@@ -108,8 +108,8 @@ class _Follow(_Args):
     left: dict[str, _Position] | None = None
 
 
-def _positions(found: dict[str, _Position] | None) -> dict[str, tuple[int, datetime | None]] | None:
-    return None if found is None else {t: (p.seq, p.created_at) for t, p in found.items()}
+def _positions(found: dict[str, _Position] | None) -> dict[str, tuple[int, int | None]] | None:
+    return None if found is None else {t: (p.seq, p.epoch) for t, p in found.items()}
 
 
 class _History(_Ref):
@@ -367,7 +367,7 @@ class Server:
             join = _args(_Join, method, payload)
             return _dump(
                 await verbs.join(
-                    session, join.thread_id, join.since, join.resume, join.away, join.created_at
+                    session, join.thread_id, join.since, join.resume, join.away, join.epoch
                 )
             )
         if method == "thread.follow":
@@ -446,14 +446,14 @@ class Server:
     async def start(self) -> None:
         if self._stop is not None:
             return
-        doubted = self._hub.doubt()
         self._stop = await self._storage.listen(
             self._hub.on_event, self._hub.on_signal, self._hub.on_resume
         )
         self._hub.linked = True
         self._refresher = asyncio.get_running_loop().create_task(self._refresh())
-        if doubted:
-            await self._hub.resync()
+        await self._hub.catch_up()
+        await self._hub.announce()
+        self._hub.request_announce()
 
     async def stop(self) -> None:
         if self._refresher is not None:
@@ -461,20 +461,30 @@ class Server:
             with contextlib.suppress(asyncio.CancelledError):
                 await self._refresher
             self._refresher = None
-        if self._stop is not None:
-            try:
-                await self._hub.unlink()
-            finally:
+        try:
+            self._hub.unlink()
+            await self._hub.drain()
+        finally:
+            if self._stop is not None:
                 await self._stop()
                 self._stop = None
-                await self._hub.sweep(forget=True)
+                self._hub.sweep(forget=True)
 
     async def _refresh(self) -> None:
         while True:
             await asyncio.sleep(REFRESH)
-            await self._hub.recheck()
-            await self._hub.announce()
-            await self._hub.sweep()
+            try:
+                await self._tick()
+            except Exception as error:
+                logger.warning("server: a refresh pass failed: %s", error)
+
+    async def _tick(self) -> None:
+        try:
+            await asyncio.wait_for(self._hub.catch_up(), REFRESH)
+        except TimeoutError:
+            logger.warning("server: a catch-up pass took longer than %g s and was stopped", REFRESH)
+        await self._hub.announce()
+        self._hub.sweep()
 
     async def create_thread(
         self,

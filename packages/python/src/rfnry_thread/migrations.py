@@ -70,10 +70,14 @@ _HISTORY = (
 _KINDS = ("CREATE INDEX ix_thread_events_kind ON thread_events (scope, thread_id, kind, seq)",)
 
 
+_EPOCH = ("ALTER TABLE thread_threads ADD COLUMN epoch BIGINT GENERATED ALWAYS AS IDENTITY",)
+
+
 MIGRATIONS = [
     Migration(1, "create", _CREATE),
     Migration(2, "history", _HISTORY),
     Migration(3, "kinds", _KINDS),
+    Migration(4, "epoch", _EPOCH),
 ]
 
 
@@ -84,6 +88,12 @@ LOCK = "SELECT pg_advisory_xact_lock(hashtextextended('thread.migrate:' || curre
 
 
 DEFAULT = "thread"
+
+
+QUEUE_FULL = 0.5
+
+
+_USAGE = "SELECT pg_notification_queue_usage()"
 
 
 _INITIALIZED = ("thread_events", "thread_marks", "thread_members", "thread_threads")
@@ -401,6 +411,16 @@ async def problems(conn: Any) -> list[str]:
             f"search is half set up in {schema} — run rfnry-thread set --search --schema {schema}"
         ]
     return []
+
+
+async def queue(conn: Any) -> list[str]:
+    usage = float(await conn.fetchval(_USAGE))
+    if usage < QUEUE_FULL:
+        return []
+    return [
+        f"the notification queue is {usage:.0%} full — a session that LISTENs is not reading "
+        "or a long transaction holds the queue"
+    ]
 
 
 async def _behind(conn: Any, schema: str) -> str | None:

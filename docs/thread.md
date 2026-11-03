@@ -112,7 +112,7 @@ A **signal** is ephemeral. Every signal carries `thread_id` and `sender`, stampe
 | `Marked` | `seq`, `unread` | your read position in the thread moved; only your other connections hear it |
 | `ThreadDeleted` | — | the thread is gone |
 
-`Signal` is any of them. `Thread` (`id`, `scope`, `metadata`, `created_at`) and `Member`
+`Signal` is any of them. `Thread` (`id`, `scope`, `metadata`, `created_at`, `epoch`) and `Member`
 (`thread_id`, `identity`, `added_at`, `added_by`) complete the shapes.
 
 ## Getting started
@@ -261,8 +261,15 @@ Without `since`, a join is live from now. With `since`, the events after that `s
 `since=0` for the whole log — then what is happening right now, then live traffic. A join replays
 at most 500 events (`Server(replay_limit=)`); beyond that you get the latest 500 and
 `truncated=True`, and `history(thread.id, before=seq)` pages back when you want more. A `since`
-past the thread's last `seq` — it was deleted and made again under the same id — replays nothing
-and says `truncated=True` too, and the client follows the thread from `joined.seq`.
+past the thread's last `seq` — it was deleted and made again under the same id, which gives it a new
+`epoch` — replays nothing and says `truncated=True` too, and the client follows the thread from `joined.seq`.
+What arrives for a thread before its join is answered is handed over with the answer, in `seq` order
+and each event once, and a second join of the same thread waits for that answer; a join that fails
+still hands over what a thread this connection already receives said meanwhile. A thread deleted
+meanwhile hands over what it said before its `ThreadDeleted`. One made again before the server read
+the join is joined as the new thread like any other; one made again while the server was handling
+the join is answered as the new thread with `truncated=True` when the connection
+follows and was handed it, and refused with `NotFoundError` when it does not follow.
 
 A participant that follows never needs this: a thread it is added to arrives on its own
 ([Following and catching up](#following-and-catching-up)).
@@ -378,7 +385,8 @@ exception inside the block, or a finishing message the server refuses, abandons 
 `StreamEnd` with no message before it means the stream was abandoned — unless the sender's socket
 dropped: its stream ends then, and the finishing message, whose `client_id` is the stream's id, may
 still follow. A delta may arrive in several pieces that share its `index`: `index` orders a piece
-and never identifies it. Only text streams; media arrives in the message.
+and never identifies it. On another replica a preview that misses a piece stops growing until its
+message arrives. Only text streams; media arrives in the message.
 
 ### Steps
 
@@ -450,9 +458,10 @@ drops the socket at once is redialled at once the first time and after a growing
 after, while a long-lived connection that drops is redialled at once; a following client follows again from the last `seq` it saw in each
 thread, and every client re-joins every thread it had joined from there; the missed events arrive
 before anything new. A re-join refused because the thread is gone or no longer yours (`NotFoundError`,
-`ForbiddenError`) forgets that thread, and a re-follow refused so joins each thread instead, the
+`ForbiddenError`) forgets that thread, as does a re-follow that no longer hands back a thread only
+followed, so the thread arrives whole if it is made again; a re-follow refused so joins each thread instead, the
 client no longer following until you call `follow()` again. A re-join or re-follow refused as a
-wrong request (`InputError`, `ConfigurationError`), as a server of another release refuses it, stops
+wrong request (`InputError`, `ConfigurationError`) stops
 the client with that error, as a refused hello does. Any other refusal, a storage failure or an
 `authorize` that raised among them, holds no other thread back: the client keeps that thread's
 cursor, re-joins the rest, and tries it again on the same connection with the same backoff until it
@@ -461,10 +470,14 @@ Until then nothing of that thread reaches the client, though writes to it still 
 `Joined` arrives once it is joined again. While the follow is tried again, a thread you are added
 to arrives as `Invited`, and as `Joined` once the follow is taken.
 A re-follow's or re-join's `Joined`
-also arrives in `events()`, and when it says `truncated`, redraw from the latest page. Each position
-a re-join or re-follow resumes from carries the `created_at` of the thread it was read in, so a
+also arrives in `events()`, after the events it caught up on, and when it says `truncated`, redraw
+from the latest page. Each position
+a re-join or re-follow resumes from carries the `epoch` of the thread it was read in, the number
+Postgres gave the thread when it was made, so a
 thread deleted and made again under the same id while the client was away arrives from its start
-(from your add in a `since_added` thread), at most the replay limit of it, with `truncated=True`. A reconnect
+(from your add in a `since_added` thread), at most the replay limit of it, with `truncated=True`:
+that `Joined` comes first, the new thread's events follow it in `seq` order, and nothing of the old
+thread arrives as the new one's. A reconnect
 your endpoint refuses (HTTP 401 or 403 on the upgrade, or 1008 before the hello is answered), or
 whose `headers` function raises `ForbiddenError`, stops the client, and `events()` raises that
 error; an error from `headers` that is not the library's is a failed attempt, retried with backoff
@@ -477,7 +490,7 @@ even while a thread or the follow is still being tried again; `"closed"` once it
 or a refused reconnect — an expired session, a hello the server answers with an error such as
 another protocol version, or a re-join or re-follow refused as a wrong request. A push the client cannot
 read, one with a name it does not know included, is skipped, not fatal. A client needs a server of its own
-release: a 0.1.5 client needs a 0.1.5 server. Each change arrives in
+release: a 0.1.6 client needs a 0.1.6 server, and every replica of one database is of one release. Each change arrives in
 `events()` as a `StatusChanged` — `"open"` after the `Joined` of the re-follow and the re-joins it took — the one
 item that names no thread. It is how a person's page says it
 is reconnecting.
@@ -542,49 +555,74 @@ await server.start()
 await server.stop()
 ```
 
-An event is stored and announced in one transaction; every replica with a connection in that
-thread reads it by `seq`. Signals are delivered on the sender's replica and mirrored to the others.
-Each replica keeps who is present, working and streaming, and repeats its own every ten seconds;
-what a repeat changes — a signal another replica missed — is told to that replica's connections. A
-missed event announcement costs latency, never an event: resume reads from storage.
+An event is stored, handed to the connections of the replica that stored it, and then hinted to the
+others once its write has committed; every replica with a connection in that thread reads it from
+storage by `seq`. The hint stays out of the write, so a write never holds Postgres's notification
+lock through its commit and never fails because the notification queue is full: a hint that cannot
+be sent is logged, the write stands, and the others catch the thread up at their next tick. No write
+and no request waits on a notice: hints, mirrored signals, invitations, marks and deletions are
+queued to go out, and the caller is answered at once. Each replica sends its hints and mirrored
+signals in groups, one transaction per group, in the order it sent them: at rest each goes out at
+once, and under load the groups grow. A group not sent within ten seconds fails, and the next one
+goes out. Signals are delivered on the sender's replica and mirrored to the others. Each replica
+keeps who is present, working and streaming, and every ten seconds sends the others a snapshot of
+its own, whole, for each thread and its epoch: a newer snapshot replaces what they held from that
+replica, anything older than what they hold is dropped, and what the replacement changes — a signal
+they missed — is told to their connections. A stream a replica never heard start begins there with
+the next snapshot, without the text written before it. A preview there that misses a piece stays as
+it was until the finishing message settles the text. A replica that starts, or listens again, asks
+the others to send theirs at once. A missed hint costs latency, never an event: resume reads from
+storage.
 
-A replica whose `LISTEN` connection drops takes another with jittered backoff and listens again.
-It may have missed notices meanwhile, so every thread its connections have open is checked against
-storage before anything more reaches them: the first event, signal or write for a thread checks
-it, and the rest are checked one at a time. A connection in a thread that was deleted, or deleted
-and made again under the same id, is sent `ThreadDeleted` and leaves it; the others are sent the
-events they missed, so a member removed meanwhile receives its `MemberRemoved` and leaves. A thread
-whose check fails tells its connections nothing, takes no new one — a join or follow that reaches
-it fails as a storage failure does, and a follower added to it is not handed it until it follows
-again — and its replica repeats nothing of it, until a check succeeds; it is tried again with
-whatever next reaches the thread and every ten seconds, and then its connections are told what
-changed meanwhile: who arrived or left, who started or stopped
-working, which streams started or ended, and the text written since. Then the replica repeats its
-own state, so the others rebuild it. A write, a join or an invitation for a thread made again
-under the same id checks it the same way first, on every replica, even one whose `LISTEN` never
-dropped; otherwise such a replica reads nothing more. A `thread.deleted` or `scope.deleted` notice
-the deleting replica failed to send is not sent again: the others' connections stay in those rooms
-until they reconnect or the thread is checked, and until then the events of a thread made again
-under that id can reach them. A replica that misses an `invited` notice, a thread made again while
-it was not listening among them, gives no `Invited`, and a follower no `Joined`, until the
-connection follows again. `start()` holds one connection from the pool for `LISTEN`; `stop()`
-gives it back. A replica started with connections already open, again after `stop()` or for the
-first time after it began serving, has heard nothing meanwhile and checks their threads the same way
-before `start()` returns.
+A notice about a thread carries its epoch, and every replica catches each thread its connections
+have open up from storage: on a notice for it, and in a pass over all of them, in one read, every
+ten seconds, on `start()` and whenever it listens again. Catching up reads the thread's row and the
+events past each connection's position in one snapshot. A missing row or another epoch is a thread
+deleted, or deleted and made again under the same id: its connections are sent `ThreadDeleted` and
+leave it, and nothing of the new thread reaches them — a signal from a newer epoch first catches
+their room up, and one from an older epoch is dropped. Otherwise they are sent what they missed, and
+a member removed meanwhile receives its `MemberRemoved` and leaves. A lost notice costs at most ten
+seconds, never an event; the `thread.deleted` and `scope.deleted` notices only act sooner. A read
+that fails is tried again by whatever next reaches the thread. Every pass — the ten-second one, the
+one on `start()` and the one after listening again — leaves a thread still busy with a catch-up, a
+join or a write to that work, whose traffic or the next pass catches it up; a pass still running
+after ten seconds is stopped and started over at the next, and a pass that fails is logged and the
+next one runs. Give the pool a `command_timeout`, so a read the database never answers ends. A
+replica that misses an `invited` notice gives no `Invited`, and a follower no `Joined`, until the
+connection follows again.
+
+The tick's one read took 1.1 ms in the database for 1,000 threads open on a replica and 10.9 ms for
+10,000 (Postgres 18, median of five). On Postgres 18 on one machine, a write that sends a `NOTIFY` in
+its transaction topped out near 900 per second from 8 clients up, against about 3,800 without one.
+thread's writes send none, and its notices go out in groups after the commit.
+
+`start()` holds one connection from the pool for `LISTEN`; `stop()` gives it back, or closes it when
+it does not answer within ten seconds. That connection can drop, or stay open and stop delivering,
+so every ten seconds the replica sends itself a notice through another connection of the pool and
+listens for it on this one; no handler sees it. When one has not come back by the next, it logs
+`postgres: the listener missed its own probe; listening again` and closes the connection. After that
+or a drop it takes another with jittered backoff, passes on what it hears there as it arrives, then
+catches its threads up and sends its own snapshots: a notice heard before that pass is checked
+against the epoch like any other, and the pass brings what was missed meanwhile. `LISTEN` needs a
+session connection: a pool behind PgBouncer's transaction pooling never hears its probe, so it keeps
+logging that warning.
 
 A replica that goes away ends, for the others' connections, what its own had announced, as if they
 had dropped: `StreamEnd` for each open stream, `Idle` for the work, and `Left` for each identity no
-connection on any replica still holds in that thread. `stop()` sends these before it unlinks, so the
-others hear them at once, and ends the others' state for its own connections, since it no longer
-follows it. A replica the others stop hearing — it crashed, or the link to it was down — is
-forgotten within thirty seconds, and its ends reach their connections within ten more. When they
-hear from it again, what it still holds is announced again with `Present`, `Working` and
-`StreamStart`, and each end it sends afterwards arrives once.
+connection on any replica still holds in that thread. `stop()` sends an empty snapshot for each
+thread it holds before it unlinks, so the others hear these at once, and ends the others' state for
+its own connections, since it no longer follows it. A replica also sends one when its state in a
+thread becomes empty, and when the thread is deleted. When the others stop hearing a replica — it
+crashed, or the link to it was down — what it held expires as a whole after thirty seconds, and its
+ends reach their connections within ten more. When they hear from it again, its next snapshot
+announces what it still holds with `Present`, `Working` and `StreamStart`, and each end it sends
+afterwards arrives once.
 
 Notices are not signed: every database role that can connect hears every scope's notices — the live
 traffic of all tenants — and can send them. Give the database only to roles trusted with every
-tenant. The server checks what it can: an `invited` notice is acted on only for a current member;
-`thread.deleted` and `scope.deleted` notices are not checked.
+tenant. The server checks what it can: an `invited` notice is acted on only for a current member of
+the epoch it names, a `thread.deleted` notice only for its epoch, and a `scope.deleted` notice only
+makes a replica catch that scope's threads up from storage.
 
 #### One handler per thread
 
@@ -917,7 +955,11 @@ server = Server(storage)
 version and the command that fixes it: no thread schema on the pool's `search_path`, a schema behind
 or ahead of this version, tables an earlier version's `initialize()` made, or a schema or tables the
 pool's role cannot use. When the pool's first schema is another library's, it points at thread's own
-schema instead of offering that one.
+schema instead of offering that one. `rfnry-thread check` also reports Postgres' notification queue
+half full or more — a session that `LISTEN`s is not reading, or a long transaction holds the queue,
+and once it is full no replica's notice goes out. `check()` leaves the queue out: it is an alarm
+for the operator, and replicas that refused to start over it would crash-loop through the incident
+that filled it.
 
 A version of thread that changes its tables ships a migration, and the schema follows it in place,
 its data kept:
@@ -925,7 +967,7 @@ its data kept:
 ```sh
 rfnry-thread upgrade --schema thread --sql    # what would run
 rfnry-thread upgrade --schema thread          # lists the steps, asks, runs them in one transaction
-rfnry-thread check --schema thread            # exits 0 when the schema fits this version
+rfnry-thread check --schema thread            # exits 0 when the schema fits and the queue is not half full
 ```
 
 Take a snapshot and stop the app instances running the old version first: `upgrade` reminds you,
@@ -977,8 +1019,13 @@ row. The log is append-only: an event is never updated or deleted on its own, on
 or its scope. `create_thread` (with its creator), `add_member`, `remove_member` and `update_thread`
 take the event they log and write the row and the event in one transaction: a storage of your own
 must do the same, and its signatures changed from the earlier releases (a breaking change for it).
-Code that goes through `Server` is unaffected; code that calls `PostgresStorage` directly is
-affected by the new signatures and by `append_event` refusing an author who is not a member.
+It implements `hint` too, which the server calls once a write has committed, and its writes announce
+nothing themselves. The server never waits for one notice before it sends the next, so `hint` and
+`publish` must take their place in the storage's order at the moment they are called, before they
+first wait, as `PostgresStorage`'s do: otherwise a deletion's notice can reach the other replicas
+after the refresh that follows it. Code that goes through `Server` is unaffected; code that calls
+`PostgresStorage` directly is affected by the new signatures, by `append_event` refusing an author
+who is not a member, and by its writes no longer telling the other replicas: `hint` does.
 
 ## Tenancy
 
@@ -995,9 +1042,8 @@ assert await server.verify_absent("acme")
 Connections still open in the scope, on every replica, are sent `ThreadDeleted` for each thread they
 joined or followed and leave it, and the scope's presence, work and streams are forgotten. A thread
 made again under the same id reaches them as new: `Invited`, or `Joined` for a follower. A replica
-whose `LISTEN` was down when the notice went out does this when it listens again, and gives no
-`Invited`, and a follower no `Joined`, for a thread made again while it was not listening until the
-connection follows again.
+that misses the notice does this within ten seconds, and gives no `Invited`, and a follower no
+`Joined`, for a thread whose `invited` notice it also missed until the connection follows again.
 
 ## At a glance
 
@@ -1051,4 +1097,4 @@ module that raised it, then says what went wrong in lowercase: `server: thread '
 found`, `server: 'bruno' is not a member of thread 'support-ana'`, `server: inline media is 300000
 bytes; the cap is 262144 — upload it and send a url`. The library logs only warnings, for what no
 caller is there to receive: an unexpected failure inside `serve`, a failure between replicas —
-mirroring to them or handling their notices — and a signal too large to mirror.
+hinting or mirroring to them, or handling their notices — and a signal too large to mirror.

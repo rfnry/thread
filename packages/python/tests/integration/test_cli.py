@@ -184,6 +184,28 @@ async def test_check_names_what_does_not_fit(
     )
 
 
+FULL = (
+    "the notification queue is {}% full — a session that LISTENs is not reading "
+    "or a long transaction holds the queue"
+)
+
+
+async def test_check_reports_a_notification_queue_half_full(
+    schemas: Schemas, capsys: pytest.CaptureFixture[str], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    name = schemas.name()
+    assert await run("create", "--schema", name) == 0
+    capsys.readouterr()
+    storage = PostgresStorage(await schemas.pool(name))
+    for usage, shown in ((0.5, 50), (1.0, 100)):
+        monkeypatch.setattr(migrations, "_USAGE", f"SELECT {usage}::float8")
+        assert await run("check", "--schema", name) == 1
+        assert capsys.readouterr().err == f"cli: {FULL.format(shown)}\n"
+        await storage.check()
+    monkeypatch.setattr(migrations, "_USAGE", "SELECT 0.49::float8")
+    assert await run("check", "--schema", name) == 0
+
+
 async def test_a_connection_string_never_appears_in_what_the_command_prints(
     capsys: pytest.CaptureFixture[str],
 ) -> None:

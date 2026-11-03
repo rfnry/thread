@@ -106,7 +106,7 @@ async def _run(args: argparse.Namespace) -> int:
             )
             return 1
         if args.command == "check":
-            found = await migrations.problems(conn)
+            found = [*await migrations.problems(conn), *await migrations.queue(conn)]
             if found:
                 for problem in found:
                     print(f"cli: {problem}", file=sys.stderr)

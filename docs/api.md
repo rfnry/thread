@@ -160,12 +160,15 @@ does not fit or the scope is empty.
 async def start(self) -> None: ...
 ```
 
-Links this server to the other replicas on the same storage: it listens for their events and signals
-and repeats its own presence, working and streams every ten seconds. When its listener drops, it
-listens again, checks every thread its connections have open against storage before anything more
-reaches them, and repeats its own state; started with connections already open, after `stop()` or
-before a first `start()`, it does the same before it returns, since it heard nothing meanwhile.
-Calling it again does nothing. Raises `StorageError` when the storage cannot listen.
+Links this server to the other replicas on the same storage: it listens for their events and
+signals, mirrors its own signals to them, sends them a snapshot of its own presence, working and
+streams every ten seconds, and catches the threads its connections have open up from storage: each
+on a notice for it, and all of them in a pass every ten seconds, before it returns and whenever it
+listens again — after its listening connection drops or misses the notice it sends itself every ten
+seconds — then sends its snapshots and asks the others to send theirs at once. A pass skips a thread
+whose catch-up, join or write is under way, which that work or the next pass catches up. Every
+server hints the others of each event it stores, started or not. Calling it again does nothing.
+Raises `StorageError` when the storage cannot listen.
 
 ### `Server.stop`
 
@@ -173,10 +176,14 @@ Calling it again does nothing. Raises `StorageError` when the storage cannot lis
 async def stop(self) -> None: ...
 ```
 
-Sends the other replicas the end of what this server's connections announced — `StreamEnd`, `Idle`
-and `Left` — then stops listening to them, gives the listening connection back, and ends their state
-for this server's connections. Call it before the pool closes: ends it cannot send reach the others
-only when they forget this server, within forty seconds.
+Sends the other replicas an empty snapshot for each thread this server's connections hold, which
+ends what they announced — `StreamEnd`, `Idle` and `Left` — waits for every notice this server had
+still to send when it was called, hints of its last writes among them, then stops listening to them,
+gives the listening connection back, and ends their state for this server's connections. Each group
+of notices is bounded by ten seconds, and it waits for at most two: the one going out when it is
+called and the one holding what was queued behind it. Giving the connection back is bounded by ten
+seconds too: one that does not answer is closed. Call it before the pool closes: ends it cannot send
+reach the others only when they forget this server, within forty seconds.
 
 ### `Server.create_thread`
 
@@ -302,10 +309,10 @@ async def delete_scope(self, scope: str) -> int: ...
 Removes every thread, member and event of the scope, with search its `thread_texts`, and returns
 how many rows it removed. Connections still open in the scope, on every replica, are sent
 `ThreadDeleted` for each thread they joined or followed and leave it; a thread made again under the
-same id reaches them as new, with `Invited`, or `Joined` for a follower. A replica whose `LISTEN`
-was down when the notice went out sends the `ThreadDeleted` when it listens again, and hands a
-thread made again meanwhile to its connections when they follow again. Raises `InputError` when the
-scope is empty.
+same id reaches them as new, with `Invited`, or `Joined` for a follower. A replica that misses the
+notice sends the `ThreadDeleted` within ten seconds, and hands a thread made again meanwhile, whose
+`invited` notice it also missed, to its connections when they follow again. Raises `InputError` when
+the scope is empty.
 
 ### `Server.verify_absent`
 
@@ -459,10 +466,12 @@ events after the caller's mark arrive first instead, as `follow(resume=True)` ha
 thread alone is marked there), and the `Joined`'s `thread.marked` is that mark, from which
 `history(after=...)` reads a truncated gap. A thread the connection already receives, by following,
 keeps arriving live, and `since` or `resume` hands its events after that `seq` or the mark up to
-where the connection is, once; joins of it in flight at the same time each get their own. Raises
+where the connection is, once, the ones it already had among them. What arrives for the thread
+before the answer is handed over with it, in `seq` order, each event once, and a second join of the
+same thread is sent only once the first is answered. Raises
 `InputError` when `since` is negative or given with `resume`, `NotFoundError` when the scope holds
-no such thread or it is deleted, or the caller removed from it, before the join is answered, and
-`ForbiddenError` when the caller is not a member or `authorize` refuses `read`.
+no such thread, or it is deleted or the caller removed from it while the server handles the join,
+and `ForbiddenError` when the caller is not a member or `authorize` refuses `read`.
 
 ### `Client.leave`
 
@@ -473,7 +482,9 @@ async def leave(self, thread_id: str) -> None: ...
 Stops receiving the thread live; the caller's open streams and `Working` there end, and `Left` goes
 out when it was the identity's last connection in it. Leaving a thread not joined does nothing. A
 followed thread left stays left, across dropped sockets, until the caller joins it, follows again,
-is added to it again or the thread is deleted and made again.
+is added to it again or the thread is deleted and made again. A leave called while a join of the
+same thread is in flight is sent once every such join is answered: a reconnect does not join that
+thread again, and a follower keeps it left as above, from where it was when the leave went out.
 
 ### `Client.away`
 
@@ -484,7 +495,8 @@ async def away(self, thread_id: str) -> None: ...
 Ends the caller's presence in a thread it joined while the thread keeps arriving: `Left` goes out
 when it was the identity's last connection present there, and joining the thread again is presence
 again. Streams and `Working` are untouched. The thread stays away across dropped sockets. Away from
-a thread not joined, or already away, does nothing.
+a thread not joined, or already away, does nothing. An away called while a join of the same thread
+is in flight is sent once every such join is answered.
 
 ### `Client.follow`
 
@@ -1207,6 +1219,7 @@ class Thread(BaseModel):
     scope: str
     metadata: dict[str, Any] = {}
     created_at: datetime
+    epoch: int = 0
     history: History = "all"
     last_seq: int | None = None
     last_message_at: datetime | None = None
@@ -1216,7 +1229,8 @@ class Thread(BaseModel):
     match: Message | None = None
 ```
 
-A conversation: `id` yours or the server's, `scope` its tenant, `metadata` yours, `history` who
+A conversation: `id` yours or the server's, `scope` its tenant, `metadata` yours, `epoch` the number Postgres gave it when it was made (a thread deleted and made
+again under the same id gets a larger one; `0` until stored), `history` who
 reads what came before an add (`"all"`, or `"since_added"`: each member from its add). A listed
 thread also carries `last_seq` and `last_message_at` (when its latest message was written); listed
 for a member, `marked` (the member's private read position, `None` without one) and `unread`
@@ -1246,9 +1260,10 @@ class Joined(BaseModel):
     truncated: bool = False
 ```
 
-What a join returns: the thread, its last `seq` when the join happened, and whether the replay was
-cut short, `since` was past that `seq`, or the thread was made again since the position a re-join
-or re-follow resumed from.
+What a join returns: the thread, the last `seq` the connection had been handed when the join was
+answered, and whether the replay was cut short, `since` was past the thread's last `seq`, or the
+thread was made again since the position a re-join or re-follow resumed from or while the join was
+answered.
 
 ### `StatusChanged`
 
@@ -1427,16 +1442,18 @@ class Storage(Protocol):
     ) -> list[Message]: ...
 
     async def update_thread(
-        self, scope: str, updated: ThreadUpdated
+        self, scope: str, updated: ThreadUpdated, epoch: int
     ) -> tuple[Thread, ThreadUpdated] | None: ...
 
-    async def delete_thread(self, scope: str, thread_id: str) -> bool: ...
+    async def delete_thread(self, scope: str, thread_id: str) -> int | None: ...
 
     async def add_member(
-        self, scope: str, added: MemberAdded
+        self, scope: str, added: MemberAdded, epoch: int
     ) -> tuple[Member, MemberAdded | None]: ...
 
-    async def remove_member(self, scope: str, removed: MemberRemoved) -> MemberRemoved | None: ...
+    async def remove_member(
+        self, scope: str, removed: MemberRemoved, epoch: int
+    ) -> MemberRemoved | None: ...
 
     async def list_members(self, scope: str, thread_id: str) -> list[Member]: ...
 
@@ -1444,7 +1461,11 @@ class Storage(Protocol):
 
     async def head(
         self, scope: str, thread_id: str, identity_id: str
-    ) -> tuple[int, int] | None: ...
+    ) -> tuple[int, int, int] | None: ...
+
+    async def heads(
+        self, keys: Sequence[tuple[str, str]]
+    ) -> dict[tuple[str, str], tuple[int, int]]: ...
 
     async def mark(
         self, scope: str, thread_id: str, identity_id: str, seq: int, back: bool = False
@@ -1454,7 +1475,7 @@ class Storage(Protocol):
 
     async def baseline_marks(self, scope: str, identity_id: str) -> int: ...
 
-    async def append_event(self, scope: str, event: Event) -> tuple[Event, bool]: ...
+    async def append_event(self, scope: str, event: Event, epoch: int) -> tuple[Event, bool]: ...
 
     async def list_events(
         self,
@@ -1466,6 +1487,10 @@ class Storage(Protocol):
         kinds: Sequence[str] | None = None,
         floor: int = 0,
     ) -> list[Event]: ...
+
+    async def tail(
+        self, scope: str, thread_id: str, since: int, floor: int, limit: int
+    ) -> tuple[int, int, list[Event]] | None: ...
 
     async def get_event(
         self, scope: str, thread_id: str, event_id: str, floor: int = 0
@@ -1483,6 +1508,8 @@ class Storage(Protocol):
         self, on_event: OnEvent, on_signal: OnSignal, on_resume: OnResume | None = None
     ) -> Stop: ...
 
+    async def hint(self, scope: str, thread_id: str, seq: int, epoch: int) -> None: ...
+
     async def publish(self, scope: str, thread_id: str, payload: dict[str, Any]) -> None: ...
 ```
 
@@ -1492,8 +1519,10 @@ append-only: an event is removed only with its thread or its scope. `check` only
 `ConfigurationError` when the storage does not fit this version. A membership or metadata change
 and its event are one write: `create_thread` given a `creator`, `add_member`, `remove_member` and
 `update_thread` take the event, and store the row, the event at the thread's next `seq` (taken under
-the thread's lock), the new member's mark and the notice in one transaction, so a failure leaves
-none of them. `create_thread` raises `StorageError` when the `creator` belongs to another thread, and returns the thread and whether it is new; with a `creator`, a new
+the thread's lock) and the new member's mark in one transaction, so a failure leaves none of them;
+no write tells the other replicas anything. `add_member`, `remove_member`, `update_thread` and
+`append_event` take the `epoch` the caller read the thread at, and raise `NotFoundError` when the thread's row holds another, so a
+write meant for one incarnation of a thread never lands in one made again under its id. `create_thread` raises `StorageError` when the `creator` belongs to another thread, and returns the thread and whether it is new; with a `creator`, a new
 thread's first event (`seq` 1) is that `MemberAdded`, its membership and its mark at 0, and an
 existing thread comes back with `False` and nothing else written. `add_member` returns the member
 and the event stored, `None` with the existing member when it already was one (nothing written);
@@ -1518,15 +1547,27 @@ for a query with no word. A page continues below `before`: a thread id, at that 
 a `Thread` without `last_seq` (from `get_thread` or `create_thread`), also at that place now, or a `Thread` a page listed, at the place its own `created_at`, `last_message_at` and `id` give it,
 so paging holds when that thread is deleted or moves meanwhile. A member listing gives each thread's
 `last_seq` as it was when read, and `follow` enters a thread whose `history` is `"all"` at it unless
-the server heard the thread change since. `head` returns a thread's last `seq` and the member's
-floor when `identity_id` is a member of it, `None` otherwise: the one read that enters a thread for
+the server heard the thread change since. `head` returns a thread's last `seq`, the member's
+floor and the thread's `epoch` when `identity_id` is a member of it, `None` otherwise: the one read that enters a thread for
 a connection. The floor is 0 in a thread whose `history` is `"all"`, and in a `"since_added"` one
 the `seq` of the member's `MemberAdded` event; `list_events`
 and `get_event` given a `floor` leave out events below it and edits and retractions of them.
-`listen` takes an `OnEvent`, `on_event(scope, thread_id, seq)`, and an `OnSignal`,
-`on_signal(scope, thread_id, payload)`, called for what any server on the storage appends or
-publishes, and an `OnResume`, `on_resume()`, called once a dropped listener is back and before
-anything it heard since is passed on; it returns a
+`tail` returns a thread's last `seq`, its `epoch` and at most `limit` events after `since`, up to
+that last `seq` and left out below `floor` the same way, in `seq` order and all from one snapshot,
+so the events are always of the epoch it returns; `None` when the scope holds no such thread.
+`heads` returns the last `seq` and the `epoch` of each listed thread that exists, in one read.
+`delete_thread` returns the `epoch` of the thread it removed, `None` when there was none.
+`hint` tells every listener on the storage that the event at `seq` of the thread at `epoch` is
+stored, and `publish` hands them `payload`. A server calls `hint` once a write has committed and its
+own connections have the event, and `publish` for what it mirrors; no write and no request waits on
+either, and one that fails is logged and never fails the write or the request. Since the server
+never waits for one notice before it sends the next, both take their place in the storage's order at
+the moment they are called, before they first wait, and the storage sends them in that order.
+`listen` takes an `OnEvent`, `on_event(scope, thread_id, seq, epoch)`, called for each `hint`, and
+an `OnSignal`, `on_signal(scope, thread_id, payload)`, called for each `publish`, by any server on
+the storage, and an `OnResume`, `on_resume()`, called each time the listener is attached again
+after it lost its connection; what it hears is passed on as it arrives, before `on_resume` as well
+as after; it returns a
 `Stop`, `stop()`, that ends it, and all four are async functions returning `None`. Raises
 `NotFoundError`, from `add_member`, `remove_member`, `append_event` and `list_threads` with a `before` id or a `Thread` without `last_seq`, when the
 scope holds no such thread, and `StorageError`, from `create_thread`, when the thread's scope is not
@@ -1550,16 +1591,26 @@ pool's `search_path`, which the `rfnry-thread` command creates and upgrades. `ch
 `ConfigurationError` naming the command to run when that schema holds no thread tables (naming
 tables `initialize()` made in another schema to move with `upgrade --from`), is behind or ahead of
 this version, holds tables `initialize()` made in 0.1.1 or earlier, or is one whose schema or tables
-the pool's role cannot use, or holds a search half set up. With search set up by
-`rfnry-thread set --search`, triggers keep `thread_texts` — each message's current text, and each
-thread's metadata strings under `seq` 0 — in step with every append and every change of metadata,
-and `query` and `search` read its trigram index in the pool's schema, each planned for its own words
-and read with its messages in one snapshot; without it they raise `ConfigurationError` naming the
-command. An event is stored and announced with `NOTIFY` in one transaction, on two channels named
-for the connection's current schema, so deployments in different schemas of one database do not hear
-each other and replicas sharing a schema do; `listen` holds one connection from the pool, taking
-another with jittered backoff when it drops. Raises `StorageError` when the database fails, and from
-`publish`, when a notification is over 7900 bytes.
+the pool's role cannot use, or holds a search half set up. It never reads the notification queue:
+only `rfnry-thread check` reports `the notification queue is N% full — a session that LISTENs is not
+reading or a long transaction holds the queue`, once Postgres' notification queue is half full. With
+search set up by `rfnry-thread set --search`, triggers keep `thread_texts` — each message's current
+text, and each thread's metadata strings under `seq` 0 — in step with every append and every change
+of metadata, and `query` and `search` read its trigram index in the pool's schema, each planned for
+its own words and read with its messages in one snapshot; without it they raise `ConfigurationError`
+naming the command. `hint` and `publish` each send a `NOTIFY`, on two channels named for the
+connection's current schema, so deployments in different schemas of one database do not hear each
+other and replicas sharing a schema do. A write sends none. The notices waiting when one goes out
+are sent together in one transaction, in the order they were sent, so one storage's notices arrive
+in order and a busy one sends them in groups; a group the database does not take within ten seconds
+fails each of its notices with `StorageError`, and the next group goes out. `listen` holds one
+connection from the pool and sends itself a notice every ten seconds, through another connection, to
+hear on that one; no callback sees it. When the connection drops, or one notice has not come back by
+the next, it takes another with jittered backoff, logging `postgres: the listener missed its own
+probe; listening again` and closing the old one in the second case. Its `stop()` gives the
+connection back within ten seconds, closing it when it does not answer. `LISTEN` needs a session
+connection, so a pool behind PgBouncer's transaction pooling keeps logging that warning. Raises
+`StorageError` when the database fails, and from `publish`, when a notification is over 7900 bytes.
 
 ## Errors
 
@@ -1866,11 +1917,13 @@ arrive first (`since: 0` for the whole log), then the current state, then live t
 `resume: true`, the events after the caller's mark arrive first instead, as
 `follow({ resume: true })` hands each thread, and the `Joined`'s `thread.marked` is that mark. A
 thread the connection already receives, by following, keeps arriving live, and `since` or `resume`
-hands its events after that `seq` or the mark up to where the connection is, once; joins of it in
-flight at the same time each get their own. Raises `InputError` when `since` is negative or given
-with `resume`, `NotFoundError` when the scope holds no such thread or it is deleted, or the caller
-removed from it, before the join is answered, and `ForbiddenError` when the caller is not a member
-or `authorize` refuses `read`.
+hands its events after that `seq` or the mark up to where the connection is, once, the ones it
+already had among them. What arrives for the thread before the answer is handed over with it, in
+`seq` order, each event once, and a second join of the same thread is sent only once the first is
+answered. Raises `InputError` when `since` is negative or given
+with `resume`, `NotFoundError` when the scope holds no such thread, or it is deleted or the caller
+removed from it while the server handles the join, and `ForbiddenError` when the caller is not a
+member or `authorize` refuses `read`.
 
 ### `Client.leave`
 
@@ -1880,7 +1933,10 @@ async leave(threadId: string): Promise<void>
 
 Stops receiving the thread live; the caller's open streams and `Working` there end. Leaving a thread
 not joined does nothing. A followed thread left stays left, across dropped sockets, until the caller
-joins it, follows again, is added to it again or the thread is deleted and made again.
+joins it, follows again, is added to it again or the thread is deleted and made again. A leave
+called while a join of the same thread is in flight is sent once every such join is answered: a
+reconnect does not join that thread again, and a follower keeps it left as above, from where it was
+when the leave went out.
 
 ### `Client.away`
 
@@ -1891,7 +1947,8 @@ async away(threadId: string): Promise<void>
 Ends the caller's presence in a thread it joined while the thread keeps arriving: `Left` goes out
 when it was the identity's last connection present there, and joining the thread again is presence
 again. Streams and `Working` are untouched. The thread stays away across dropped sockets. Away from
-a thread not joined, or already away, does nothing.
+a thread not joined, or already away, does nothing. An away called while a join of the same thread
+is in flight is sent once every such join is answered.
 
 ### `Client.follow`
 
@@ -2617,6 +2674,7 @@ type Thread = {
   scope: string
   metadata: Record<string, unknown>
   created_at: string
+  epoch: number
   history: 'all' | 'since_added'
   last_seq?: number
   last_message_at?: string
@@ -2627,7 +2685,8 @@ type Thread = {
 }
 ```
 
-A conversation: `id` yours or the server's, `scope` its tenant, `metadata` yours, `history` who
+A conversation: `id` yours or the server's, `scope` its tenant, `metadata` yours, `epoch` the number Postgres gave it when it was made (a thread deleted and made
+again under the same id gets a larger one; `0` until stored), `history` who
 reads what came before an add (`'all'`, or `'since_added'`: each member from its add). A listed
 thread also carries `last_seq` and `last_message_at` (when its latest message was written); listed
 for a member, `marked` (the member's private read position, omitted without one) and `unread`
@@ -2650,9 +2709,10 @@ A thread's member: who, since when, and who added them.
 type Joined = { thread: Thread; seq: number; truncated: boolean }
 ```
 
-What a join returns, and what a listener receives after a re-join: the thread, its last `seq` when
-the join happened, and whether the replay was cut short, `since` was past that `seq`, or the thread
-was made again since the position a re-join or re-follow resumed from.
+What a join returns, and what a listener receives after a re-join: the thread, the last `seq` the
+connection had been handed when the join was answered, and whether the replay was cut short, `since`
+was past the thread's last `seq`, or the thread was made again since the position a re-join or
+re-follow resumed from or while the join was answered.
 
 ### `Status`
 

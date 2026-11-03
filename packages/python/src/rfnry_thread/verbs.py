@@ -101,8 +101,8 @@ def _reachable(thread: Thread) -> bool:
     return len(thread.id.encode()) <= ID_LIMIT
 
 
-def _remade(made: datetime | None, thread: Thread) -> bool:
-    return made is not None and made != thread.created_at
+def _remade(epoch: int | None, thread: Thread) -> bool:
+    return epoch is not None and epoch != thread.epoch
 
 
 def _query(query: str) -> str:
@@ -189,11 +189,13 @@ class Verbs:
         )
 
     async def _admitted(self, scope: str, thread: Thread, by: Identity, added: MemberAdded) -> None:
-        await self._hub.deliver(scope, added, thread.created_at)
+        await self._hub.deliver(scope, added, thread.epoch)
         await self._hub.added(scope, thread, by, added.identity, added.seq)
 
     async def _admit(self, scope: str, thread: Thread, identity: Identity, by: Identity) -> Member:
-        member, added = await self._storage.add_member(scope, self._added(thread.id, identity, by))
+        member, added = await self._storage.add_member(
+            scope, self._added(thread.id, identity, by), thread.epoch
+        )
         if added is not None:
             await self._hub.shielded(self._admitted(scope, thread, by, added))
         return member
@@ -247,7 +249,7 @@ class Verbs:
         self, actor: Identity, scope: str, thread_id: str, metadata: dict[str, Any]
     ) -> Thread:
         _thread_metadata(metadata)
-        await self.thread(actor, scope, thread_id, "manage")
+        current = await self.thread(actor, scope, thread_id, "manage")
         event = ThreadUpdated(
             id=uuid.uuid4().hex,
             thread_id=thread_id,
@@ -256,17 +258,18 @@ class Verbs:
             client_id=uuid.uuid4().hex,
             metadata=metadata,
         )
-        result = await self._storage.update_thread(scope, event)
+        result = await self._storage.update_thread(scope, event, current.epoch)
         if result is None:
             raise NotFoundError(f"server: thread {thread_id!r} was not found")
         thread, stored = result
-        await self._hub.shielded(self._hub.deliver(scope, stored, thread.created_at))
+        await self._hub.shielded(self._hub.deliver(scope, stored, thread.epoch))
         return thread
 
     async def delete_thread(self, actor: Identity, scope: str, thread_id: str) -> None:
         await self.thread(actor, scope, thread_id, "delete")
-        await self._storage.delete_thread(scope, thread_id)
-        await self._hub.shielded(self._hub.deleted(scope, thread_id, actor))
+        epoch = await self._storage.delete_thread(scope, thread_id)
+        if epoch is not None:
+            await self._hub.shielded(self._hub.deleted(scope, thread_id, epoch, actor))
 
     async def add_member(
         self, actor: Identity, scope: str, thread_id: str, identity: Identity
@@ -291,10 +294,10 @@ class Verbs:
             client_id=uuid.uuid4().hex,
             identity=Identity(role="user", id=identity_id),
         )
-        stored = await self._storage.remove_member(scope, event)
+        stored = await self._storage.remove_member(scope, event, thread.epoch)
         if stored is None:
             raise NotFoundError(f"server: {identity_id!r} is not a member of thread {thread_id!r}")
-        await self._hub.shielded(self._hub.deliver(scope, stored, thread.created_at))
+        await self._hub.shielded(self._hub.deliver(scope, stored, thread.epoch))
 
     async def list_members(self, actor: Identity, scope: str, thread_id: str) -> list[Member]:
         await self.thread(actor, scope, thread_id, "read")
@@ -392,7 +395,7 @@ class Verbs:
         since: int | None,
         resume: bool = False,
         away: bool = False,
-        made: datetime | None = None,
+        epoch: int | None = None,
     ) -> Joined:
         if since is not None and resume:
             raise InputError("server: a join takes since or resume, not both")
@@ -400,7 +403,7 @@ class Verbs:
             raise InputError("server: since cannot be negative")
         actor, scope = session.identity, session.scope
         thread = await self.thread(actor, scope, thread_id, "read")
-        if since is not None and _remade(made, thread):
+        if since is not None and _remade(epoch, thread):
             joined = await self._hub.join(session, thread, 0, away)
             return joined.model_copy(update={"truncated": True})
         if resume:
@@ -417,8 +420,8 @@ class Verbs:
         self,
         session: Session,
         resume: bool,
-        since: dict[str, tuple[int, datetime | None]] | None,
-        left: dict[str, tuple[int, datetime | None]] | None,
+        since: dict[str, tuple[int, int | None]] | None,
+        left: dict[str, tuple[int, int | None]] | None,
     ) -> list[Joined]:
         if since is not None and any(seq < 0 for seq, _ in since.values()):
             raise InputError("server: since cannot be negative")
@@ -457,10 +460,10 @@ class Verbs:
             raise
 
     async def _back(
-        self, scope: str, identity_id: str, thread: Thread, seq: int, made: datetime | None
+        self, scope: str, identity_id: str, thread: Thread, seq: int, epoch: int | None
     ) -> bool:
         return (
-            _remade(made, thread)
+            _remade(epoch, thread)
             or (thread.last_seq or 0) < seq
             or await self._added_since(scope, thread.id, identity_id, seq)
         )
@@ -526,9 +529,9 @@ class Verbs:
             if sent is not None:
                 return sent
             event = await self._redacted(self._redact, actor, thread, event)
-        stored, created = await self._storage.append_event(scope, event)
+        stored, created = await self._storage.append_event(scope, event, thread.epoch)
         if created:
-            await self._hub.shielded(self._hub.deliver(scope, stored, thread.created_at))
+            await self._hub.shielded(self._hub.deliver(scope, stored, thread.epoch))
         return stored
 
     async def _redacted(
@@ -623,5 +626,5 @@ class Verbs:
         await self._hub.signal(session, signal)
 
     async def present(self, actor: Identity, scope: str, thread_id: str) -> list[Identity]:
-        await self.thread(actor, scope, thread_id, "read")
-        return self._hub.state.present(scope, thread_id)
+        thread = await self.thread(actor, scope, thread_id, "read")
+        return self._hub.state.present(scope, thread_id, thread.epoch)

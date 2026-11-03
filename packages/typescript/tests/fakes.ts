@@ -93,6 +93,7 @@ export class FakeServer {
         scope: 'acme',
         metadata: {},
         created_at: '2026-01-01T12:00:00Z',
+        epoch: 1,
       },
       seq: this.seq,
       truncated: false,

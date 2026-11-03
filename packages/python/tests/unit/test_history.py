@@ -10,6 +10,7 @@ from rfnry_thread.server import Server
 from .conftest import say
 from .factories import ANA, HELPER, removed
 from .peer import Peer
+from .writes import expel
 
 
 def who(identity: Identity) -> dict[str, Any]:
@@ -170,7 +171,7 @@ async def test_a_member_removed_between_the_checks_reads_nothing(
     async def removed_meanwhile(scope: str, thread_id: str, identity_id: str) -> bool:
         found = await real(scope, thread_id, identity_id)
         if identity_id == "helper":
-            await storage.remove_member(scope, removed(thread_id, HELPER))
+            await expel(storage, scope, removed(thread_id, HELPER))
         return found
 
     monkeypatch.setattr(storage, "is_member", removed_meanwhile)

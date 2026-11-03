@@ -1,4 +1,3 @@
-import math
 import time
 from collections.abc import Callable
 from dataclasses import dataclass, field
@@ -19,352 +18,295 @@ from rfnry_thread.models import (
 REFRESH = 10.0
 EXPIRY = 30.0
 
+_Key = tuple[str, str]
+
 
 @dataclass
 class _Stream:
     start: StreamStart
-    index: int = 0
     text: str = ""
+    index: int = 0
+    d: int = 0
+    gapped: bool = False
 
 
 @dataclass
-class _Entry:
+class _Held:
     sender: Identity
-    seen: float
     present: bool = False
     working: Working | None = None
     streams: dict[str, _Stream] = field(default_factory=dict)
-    n: int = 0
-    ended: dict[str, StreamStart] = field(default_factory=dict)
 
     def empty(self) -> bool:
         return not self.present and self.working is None and not self.streams
 
-    def ends(self, thread_id: str) -> list[Signal]:
-        ended: list[Signal] = [
-            StreamEnd(thread_id=thread_id, sender=self.sender, stream_id=stream_id)
-            for stream_id in sorted(self.streams)
-        ]
-        if self.working is not None:
-            ended.append(Idle(thread_id=thread_id, sender=self.sender))
-        return ended
+    def entry(self) -> dict[str, Any]:
+        return {
+            "sender": self.sender.model_dump(mode="json"),
+            "present": self.present,
+            "working": None if self.working is None else {"label": self.working.label},
+            "streams": [
+                {"stream_id": i, "in_reply_to": s.start.in_reply_to}
+                for i, s in self.streams.items()
+            ],
+        }
+
+
+@dataclass
+class _Slice:
+    epoch: int
+    n: int
+    seen: float
+    held: dict[str, _Held] = field(default_factory=dict)
+
+
+@dataclass
+class _Parts:
+    n: int
+    seen: float
+    entries: dict[int, list[dict[str, Any]]] = field(default_factory=dict)
+
+
+def _told(
+    thread_id: str,
+    sender: Identity,
+    old: _Held | None,
+    new: _Held | None,
+    before: set[str],
+    after: set[str],
+) -> list[Signal]:
+    told: list[Signal] = []
+    if sender.id in after and sender.id not in before:
+        told.append(Present(thread_id=thread_id, sender=sender))
+    if new is not None:
+        if new.working is not None and (old is None or old.working != new.working):
+            told.append(new.working)
+        told.extend(s.start for i, s in new.streams.items() if old is None or i not in old.streams)
+    if old is not None:
+        told.extend(
+            StreamEnd(thread_id=thread_id, sender=sender, stream_id=i)
+            for i in sorted(old.streams)
+            if new is None or i not in new.streams
+        )
+        if old.working is not None and (new is None or new.working is None):
+            told.append(Idle(thread_id=thread_id, sender=sender))
+    if sender.id in before and sender.id not in after:
+        told.append(Left(thread_id=thread_id, sender=sender))
+    return told
+
+
+def _held(thread_id: str, item: dict[str, Any], was: _Held | None) -> _Held:
+    sender = Identity.model_validate(item["sender"])
+    working = item.get("working")
+    kept = {} if was is None else was.streams
+    return _Held(
+        sender=sender,
+        present=bool(item.get("present")),
+        working=None
+        if working is None
+        else Working(thread_id=thread_id, sender=sender, label=working.get("label")),
+        streams={
+            s["stream_id"]: kept.get(s["stream_id"])
+            or _Stream(StreamStart(thread_id=thread_id, sender=sender, **s), gapped=True)
+            for s in item.get("streams", [])
+        },
+    )
 
 
 class LatestState:
     def __init__(self, origin: str, clock: Callable[[], float] = time.monotonic) -> None:
         self.origin = origin
         self._clock = clock
-        self._threads: dict[tuple[str, str], dict[tuple[str, str], _Entry]] = {}
+        self._slices: dict[_Key, dict[str, _Slice]] = {}
+        self._parts: dict[tuple[str, _Key], _Parts] = {}
 
-    def apply(self, scope: str, signal: Signal, origin: str, n: int = 0) -> None:
-        key = (scope, signal.thread_id)
-        if not isinstance(
-            signal, Present | Left | Working | Idle | StreamStart | StreamDelta | StreamEnd
-        ):
-            return
-        entries = self._threads.setdefault(key, {})
-        slot = (origin, signal.sender.id)
-        entry = entries.get(slot) or _Entry(sender=signal.sender, seen=self._clock())
-        entry.seen = self._clock()
-        entry.n = max(entry.n, n)
+    def _at(self, key: _Key, epoch: int) -> list[_Held]:
+        found = self._slices.get(key, {}).values()
+        return [held for s in found if s.epoch == epoch for held in s.held.values()]
+
+    def _present(self, key: _Key, epoch: int) -> set[str]:
+        return {held.sender.id for held in self._at(key, epoch) if held.present}
+
+    def _taken(self, key: _Key, epoch: int, origin: str, n: int) -> _Slice | None:
+        found = self._slices.get(key, {}).get(origin)
+        if found is not None and (epoch, n) <= (found.epoch, found.n):
+            return None
+        if found is None or epoch > found.epoch:
+            found = self._slices.setdefault(key, {})[origin] = _Slice(epoch, n, 0.0)
+        found.n, found.seen = n, self._clock()
+        return found
+
+    def _settle(self, key: _Key, origin: str, found: _Slice) -> None:
+        found.held = {i: held for i, held in found.held.items() if not held.empty()}
+        if origin == self.origin and not found.held:
+            del self._slices[key][origin]
+        if not self._slices[key]:
+            del self._slices[key]
+
+    def apply(
+        self,
+        scope: str,
+        epoch: int,
+        signal: Signal,
+        origin: str,
+        n: int,
+        d: int | None = None,
+    ) -> tuple[list[Signal], bool]:
+        kinds = Present | Left | Working | Idle | StreamStart | StreamDelta | StreamEnd
+        if not isinstance(signal, kinds):
+            return [signal], False
+        key, sender = (scope, signal.thread_id), signal.sender
+        found = self._taken(key, epoch, origin, n)
+        if found is None:
+            return [], False
+        had = bool(found.held)
+        held = found.held.setdefault(sender.id, _Held(sender))
+        told = True
         if isinstance(signal, Present):
-            entry.present = True
+            told = sender.id not in self._present(key, epoch)
+            held.present = True
         elif isinstance(signal, Left):
-            entry.present = False
+            held.present, told = False, held.present
         elif isinstance(signal, Working):
-            entry.working = signal
+            held.working = signal
         elif isinstance(signal, Idle):
-            entry.working = None
+            held.working, told = None, held.working is not None
         elif isinstance(signal, StreamStart):
-            entry.streams[signal.stream_id] = _Stream(signal)
+            told = signal.stream_id not in held.streams
+            held.streams.setdefault(signal.stream_id, _Stream(signal))
         elif isinstance(signal, StreamDelta):
-            stream = entry.streams.setdefault(
-                signal.stream_id,
-                _Stream(
-                    entry.ended.get(signal.stream_id)
-                    or StreamStart(
-                        thread_id=signal.thread_id, sender=signal.sender, stream_id=signal.stream_id
-                    )
-                ),
-            )
-            stream.index = signal.index
-            stream.text += signal.text
+            stream = held.streams.get(signal.stream_id)
+            if stream is not None and d is not None and d != stream.d:
+                stream.gapped = True
+            told = stream is not None and not stream.gapped
+            if stream is not None and not stream.gapped:
+                stream.text, stream.index = stream.text + signal.text, signal.index
+                if d is not None:
+                    stream.d += 1
         else:
-            entry.streams.pop(signal.stream_id, None)
-        self._store(key, slot, entry)
+            told = held.streams.pop(signal.stream_id, None) is not None
+        self._settle(key, origin, found)
+        if told and isinstance(signal, Left) and sender.id in self._present(key, epoch):
+            told = False
+        return [signal] if told else [], had and not found.held
 
-    def delete(self, scope: str, thread_id: str) -> list[dict[str, Any]]:
-        entries = self._threads.pop((scope, thread_id), {})
-        now = self._clock()
-        kept = {
-            slot: _Entry(sender=entry.sender, seen=now, n=entry.n)
-            for slot, entry in entries.items()
-            if slot[0] != self.origin
-        }
-        if kept:
-            self._threads[(scope, thread_id)] = kept
-        return [
-            {
-                "sender": entry.sender.model_dump(mode="json"),
-                "present": False,
-                "working": None,
-                "streams": [],
-            }
-            for slot, entry in entries.items()
-            if slot[0] == self.origin
-        ]
+    def counted(self, scope: str, signal: StreamDelta, pieces: int) -> int:
+        found = self._slices.get((scope, signal.thread_id), {}).get(self.origin)
+        held = None if found is None else found.held.get(signal.sender.id)
+        stream = None if held is None else held.streams.get(signal.stream_id)
+        if stream is None:
+            return 0
+        stream.d += pieces
+        return stream.d - pieces
 
-    def threads(self, scope: str) -> list[str]:
-        return [thread_id for held, thread_id in self._threads if held == scope]
-
-    def _store(self, key: tuple[str, str], slot: tuple[str, str], entry: _Entry) -> None:
-        entries = self._threads.setdefault(key, {})
-        if entry.empty() and slot[0] == self.origin:
-            entries.pop(slot, None)
-        else:
-            entries[slot] = entry
-        if not entries:
-            del self._threads[key]
-
-    def _expired(self, origin: str, entry: _Entry, now: float) -> bool:
-        return origin != self.origin and now - entry.seen > EXPIRY
-
-    def _live(self, scope: str, thread_id: str) -> list[_Entry]:
-        now = self._clock()
-        return [
-            entry
-            for (origin, _), entry in self._threads.get((scope, thread_id), {}).items()
-            if not self._expired(origin, entry, now)
-        ]
-
-    def holds(self, scope: str, signal: Signal, origin: str) -> bool:
-        entry = self._threads.get((scope, signal.thread_id), {}).get((origin, signal.sender.id))
-        if entry is None:
-            return False
-        if isinstance(signal, Left):
-            return entry.present
-        if isinstance(signal, Idle):
-            return entry.working is not None
-        if isinstance(signal, StreamStart | StreamDelta | StreamEnd):
-            return signal.stream_id in entry.streams
-        return True
-
-    def started(self, scope: str, signal: StreamDelta, origin: str) -> StreamStart:
-        entry = self._threads[(scope, signal.thread_id)][(origin, signal.sender.id)]
-        return entry.streams[signal.stream_id].start
-
-    def expiring(self, forget: bool = False) -> list[tuple[str, str]]:
-        now = math.inf if forget else self._clock()
-        return [
-            key
-            for key, entries in self._threads.items()
-            if any(self._expired(origin, entry, now) for (origin, _), entry in entries.items())
-        ]
-
-    def expire(self, scope: str, thread_id: str, forget: bool = False) -> list[Signal]:
-        entries = self._threads.get((scope, thread_id))
-        if entries is None:
+    def replace(
+        self,
+        scope: str,
+        thread_id: str,
+        epoch: int,
+        origin: str,
+        n: int,
+        entries: list[dict[str, Any]],
+    ) -> list[Signal]:
+        key = (scope, thread_id)
+        old = self._slices.get(key, {}).get(origin)
+        was = {} if old is None or old.epoch != epoch else old.held
+        now = [_held(thread_id, item, was.get(str(item["sender"]["id"]))) for item in entries]
+        before = self._present(key, epoch)
+        found = self._taken(key, epoch, origin, n)
+        if found is None:
             return []
-        now = self._clock()
-        until = math.inf if forget else now
-        gone = [
-            (slot, entries.pop(slot))
-            for slot in [s for s, e in entries.items() if self._expired(s[0], e, until)]
+        found.held = {held.sender.id: held for held in now}
+        self._settle(key, origin, found)
+        after = self._present(key, epoch)
+        senders = {held.sender.id: held.sender for held in now}
+        senders.update((i, held.sender) for i, held in was.items() if i not in senders)
+        return [
+            signal
+            for i, sender in senders.items()
+            for signal in _told(thread_id, sender, was.get(i), found.held.get(i), before, after)
         ]
-        gone = [(slot, entry) for slot, entry in gone if not entry.empty()]
-        if not forget:
-            for slot, entry in gone:
-                entries[slot] = _Entry(
-                    sender=entry.sender,
-                    seen=now,
-                    n=entry.n,
-                    ended={i: stream.start for i, stream in entry.streams.items()},
-                )
-        if not entries:
-            del self._threads[(scope, thread_id)]
-        ended = [signal for _, entry in gone for signal in entry.ends(thread_id)]
-        senders = {entry.sender.id: entry.sender for _, entry in gone if entry.present}
-        ended.extend(
-            Left(thread_id=thread_id, sender=sender)
-            for sender in senders.values()
-            if not self.is_present(scope, thread_id, sender.id)
-        )
-        return ended
 
-    def own_ends(self) -> list[tuple[str, Signal]]:
-        ended: list[tuple[str, Signal]] = []
-        for (scope, thread_id), entries in self._threads.items():
-            for (origin, _), entry in entries.items():
-                if origin != self.origin:
+    def part(
+        self,
+        scope: str,
+        thread_id: str,
+        epoch: int,
+        origin: str,
+        n: int,
+        index: int,
+        count: int,
+        entries: list[dict[str, Any]],
+    ) -> list[Signal]:
+        key = (origin, (scope, thread_id))
+        buffer = self._parts.get(key)
+        if buffer is not None and buffer.n > n:
+            return []
+        if buffer is None or buffer.n < n:
+            buffer = self._parts[key] = _Parts(n, self._clock())
+        buffer.entries[index] = entries
+        if len(buffer.entries) < count:
+            return []
+        del self._parts[key]
+        whole = [item for i in sorted(buffer.entries) for item in buffer.entries[i]]
+        return self.replace(scope, thread_id, epoch, origin, n, whole)
+
+    def expired(self, forget: bool = False) -> list[tuple[str, str, int, list[Signal]]]:
+        now = self._clock()
+        for stale in [k for k, b in self._parts.items() if forget or now - b.seen > EXPIRY]:
+            del self._parts[stale]
+        gone: list[tuple[str, str, int, list[Signal]]] = []
+        for key, slices in list(self._slices.items()):
+            for origin, found in list(slices.items()):
+                if origin == self.origin or not (forget or now - found.seen > EXPIRY):
                     continue
-                ended.extend((scope, signal) for signal in entry.ends(thread_id))
-                if entry.present:
-                    ended.append((scope, Left(thread_id=thread_id, sender=entry.sender)))
-        return ended
+                before = self._present(key, found.epoch)
+                del slices[origin]
+                after = self._present(key, found.epoch)
+                ends = [
+                    signal
+                    for held in found.held.values()
+                    for signal in _told(key[1], held.sender, held, None, before, after)
+                ]
+                if ends:
+                    gone.append((*key, found.epoch, ends))
+            if not slices:
+                del self._slices[key]
+        return gone
 
-    def snapshot(self, scope: str, thread_id: str, expired: bool = False) -> list[Signal]:
+    def snapshot(self, scope: str, thread_id: str, epoch: int) -> list[Signal]:
         present: dict[str, Signal] = {}
         rest: list[Signal] = []
-        held = self._threads.get((scope, thread_id), {}).values()
-        for entry in list(held) if expired else self._live(scope, thread_id):
-            if entry.present:
-                present.setdefault(
-                    entry.sender.id, Present(thread_id=thread_id, sender=entry.sender)
-                )
-            if entry.working is not None:
-                rest.append(entry.working)
-            for stream in entry.streams.values():
+        for held in self._at((scope, thread_id), epoch):
+            if held.present:
+                present.setdefault(held.sender.id, Present(thread_id=thread_id, sender=held.sender))
+            if held.working is not None:
+                rest.append(held.working)
+            for i, stream in held.streams.items():
                 rest.append(stream.start)
                 if stream.text:
                     rest.append(
                         StreamDelta(
                             thread_id=thread_id,
-                            sender=entry.sender,
-                            stream_id=stream.start.stream_id,
+                            sender=held.sender,
+                            stream_id=i,
                             index=stream.index,
                             text=stream.text,
                         )
                     )
         return [*present.values(), *rest]
 
-    def present(self, scope: str, thread_id: str) -> list[Identity]:
-        found: dict[str, Identity] = {}
-        for entry in self._live(scope, thread_id):
-            if entry.present:
-                found.setdefault(entry.sender.id, entry.sender)
-        return list(found.values())
+    def present(self, scope: str, thread_id: str, epoch: int) -> list[Identity]:
+        held = self._at((scope, thread_id), epoch)
+        return list({h.sender.id: h.sender for h in held if h.present}.values())
 
-    def is_present(self, scope: str, thread_id: str, identity_id: str) -> bool:
-        return any(e.present and e.sender.id == identity_id for e in self._live(scope, thread_id))
+    def own(self) -> list[tuple[str, str, int, list[dict[str, Any]]]]:
+        return [
+            (scope, thread_id, found.epoch, [held.entry() for held in found.held.values()])
+            for (scope, thread_id), slices in self._slices.items()
+            if (found := slices.get(self.origin)) is not None
+        ]
 
-    def own(self) -> dict[tuple[str, str], list[dict[str, Any]]]:
-        items: dict[tuple[str, str], list[dict[str, Any]]] = {}
-        for key, entries in self._threads.items():
-            for (origin, _), entry in entries.items():
-                if origin != self.origin:
-                    continue
-                items.setdefault(key, []).append(
-                    {
-                        "sender": entry.sender.model_dump(mode="json"),
-                        "present": entry.present,
-                        "working": None
-                        if entry.working is None
-                        else {"label": entry.working.label},
-                        "streams": [
-                            {"stream_id": s.start.stream_id, "in_reply_to": s.start.in_reply_to}
-                            for s in entry.streams.values()
-                        ],
-                    }
-                )
-        return items
-
-    def refresh(
-        self, scope: str, thread_id: str, origin: str, items: list[dict[str, Any]], n: int = 0
-    ) -> list[Signal]:
-        key = (scope, thread_id)
-        told: list[Signal] = []
-        for item in items:
-            sender = Identity.model_validate(item["sender"])
-            slot = (origin, sender.id)
-            found = self._threads.get(key, {}).get(slot)
-            if found is not None and found.n > n:
-                continue
-            was = found or _Entry(sender=sender, seen=self._clock())
-            present = self.is_present(scope, thread_id, sender.id)
-            working = item.get("working")
-            entry = _Entry(
-                sender=sender,
-                seen=self._clock(),
-                n=n,
-                present=bool(item["present"]),
-                working=None
-                if working is None
-                else Working(thread_id=thread_id, sender=sender, label=working.get("label")),
-                streams={
-                    s["stream_id"]: was.streams.get(s["stream_id"])
-                    or _Stream(
-                        StreamStart(
-                            thread_id=thread_id,
-                            sender=sender,
-                            stream_id=s["stream_id"],
-                            in_reply_to=s.get("in_reply_to"),
-                        )
-                    )
-                    for s in item.get("streams", [])
-                },
-            )
-            self._store(key, slot, entry)
-            if entry.present and not present:
-                told.append(Present(thread_id=thread_id, sender=sender))
-            if entry.working is not None and (
-                was.working is None or was.working.label != entry.working.label
-            ):
-                told.append(entry.working)
-            told.extend(s.start for i, s in entry.streams.items() if i not in was.streams)
-            told.extend(
-                StreamEnd(thread_id=thread_id, sender=sender, stream_id=i)
-                for i in sorted(was.streams)
-                if i not in entry.streams
-            )
-            if was.working is not None and entry.working is None:
-                told.append(Idle(thread_id=thread_id, sender=sender))
-            if was.present and not self.is_present(scope, thread_id, sender.id):
-                told.append(Left(thread_id=thread_id, sender=sender))
-        return told
-
-
-def changes(thread_id: str, before: list[Signal], now: list[Signal]) -> list[Signal]:
-    was_present, was_working, was_streaming = _held(before)
-    present, working, streaming = _held(now)
-    told: list[Signal] = []
-    for key, (start, delta) in was_streaming.items():
-        if key not in streaming or not _continues(delta, streaming[key][1]):
-            told.append(StreamEnd(thread_id=thread_id, sender=start.sender, stream_id=key[1]))
-    told.extend(
-        Idle(thread_id=thread_id, sender=w.sender)
-        for i, w in was_working.items()
-        if i not in working
-    )
-    told.extend(
-        Left(thread_id=thread_id, sender=s) for i, s in was_present.items() if i not in present
-    )
-    told.extend(
-        Present(thread_id=thread_id, sender=s) for i, s in present.items() if i not in was_present
-    )
-    told.extend(w for i, w in working.items() if was_working.get(i) != w)
-    for key, (start, delta) in streaming.items():
-        held = was_streaming.get(key)
-        if held is None or not _continues(held[1], delta):
-            told.extend([start] if delta is None else [start, delta])
-            continue
-        known = "" if held[1] is None else held[1].text
-        if delta is not None and len(delta.text) > len(known):
-            told.append(delta.model_copy(update={"text": delta.text[len(known) :]}))
-    return told
-
-
-def _held(
-    signals: list[Signal],
-) -> tuple[
-    dict[str, Identity],
-    dict[str, Working],
-    dict[tuple[str, str], tuple[StreamStart, StreamDelta | None]],
-]:
-    present: dict[str, Identity] = {}
-    working: dict[str, Working] = {}
-    streaming: dict[tuple[str, str], tuple[StreamStart, StreamDelta | None]] = {}
-    for signal in signals:
-        if isinstance(signal, Present):
-            present[signal.sender.id] = signal.sender
-        elif isinstance(signal, Working):
-            working[signal.sender.id] = signal
-        elif isinstance(signal, StreamStart):
-            streaming[(signal.sender.id, signal.stream_id)] = (signal, None)
-        elif isinstance(signal, StreamDelta):
-            key = (signal.sender.id, signal.stream_id)
-            streaming[key] = (streaming[key][0], signal)
-    return present, working, streaming
-
-
-def _continues(before: StreamDelta | None, now: StreamDelta | None) -> bool:
-    return ("" if now is None else now.text).startswith("" if before is None else before.text)
+    def drop(self, scope: str, thread_id: str) -> int | None:
+        found = self._slices.pop((scope, thread_id), {}).get(self.origin)
+        return None if found is None else found.epoch

@@ -54,7 +54,7 @@ FIXTURES = Path(__file__).parents[1] / "fixtures" / "protocol"
 
 
 def golden() -> dict[str, Frame]:
-    thread = Thread(id="t1", scope="acme", metadata={"topic": "billing"}, created_at=AT)
+    thread = Thread(id="t1", scope="acme", metadata={"topic": "billing"}, created_at=AT, epoch=1)
     base: dict[str, Any] = {"thread_id": "t1", "created_at": AT}
     events: list[Event] = [
         Message(
@@ -234,7 +234,7 @@ def golden() -> dict[str, Frame]:
                 "thread_id": "t1",
                 "since": 12,
                 "away": True,
-                "created_at": "2026-01-01T12:00:00Z",
+                "epoch": 1,
             },
         ),
         "request-thread-away": Request(id="9", method="thread.away", payload={"thread_id": "t1"}),
@@ -246,7 +246,7 @@ def golden() -> dict[str, Frame]:
             method="thread.follow",
             payload={
                 "resume": True,
-                "since": {"t1": {"seq": 9, "created_at": "2026-01-01T12:00:00Z"}},
+                "since": {"t1": {"seq": 9, "epoch": 1}},
             },
         ),
         "request-thread-follow-left": Request(
@@ -254,8 +254,8 @@ def golden() -> dict[str, Frame]:
             method="thread.follow",
             payload={
                 "resume": True,
-                "since": {"t1": {"seq": 9, "created_at": "2026-01-01T12:00:00Z"}},
-                "left": {"t2": {"seq": 4, "created_at": "2026-01-01T12:00:00Z"}},
+                "since": {"t1": {"seq": 9, "epoch": 1}},
+                "left": {"t2": {"seq": 4, "epoch": 1}},
             },
         ),
         "response-thread-follow": Response(
