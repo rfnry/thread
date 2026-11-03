@@ -109,7 +109,7 @@ describe('client', () => {
     await client.close()
   })
 
-  it('keeps a thread present when the server refuses away, and ends when a re-join with away is refused as a wrong request', async () => {
+  it('is away once it asked, even when the server refuses away, and ends when a re-join with away is refused as a wrong request', async () => {
     const { client } = await joined()
     server.handlers.set('thread.away', () => {
       throw { code: 'input', message: "server: unknown method 'thread.away'" }
@@ -120,6 +120,7 @@ describe('client', () => {
     expect(server.sent('thread.join')[1]?.payload).toEqual({
       thread_id: 't1',
       since: 0,
+      away: true,
       epoch: 1,
     })
     server.handlers.delete('thread.away')
@@ -522,9 +523,10 @@ describe('client', () => {
     const past = client.join('t1', { since: 40 })
     await vi.waitFor(() => expect(server.sent('thread.join')).toHaveLength(1))
     await new Promise((resolve) => setTimeout(resolve, 5))
-    await client.join('t1')
+    const plain = client.join('t1')
     open()
     await past
+    await plain
     server.push('event', message(5, 'after'))
     await vi.waitFor(() => expect(items.at(-1)).toMatchObject({ seq: 5 }))
     expect(items.map((item) => ('seq' in item ? item.seq : null))).toEqual([4, 5])
@@ -559,9 +561,10 @@ describe('client', () => {
     })
     const first = client.join('t1', { since: 40 })
     const second = client.join('t1', { since: 40 })
-    await second
+    await vi.waitFor(() => expect(server.sent('thread.join')).toHaveLength(1))
     open()
     await first
+    await second
     server.push('event', message(5, 'after'))
     await vi.waitFor(() => expect(items.at(-1)).toMatchObject({ seq: 5 }))
     expect(items.map((item) => ('seq' in item ? item.seq : null))).toEqual([4, 5])
@@ -623,16 +626,15 @@ describe('client', () => {
     const rewind = client.join('t1', { since: 2 })
     await vi.waitFor(() => expect(server.sent('thread.join')).toHaveLength(2))
     server.push('event', message(11, 'live'))
-    await vi.waitFor(() => expect(items).toHaveLength(1))
     const past = client.join('t1', { since: 40 })
-    await vi.waitFor(() => expect(server.sent('thread.join')).toHaveLength(3))
     open()
     await rewind
     await past
+    expect(server.sent('thread.join')).toHaveLength(3)
     server.push('event', message(12, 'after'))
     await vi.waitFor(() => expect(items.at(-1)).toMatchObject({ seq: 12 }))
     expect(items.map((item) => ('seq' in item ? item.seq : null))).toEqual([
-      11, 3, 4, 5, 6, 7, 8, 9, 10, 12,
+      3, 4, 5, 6, 7, 8, 9, 10, 11, 12,
     ])
   })
 
@@ -689,6 +691,600 @@ describe('client', () => {
       expect(items.map((item) => ('seq' in item ? item.seq : null))).toEqual([4, 5, 6])
     }
   )
+
+  const epoch = (value: number) => ({
+    id: 't1',
+    scope: 'acme',
+    metadata: {},
+    created_at: '2026-01-01T12:00:00Z',
+    epoch: value,
+  })
+
+  it('sends a second join of a thread only once the first is answered', async () => {
+    const client = await connect({ url: 'ws://fake' })
+    let open!: () => void
+    const gate = new Promise<void>((resolve) => {
+      open = resolve
+    })
+    server.handlers.set('thread.join', async (payload) => {
+      if (payload.since === 0) await gate
+      return { thread: epoch(1), seq: 0, truncated: false }
+    })
+    const first = client.join('t1', { since: 0 })
+    await vi.waitFor(() => expect(server.sent('thread.join')).toHaveLength(1))
+    const second = client.join('t1')
+    await new Promise((resolve) => setTimeout(resolve, 10))
+    expect(server.sent('thread.join')).toHaveLength(1)
+    open()
+    await Promise.all([first, second])
+    expect(server.sent('thread.join').map((frame) => frame.payload.since)).toEqual([0, null])
+  })
+
+  it('delivers a thread re-joined at another epoch from its start in seq order after its Joined, and a re-join at the same one before it', async () => {
+    server.seq = 2
+    const client = await connect({ url: 'ws://fake' })
+    const items: Item[] = []
+    client.subscribe((item) => items.push(item), { includeOwn: true })
+    await client.join('t1')
+    const label = (item: Item) =>
+      'truncated' in item
+        ? 'joined'
+        : 'seq' in item
+          ? item.seq
+          : 'status' in item
+            ? item.status
+            : null
+    server.handlers.set('thread.join', () => {
+      for (const seq of [4, 3]) server.push('event', message(seq, 'missed'))
+      return { thread: epoch(1), seq: 4, truncated: false }
+    })
+    server.drop()
+    await vi.waitFor(() => expect(items).toContainEqual({ kind: 'status', status: 'open' }))
+    expect(items.map(label)).toEqual(['reconnecting', 3, 4, 'joined', 'open'])
+    server.handlers.set('thread.join', () => {
+      for (const seq of [6, 5]) server.push('event', message(seq, 'new'))
+      server.push('event', message(7, 'raced'))
+      return { thread: epoch(2), seq: 6, truncated: true }
+    })
+    server.drop()
+    await vi.waitFor(() => expect(items.filter((item) => label(item) === 'open')).toHaveLength(2))
+    server.push('event', message(7, 'raced'))
+    server.push('event', message(8, 'after'))
+    await vi.waitFor(() => expect(items.at(-1)).toMatchObject({ seq: 8 }))
+    expect(items.slice(5).map(label)).toEqual(['reconnecting', 'joined', 5, 6, 7, 'open', 8])
+    expect(
+      server.sent('thread.join').map((frame) => [frame.payload.since, frame.payload.epoch])
+    ).toEqual([
+      [null, undefined],
+      [2, 1],
+      [4, 1],
+    ])
+  })
+
+  it('delivers a rewind of a joined thread from its since in seq order once, the events it had among them', async () => {
+    server.seq = 4
+    const client = await connect({ url: 'ws://fake' })
+    const items: Item[] = []
+    client.subscribe((item) => items.push(item), { includeOwn: true })
+    await client.join('t1')
+    for (const seq of [5, 6]) server.push('event', message(seq, 'had'))
+    await vi.waitFor(() => expect(items).toHaveLength(2))
+    server.handlers.set('thread.join', () => {
+      server.push('event', message(7, 'live'))
+      for (const seq of [5, 6, 7]) server.push('event', message(seq, 'replay'))
+      return { thread: epoch(1), seq: 7, truncated: false }
+    })
+    await client.join('t1', { since: 4 })
+    server.push('event', message(7, 'live'))
+    server.push('event', message(8, 'after'))
+    await vi.waitFor(() => expect(items.at(-1)).toMatchObject({ seq: 8 }))
+    expect(items.map((item) => ('seq' in item ? item.seq : null))).toEqual([5, 6, 5, 6, 7, 8])
+  })
+
+  it('admits nothing of the old thread when it is made again before a join of it is answered', async () => {
+    server.seq = 2
+    const client = await connect({ url: 'ws://fake' })
+    const items: Item[] = []
+    client.subscribe((item) => items.push(item), { includeOwn: true })
+    await client.join('t1')
+    server.handlers.set('thread.join', () => {
+      server.push('event', message(3, 'old'))
+      server.push('signal', { kind: 'thread.deleted', thread_id: 't1', sender: helper })
+      for (const seq of [1, 2, 3]) server.push('event', message(seq, 'new'))
+      return { thread: epoch(2), seq: 3, truncated: false }
+    })
+    await client.join('t1', { since: 0 })
+    const gone = items.findIndex((item) => 'kind' in item && item.kind === 'thread.deleted')
+    const said = (some: Item[]) =>
+      some.map((item) => ('content' in item ? [item.seq, item.content[0]] : null))
+    expect(said(items.slice(0, gone))).toEqual([[3, { type: 'text', text: 'old' }]])
+    expect(said(items.slice(gone + 1))).toEqual(
+      [1, 2, 3].map((seq) => [seq, { type: 'text', text: 'new' }])
+    )
+  })
+
+  const label = (item: Item) =>
+    'truncated' in item
+      ? 'joined'
+      : 'seq' in item
+        ? item.seq
+        : 'status' in item
+          ? item.status
+          : 'kind' in item
+            ? item.kind
+            : null
+
+  it('moves nothing back when a join is answered from the thread as it was before it was made again', async () => {
+    server.seq = 8
+    const client = await connect({ url: 'ws://fake' })
+    const items: Item[] = []
+    client.subscribe((item) => items.push(item), { includeOwn: true })
+    await client.join('t1')
+    server.handlers.set('thread.join', () => {
+      server.push('signal', { kind: 'thread.deleted', thread_id: 't1', sender: helper })
+      server.push('event', message(2, 'new'))
+      server.push('joined', { thread: epoch(2), seq: 2, truncated: false })
+      for (const seq of [3, 4]) server.push('event', message(seq, 'new'))
+      return { thread: epoch(1), seq: 8, truncated: false }
+    })
+    expect((await client.join('t1')).thread.epoch).toBe(1)
+    server.push('event', message(5, 'new'))
+    await vi.waitFor(() => expect(items.at(-1)).toMatchObject({ seq: 5 }))
+    expect(items.map(label)).toEqual(['thread.deleted', 2, 'joined', 3, 4, 5])
+    server.drop()
+    await vi.waitFor(() => expect(server.sent('thread.join')).toHaveLength(3))
+    expect(server.sent('thread.join').at(-1)?.payload).toMatchObject({ since: 5, epoch: 2 })
+  })
+
+  it('sends a join and a leave called back to back in call order', async () => {
+    const client = await connect({ url: 'ws://fake' })
+    await Promise.all([client.join('t1'), client.leave('t1')])
+    expect(server.sent().map((frame) => frame.method)).toEqual(['thread.join', 'thread.leave'])
+  })
+
+  it('resumes a re-join waiting behind a join of the same thread from where that join left it', async () => {
+    server.seq = 2
+    const client = await connect({ url: 'ws://fake' })
+    const items: Item[] = []
+    client.subscribe((item) => items.push(item), { includeOwn: true })
+    await client.join('t1')
+    await client.join('t2')
+    const thread = (id: string) => ({ ...epoch(1), id })
+    let resume!: () => void
+    const resumed = new Promise<void>((resolve) => {
+      resume = resolve
+    })
+    let release!: () => void
+    const released = new Promise<void>((resolve) => {
+      release = resolve
+    })
+    let rejoining = false
+    let answered = false
+    server.handlers.set('thread.join', async (payload) => {
+      if (payload.thread_id === 't1') {
+        rejoining = true
+        await resumed
+        return { thread: thread('t1'), seq: 2, truncated: false }
+      }
+      for (let seq = ((payload.since as number | null) ?? 4) + 1; seq <= 4; seq += 1)
+        server.push('event', { ...message(seq, `s${seq}`), thread_id: 't2' })
+      if (payload.epoch === undefined) {
+        answered = true
+        await released
+      }
+      return { thread: thread('t2'), seq: 4, truncated: false }
+    })
+    server.drop()
+    await vi.waitFor(() => expect(rejoining).toBe(true))
+    const user = client.join('t2', { since: 0 })
+    await vi.waitFor(() => expect(answered).toBe(true))
+    resume()
+    await vi.waitFor(() =>
+      expect(items.some((item) => 'truncated' in item && item.thread.id === 't1')).toBe(true)
+    )
+    release()
+    await user
+    await vi.waitFor(() => expect(client.status).toBe('open'))
+    expect(
+      items.flatMap((item) => ('author' in item && item.thread_id === 't2' ? [item.seq] : []))
+    ).toEqual([1, 2, 3, 4])
+    expect(server.sent('thread.join').at(-1)?.payload).toMatchObject({ thread_id: 't2', since: 4 })
+  })
+
+  const authored = (items: Item[]) => items.flatMap((item) => ('author' in item ? [item.seq] : []))
+
+  it('delivers a thread a re-follow finds made again once and in order', async () => {
+    server.handlers.set('thread.follow', () => ({
+      joined: [{ thread: epoch(1), seq: 8, truncated: false }],
+    }))
+    const client = await connect({ url: 'ws://fake' })
+    const items: Item[] = []
+    client.subscribe((item) => items.push(item), { includeOwn: true })
+    await client.follow()
+    server.handlers.set('thread.follow', () => {
+      server.push('event', message(2, 'new'))
+      server.push('joined', { thread: epoch(2), seq: 2, truncated: false })
+      return { joined: [{ thread: epoch(2), seq: 2, truncated: true }] }
+    })
+    server.drop()
+    await vi.waitFor(() => expect(items).toContainEqual({ kind: 'status', status: 'open' }))
+    server.push('event', message(3, 'new'))
+    await vi.waitFor(() => expect(items.at(-1)).toMatchObject({ seq: 3 }))
+    expect(authored(items)).toEqual([2, 3])
+  })
+
+  it('delivers a followed thread deleted while away and made again whole', async () => {
+    server.handlers.set('thread.follow', () => ({
+      joined: [{ thread: epoch(1), seq: 8, truncated: false }],
+    }))
+    const client = await connect({ url: 'ws://fake' })
+    const items: Item[] = []
+    client.subscribe((item) => items.push(item), { includeOwn: true })
+    await client.follow()
+    server.handlers.set('thread.follow', () => ({ joined: [] }))
+    server.drop()
+    await vi.waitFor(() => expect(items).toContainEqual({ kind: 'status', status: 'open' }))
+    server.push('event', message(2, 'new'))
+    server.push('joined', { thread: epoch(2), seq: 2, truncated: false })
+    server.push('event', message(3, 'new'))
+    await vi.waitFor(() => expect(items.at(-1)).toMatchObject({ seq: 3 }))
+    expect(authored(items)).toEqual([2, 3])
+  })
+
+  it.each([0, 3])(
+    'delivers every event from its since to a rewind raced by its thread made again, with %i before the add',
+    async (before) => {
+      server.seq = 8
+      const client = await connect({ url: 'ws://fake' })
+      const items: Item[] = []
+      client.subscribe((item) => items.push(item), { includeOwn: true })
+      await client.join('t1')
+      const add = before + 2
+      const upTo = (last: number) => Array.from({ length: last }, (_, n) => n + 1)
+      server.handlers.set('thread.join', () => {
+        server.push('signal', { kind: 'thread.deleted', thread_id: 't1', sender: helper })
+        server.push('event', message(add, 'new'))
+        server.push('joined', { thread: epoch(2), seq: add, truncated: false })
+        for (const seq of upTo(add)) server.push('event', message(seq, 'replay'))
+        return { thread: epoch(2), seq: add, truncated: false }
+      })
+      await client.join('t1', { since: 0 })
+      server.push('event', message(add + 1, 'new'))
+      await vi.waitFor(() => expect(items.at(-1)).toMatchObject({ seq: add + 1 }))
+      expect(items.map(label)).toEqual(['thread.deleted', add, 'joined', ...upTo(add), add + 1])
+    }
+  )
+
+  it('leaves no thread to re-join after a join and a leave called together', async () => {
+    const client = await connect({ url: 'ws://fake' })
+    await Promise.all([client.join('t1'), client.leave('t1')])
+    server.drop()
+    await vi.waitFor(() => expect(server.hellos).toHaveLength(2))
+    await vi.waitFor(() => expect(client.status).toBe('open'))
+    expect(server.sent().map((frame) => frame.method)).toEqual(['thread.join', 'thread.leave'])
+  })
+
+  it('delivers every event from its since to a first join raced by its own add', async () => {
+    server.handlers.set('thread.follow', () => ({ joined: [] }))
+    const client = await connect({ url: 'ws://fake' })
+    const items: Item[] = []
+    client.subscribe((item) => items.push(item), { includeOwn: true })
+    await client.follow()
+    const t2 = (seq: number) => ({ ...message(seq, 'x'), thread_id: 't2' })
+    server.handlers.set('thread.join', () => {
+      server.push('event', t2(5))
+      server.push('joined', { thread: { ...epoch(1), id: 't2' }, seq: 5, truncated: false })
+      for (const seq of [1, 2, 3, 4, 5]) server.push('event', t2(seq))
+      return { thread: { ...epoch(1), id: 't2' }, seq: 5, truncated: false }
+    })
+    await client.join('t2', { since: 0 })
+    expect(items.map(label)).toEqual([5, 'joined', 1, 2, 3, 4, 5])
+  })
+
+  it('keeps a left thread left after a drop when a follower joins and leaves it together', async () => {
+    server.handlers.set('thread.follow', () => ({
+      joined: [{ thread: epoch(1), seq: 3, truncated: false }],
+    }))
+    server.seq = 3
+    const client = await connect({ url: 'ws://fake' })
+    await client.follow()
+    await client.leave('t1')
+    await Promise.all([client.join('t1'), client.leave('t1')])
+    server.drop()
+    await vi.waitFor(() => expect(server.sent('thread.follow')).toHaveLength(2))
+    expect(server.sent('thread.follow').at(-1)?.payload.left).toEqual({ t1: { seq: 3, epoch: 1 } })
+  })
+
+  it('keeps no presence for a thread joined and put away together', async () => {
+    const client = await connect({ url: 'ws://fake' })
+    await Promise.all([client.join('t1'), client.away('t1')])
+    expect(server.sent().map((frame) => frame.method)).toEqual(['thread.join', 'thread.away'])
+    const state = client as unknown as {
+      cursors: Map<string, number>
+      held: Set<string>
+      leaves: Map<string, number>
+    }
+    expect([[...state.cursors.keys()], [...state.held], state.leaves.size]).toEqual([['t1'], [], 0])
+    server.drop()
+    await vi.waitFor(() => expect(server.sent('thread.join')).toHaveLength(2))
+    expect(server.sent('thread.join').at(-1)?.payload).toEqual({
+      thread_id: 't1',
+      since: 0,
+      away: true,
+      epoch: 1,
+    })
+  })
+
+  it('sends a leave called behind two joins of a thread after both, and ends left', async () => {
+    const client = await connect({ url: 'ws://fake' })
+    await Promise.all([client.join('t1'), client.join('t1'), client.leave('t1')])
+    expect(server.sent().map((frame) => frame.method)).toEqual([
+      'thread.join',
+      'thread.join',
+      'thread.leave',
+    ])
+    const state = client as unknown as {
+      cursors: Map<string, number>
+      held: Set<string>
+      leaves: Map<string, number>
+    }
+    expect([[...state.cursors.keys()], [...state.held], state.leaves.size]).toEqual([[], [], 0])
+    server.drop()
+    await vi.waitFor(() => expect(server.hellos).toHaveLength(2))
+    await vi.waitFor(() => expect(client.status).toBe('open'))
+    expect(server.sent('thread.join')).toHaveLength(2)
+  })
+
+  it('settles a join whose hold buffered two hundred thousand events, and frees the next one', async () => {
+    const client = await connect({ url: 'ws://fake' })
+    let delivered = 0
+    client.subscribe(
+      () => {
+        delivered += 1
+      },
+      { includeOwn: true }
+    )
+    let joins = 0
+    server.handlers.set('thread.join', () => {
+      if (++joins === 1)
+        for (let seq = 1; seq <= 200000; seq++) server.push('event', message(seq, 'x'))
+      return { thread: epoch(1), seq: 200000, truncated: false }
+    })
+    const first = client.join('t1', { since: 0 })
+    const second = client.join('t1')
+    await expect(first).resolves.toMatchObject({ seq: 200000 })
+    await expect(second).resolves.toMatchObject({ seq: 200000 })
+    expect(delivered).toBe(200000)
+  }, 20000)
+
+  it.each([
+    [['leave', 'join'], false],
+    [['join', 'leave', 'join'], false],
+    [['leave', 'join'], true],
+  ] as const)(
+    'sends %j called together in call order and ends joined, joined first: %s',
+    async (calls, joinedFirst) => {
+      const client = await connect({ url: 'ws://fake' })
+      if (joinedFirst) await client.join('t1')
+      const before = server.sent().length
+      await Promise.all(calls.map((call) => client[call]('t1')))
+      expect(
+        server
+          .sent()
+          .slice(before)
+          .map((frame) => frame.method)
+      ).toEqual(calls.map((call) => `thread.${call}`))
+      const state = client as unknown as { cursors: Map<string, number>; held: Set<string> }
+      expect([[...state.cursors.keys()], [...state.held]]).toEqual([['t1'], ['t1']])
+    }
+  )
+
+  it('follows a thread again when a follower leaves it and follows again together', async () => {
+    server.handlers.set('thread.follow', () => ({
+      joined: [{ thread: epoch(1), seq: 3, truncated: false }],
+    }))
+    const client = await connect({ url: 'ws://fake' })
+    await client.follow()
+    await Promise.all([client.leave('t1'), client.follow()])
+    expect(server.sent().map((frame) => frame.method)).toEqual([
+      'thread.follow',
+      'thread.leave',
+      'thread.follow',
+    ])
+    const state = client as unknown as { cursors: Map<string, number>; left: Map<string, number> }
+    expect([[...state.cursors.keys()], [...state.left.keys()]]).toEqual([['t1'], []])
+  })
+
+  it('does not re-join a present thread left during the re-follow', async () => {
+    const followed = (...ids: string[]) => ({
+      joined: ids.map((id) => ({ thread: { ...epoch(1), id }, seq: 4, truncated: false })),
+    })
+    server.handlers.set('thread.follow', () => followed('t1', 't0'))
+    const client = await connect({ url: 'ws://fake' })
+    await client.follow()
+    await client.join('t1')
+    await client.join('t0')
+    const state = client as unknown as {
+      cursors: Map<string, number>
+      held: Set<string>
+      left: Map<string, number>
+    }
+    const [first, second] = [...state.cursors.keys()] as [string, string]
+    let left: Promise<void> | undefined
+    server.handlers.set('thread.follow', () => {
+      left = client.leave(second)
+      return followed('t1', 't0')
+    })
+    const before = server.sent().length
+    server.drop()
+    await vi.waitFor(() => expect(server.hellos).toHaveLength(2))
+    await vi.waitFor(() => expect(client.status).toBe('open'))
+    await left
+    expect(
+      server
+        .sent()
+        .slice(before)
+        .map((frame) => `${frame.method}:${frame.payload.thread_id ?? ''}`)
+    ).toEqual(['thread.follow:', `thread.leave:${second}`, `thread.join:${first}`])
+    expect([[...state.cursors.keys()], [...state.held], [...state.left]]).toEqual([
+      [first],
+      [first],
+      [[second, 4]],
+    ])
+  })
+
+  it('sends an away called behind two joins of a thread after both, and ends not present', async () => {
+    const client = await connect({ url: 'ws://fake' })
+    await Promise.all([client.join('t1'), client.join('t1'), client.away('t1')])
+    expect(server.sent().map((frame) => frame.method)).toEqual([
+      'thread.join',
+      'thread.join',
+      'thread.away',
+    ])
+    const state = client as unknown as { held: Set<string>; leaves: Map<string, number> }
+    expect([[...state.held], state.leaves.size]).toEqual([[], 0])
+  })
+
+  it('finishes every hold of a re-follow before draining any, so a drain that throws frees the others', async () => {
+    const followed = (...ids: string[]) => ({
+      joined: ids.map((id) => ({ thread: { ...epoch(1), id }, seq: 4, truncated: false })),
+    })
+    server.handlers.set('thread.follow', () => followed('t1', 't2'))
+    const client = await connect({ url: 'ws://fake' })
+    await client.follow()
+    let pushed = false
+    server.handlers.set('thread.follow', () => {
+      if (!pushed) {
+        pushed = true
+        server.push('event', { thread_id: 't1', seq: 5, kind: 'member_added', identity: null })
+      }
+      return followed('t1', 't2')
+    })
+    server.drop()
+    await vi.waitFor(() => expect(server.sent('thread.follow')).toHaveLength(3))
+    await vi.waitFor(() => expect(client.status).toBe('open'))
+    expect([...(client as unknown as { holds: Map<string, unknown> }).holds.keys()]).toEqual([])
+    const second = client.join('t2').then(() => 'answered')
+    const waited = new Promise((resolve) => setTimeout(() => resolve('waiting'), 500))
+    await expect(Promise.race([second, waited])).resolves.toBe('answered')
+  })
+
+  it('delivers what a followed thread says while a join of it is refused', async () => {
+    server.handlers.set('thread.follow', () => ({
+      joined: [{ thread: epoch(1), seq: 3, truncated: false }],
+    }))
+    const client = await connect({ url: 'ws://fake' })
+    const items: Item[] = []
+    client.subscribe((item) => items.push(item), { includeOwn: true })
+    await client.follow()
+    server.handlers.set('thread.join', ({ thread_id }) => {
+      server.push('event', message(4, 'live'))
+      throw { code: 'forbidden', message: `server: 'ana' may not read in thread '${thread_id}'` }
+    })
+    await expect(client.join('t1', { since: 0 })).rejects.toBeInstanceOf(ForbiddenError)
+    expect(authored(items)).toEqual([4])
+  })
+
+  it('hands a thread made again over once from its start when its re-join fails after the replay', async () => {
+    server.seq = 3
+    const client = await connect({ url: 'ws://fake' })
+    const items: Item[] = []
+    client.subscribe((item) => items.push(item), { includeOwn: true })
+    await client.join('t1')
+    let joins = 0
+    server.handlers.set('thread.join', () => {
+      for (const seq of [1, 2, 3, 4, 5, 6]) server.push('event', message(seq, 'new'))
+      if (++joins === 1) throw { code: 'storage', message: 'postgres: busy' }
+      return { thread: epoch(2), seq: 6, truncated: true }
+    })
+    server.drop()
+    await vi.waitFor(() => expect(items.filter((item) => 'truncated' in item)).toHaveLength(1))
+    expect(items.map(label)).toEqual(['reconnecting', 'open', 'joined', 1, 2, 3, 4, 5, 6])
+  })
+
+  it('hands a thread made again over once from its start when its re-follow fails after the replay', async () => {
+    let follows = 0
+    server.handlers.set('thread.follow', () => {
+      if (++follows === 1) return { joined: [{ thread: epoch(1), seq: 3, truncated: false }] }
+      if (follows === 2) {
+        for (const seq of [1, 2, 3, 4, 5, 6]) server.push('event', message(seq, 'new'))
+        throw { code: 'storage', message: 'postgres: busy' }
+      }
+      return { joined: [{ thread: epoch(2), seq: 6, truncated: false }] }
+    })
+    server.handlers.set('thread.join', () => {
+      for (const seq of [1, 2, 3, 4, 5, 6]) server.push('event', message(seq, 'new'))
+      return { thread: epoch(2), seq: 6, truncated: true }
+    })
+    const client = await connect({ url: 'ws://fake' })
+    const items: Item[] = []
+    client.subscribe((item) => items.push(item), { includeOwn: true })
+    await client.follow()
+    server.drop()
+    await vi.waitFor(() => expect(server.sent('thread.follow')).toHaveLength(3))
+    await vi.waitFor(() => expect(items.filter((item) => 'truncated' in item)).toHaveLength(3))
+    expect(items.map(label)).toEqual([
+      'joined',
+      'reconnecting',
+      'joined',
+      1,
+      2,
+      3,
+      4,
+      5,
+      6,
+      'open',
+      'joined',
+    ])
+  })
+
+  it('keeps a thread present when a join of it is answered after another join of it was refused', async () => {
+    const client = await connect({ url: 'ws://fake' })
+    const join = server.handlers.get('thread.join')
+    let joins = 0
+    server.handlers.set('thread.join', (payload) => {
+      if (++joins === 1) throw { code: 'storage', message: 'postgres: busy' }
+      return join?.(payload) ?? {}
+    })
+    const first = client.join('t1')
+    const second = client.join('t1')
+    await expect(first).rejects.toThrow('postgres: busy')
+    await second
+    server.drop()
+    await vi.waitFor(() => expect(server.sent('thread.join')).toHaveLength(3))
+    expect(server.sent('thread.join').at(-1)?.payload).toEqual({
+      thread_id: 't1',
+      since: 0,
+      epoch: 1,
+    })
+  })
+
+  it('delivers a rewind across its own removal and a later add whole', async () => {
+    const { client, items } = await joined()
+    const member = (seq: number, kind: 'member_added' | 'member_removed') => ({
+      kind,
+      id: `m${seq}`,
+      thread_id: 't1',
+      seq,
+      author: helper,
+      created_at: '2026-01-01T12:00:00Z',
+      client_id: `c${seq}`,
+      identity: server.identity,
+    })
+    server.handlers.set('thread.join', () => {
+      server.push('event', member(1, 'member_added'))
+      server.push('event', message(2, 'a'))
+      server.push('event', member(3, 'member_removed'))
+      server.push('event', message(4, 'b'))
+      server.push('event', member(5, 'member_added'))
+      server.push('event', message(6, 'c'))
+      return { thread: epoch(1), seq: 6, truncated: false }
+    })
+    await client.join('t1', { since: 0 })
+    server.push('event', message(7, 'live'))
+    expect(authored(items)).toEqual([1, 2, 3, 4, 5, 6, 7])
+    expect((client as unknown as { cursors: Map<string, number> }).cursors.get('t1')).toBe(7)
+  })
 
   it('stores a write whose ack was lost exactly once', async () => {
     const { client } = await joined()
@@ -1422,21 +2018,30 @@ describe('client', () => {
     await client.close()
   })
 
-  it('leaves again a thread left while the re-follow was in flight', async () => {
+  it('sends a leave called while the re-follow was in flight once the re-follow is answered', async () => {
     server.handlers.set('thread.follow', () => followed('t1', 't2'))
     const client = await connect({ url: 'ws://fake', protocols: ['thread', 'tok'] })
     const items: Item[] = []
     client.subscribe((item) => items.push(item))
     await client.follow()
+    let left: Promise<void> | undefined
     server.handlers.set('thread.follow', () => {
-      void client.leave('t1')
+      left = client.leave('t1')
       return followed('t1', 't2')
     })
     items.length = 0
     server.drop()
     await vi.waitFor(() => expect(items).toContainEqual({ kind: 'status', status: 'open' }))
-    await vi.waitFor(() => expect(server.sent('thread.leave')).toHaveLength(2))
-    expect(items.flatMap((item) => ('truncated' in item ? [item.thread.id] : []))).toEqual(['t2'])
+    await left
+    expect(server.sent().map((frame) => frame.method)).toEqual([
+      'thread.follow',
+      'thread.follow',
+      'thread.leave',
+    ])
+    expect(items.flatMap((item) => ('truncated' in item ? [item.thread.id] : []))).toEqual([
+      't1',
+      't2',
+    ])
     server.handlers.set('thread.follow', () => followed('t2'))
     server.drop()
     await vi.waitFor(() => expect(server.sent('thread.follow')).toHaveLength(3))
@@ -1669,7 +2274,7 @@ describe('client', () => {
     server.push('event', message(4, 'live'))
     server.push('event', message(5, 'after'))
     await vi.waitFor(() => expect(items.at(-1)).toMatchObject({ seq: 5 }))
-    expect(items.flatMap((item) => ('author' in item ? [item.seq] : []))).toEqual([4, 1, 2, 3, 5])
+    expect(items.flatMap((item) => ('author' in item ? [item.seq] : []))).toEqual([1, 2, 3, 4, 5])
     await client.close()
   })
 
@@ -1686,13 +2291,13 @@ describe('client', () => {
       joined: [{ thread: t1, seq: 20, truncated: false }],
     }))
     server.handlers.set('thread.join', ({ since }) => {
-      if (log.length === 20) {
+      for (const event of log.filter((event) => event.seq > (since ?? log.length)))
+        server.push('event', event)
+      if (since === 10) {
         const live = message(21, 'live')
         log.push(live)
         server.push('event', live)
       }
-      for (const event of log.filter((event) => event.seq > (since ?? log.length)))
-        server.push('event', event)
       return { thread: t1, seq: log.length, truncated: false }
     })
     const client = await connect({ url: 'ws://fake', protocols: ['thread', 'tok'] })
@@ -1701,7 +2306,8 @@ describe('client', () => {
     await client.follow()
     const first = client.join('t1', { since: 5 })
     const second = client.join('t1', { since: 10 })
-    expect([(await first).seq, (await second).seq]).toEqual([21, 21])
+    expect([(await first).seq, (await second).seq]).toEqual([20, 21])
+    expect(server.sent('thread.join').map((frame) => frame.payload.since)).toEqual([5, 10])
     const seqs = items.flatMap((item) => ('author' in item ? [item.seq] : []))
     const expected = [
       ...Array.from({ length: 15 }, (_, n) => n + 6),
@@ -1835,7 +2441,7 @@ describe('client', () => {
     server.push('event', message(4, 'live'))
     server.push('event', message(5, 'after'))
     await vi.waitFor(() => expect(items.at(-1)).toMatchObject({ seq: 5 }))
-    expect(items.flatMap((item) => ('author' in item ? [item.seq] : []))).toEqual([4, 2, 3, 5])
+    expect(items.flatMap((item) => ('author' in item ? [item.seq] : []))).toEqual([2, 3, 4, 5])
     await client.close()
   })
 

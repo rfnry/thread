@@ -263,6 +263,11 @@ at most 500 events (`Server(replay_limit=)`); beyond that you get the latest 500
 `truncated=True`, and `history(thread.id, before=seq)` pages back when you want more. A `since`
 past the thread's last `seq` — it was deleted and made again under the same id, which gives it a new
 `epoch` — replays nothing and says `truncated=True` too, and the client follows the thread from `joined.seq`.
+What arrives for a thread before its join is answered is handed over with the answer, in `seq` order
+and each event once, and a second join of the same thread waits for that answer; a join that fails
+still hands over what a thread this connection already receives said meanwhile. A thread deleted
+meanwhile hands over what it said before its `ThreadDeleted`, and one made again meanwhile answers
+the join as the new thread, with `truncated=True`.
 
 A participant that follows never needs this: a thread it is added to arrives on its own
 ([Following and catching up](#following-and-catching-up)).
@@ -451,7 +456,8 @@ drops the socket at once is redialled at once the first time and after a growing
 after, while a long-lived connection that drops is redialled at once; a following client follows again from the last `seq` it saw in each
 thread, and every client re-joins every thread it had joined from there; the missed events arrive
 before anything new. A re-join refused because the thread is gone or no longer yours (`NotFoundError`,
-`ForbiddenError`) forgets that thread, and a re-follow refused so joins each thread instead, the
+`ForbiddenError`) forgets that thread, as does a re-follow that no longer hands back a thread only
+followed, so the thread arrives whole if it is made again; a re-follow refused so joins each thread instead, the
 client no longer following until you call `follow()` again. A re-join or re-follow refused as a
 wrong request (`InputError`, `ConfigurationError`), as a server of another release refuses it, stops
 the client with that error, as a refused hello does. Any other refusal, a storage failure or an
@@ -462,11 +468,14 @@ Until then nothing of that thread reaches the client, though writes to it still 
 `Joined` arrives once it is joined again. While the follow is tried again, a thread you are added
 to arrives as `Invited`, and as `Joined` once the follow is taken.
 A re-follow's or re-join's `Joined`
-also arrives in `events()`, and when it says `truncated`, redraw from the latest page. Each position
+also arrives in `events()`, after the events it caught up on, and when it says `truncated`, redraw
+from the latest page. Each position
 a re-join or re-follow resumes from carries the `epoch` of the thread it was read in, the number
 Postgres gave the thread when it was made, so a
 thread deleted and made again under the same id while the client was away arrives from its start
-(from your add in a `since_added` thread), at most the replay limit of it, with `truncated=True`. A reconnect
+(from your add in a `since_added` thread), at most the replay limit of it, with `truncated=True`:
+that `Joined` comes first, the new thread's events follow it in `seq` order, and nothing of the old
+thread arrives as the new one's. A reconnect
 your endpoint refuses (HTTP 401 or 403 on the upgrade, or 1008 before the hello is answered), or
 whose `headers` function raises `ForbiddenError`, stops the client, and `events()` raises that
 error; an error from `headers` that is not the library's is a failed attempt, retried with backoff

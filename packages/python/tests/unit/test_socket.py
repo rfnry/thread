@@ -903,23 +903,27 @@ async def test_leaving_a_thread_twice_keeps_it_left_after_a_drop(live: Live) -> 
     assert [j.thread.id for j in items if isinstance(j, Joined)] == ["t2"]
 
 
-async def test_a_leave_made_while_the_refollow_is_in_flight_holds(live: Live) -> None:
+async def test_a_leave_made_while_the_refollow_is_in_flight_is_sent_once_it_is_answered(
+    live: Live,
+) -> None:
     ana, bruno, _ = await followed_and_left(live)
     request = ana._request
+    leaves: list[asyncio.Task[None]] = []
 
     async def leave_meanwhile(method: str, payload: dict[str, Any]) -> dict[str, Any]:
         if method == "thread.follow":
-            await ana.leave("t1")
+            leaves.append(asyncio.ensure_future(ana.leave("t1")))
         return await request(method, payload)
 
     ana._request = leave_meanwhile  # type: ignore[method-assign]
     await drop_and_reopen(live, ana)
+    await asyncio.gather(*leaves)
     ana._request = request  # type: ignore[method-assign]
     await bruno.send("t1", "left")
     await bruno.send("t2", "followed")
     items = await drain(ana)
     assert [first_text(m) for m in items if isinstance(m, Message)] == ["followed"]
-    assert [j.thread.id for j in items if isinstance(j, Joined)] == ["t2"]
+    assert sorted(j.thread.id for j in items if isinstance(j, Joined)) == ["t1", "t2"]
     await drop_and_reopen(live, ana)
     await bruno.send("t1", "still left")
     assert [first_text(m) for m in await drain(ana) if isinstance(m, Message)] == []

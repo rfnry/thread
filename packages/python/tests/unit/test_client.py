@@ -32,6 +32,7 @@ from rfnry_thread.models import (
     Joined,
     Marked,
     MemberAdded,
+    MemberRemoved,
     Message,
     Present,
     Read,
@@ -43,9 +44,10 @@ from rfnry_thread.models import (
     StreamStart,
     Text,
     Thread,
+    ThreadDeleted,
     Working,
 )
-from rfnry_thread.pipe import pipe
+from rfnry_thread.pipe import End, pipe
 from rfnry_thread.postgres import PostgresStorage
 from rfnry_thread.protocol import ErrorFrame, Failure, Push, Response, encode
 from rfnry_thread.resolve import resolve
@@ -504,8 +506,8 @@ async def test_a_follower_joining_since_a_seq_while_a_live_event_lands_gets_each
 
     async def land(method: str, payload: dict[str, Any]) -> dict[str, Any]:
         if method == "thread.join":
-            sent = await ana.send("t1", "live")
-            await until(lambda: page._cursors.get("t1") == sent.seq)
+            live = await ana.send("t1", "live")
+            await until(lambda: held(page, "t1", live.seq))
         return await request(method, payload)
 
     page._request = land  # type: ignore[method-assign]
@@ -548,6 +550,11 @@ async def widen_arrival(server: Server, who: str, ana: Client, *texts: str) -> N
     server._hub._arrive = slow  # type: ignore[method-assign]
 
 
+def held(client: Client, thread_id: str, seq: int) -> bool:
+    hold = client._holds.get(thread_id)
+    return hold is not None and any(event.seq == seq for event in hold.events)
+
+
 def said(items: Sequence[Item]) -> list[str]:
     return [
         part.text
@@ -582,7 +589,7 @@ async def test_a_join_past_the_head_emits_the_events_around_the_sent_position_in
     page = await server.connect(identity=HELPER, scope="acme")
     await widen_arrival(server, HELPER.id, ana, "a", "b", "c", "d")
     joined = await asyncio.wait_for(page.join("t1", since=head + 3), 2)
-    assert joined.seq == head
+    assert joined.seq == head + 4
     items = await drain(page)
     assert said(items) == ["a", "b", "c", "d"]
     assert [item.seq for item in items if isinstance(item, Message)] == [
@@ -616,9 +623,10 @@ async def test_overlapping_joins_each_keep_their_own_hold(server: Server) -> Non
     await asyncio.wait_for(entered.wait(), 2)
     await ana.send("t1", "raced")
     await asyncio.sleep(0.05)
-    await asyncio.wait_for(page.join("t1"), 2)
+    plain = asyncio.create_task(page.join("t1"))
     gate.set()
     assert (await asyncio.wait_for(past, 2)).truncated
+    await asyncio.wait_for(plain, 2)
     await ana.send("t1", "after")
     assert said(await drain(page)) == ["raced", "after"]
     assert not page._holds
@@ -723,13 +731,13 @@ async def test_overlapping_joins_past_the_head_emit_each_event_once(server: Serv
     first = asyncio.create_task(page.join("t1", since=40))
     await asyncio.wait_for(entered[0].wait(), 2)
     second = asyncio.create_task(page.join("t1", since=40))
-    await asyncio.wait_for(entered[1].wait(), 2)
     await ana.send("t1", "raced")
     await asyncio.sleep(0.05)
-    gates[1].set()
-    await asyncio.wait_for(second, 2)
     gates[0].set()
     await asyncio.wait_for(first, 2)
+    await asyncio.wait_for(entered[1].wait(), 2)
+    gates[1].set()
+    await asyncio.wait_for(second, 2)
     await ana.send("t1", "after")
     assert said(await drain(page)) == ["raced", "after"]
 
@@ -751,9 +759,9 @@ async def test_a_plain_join_leaves_a_stale_cursor_and_the_past_the_head_join_sti
         return await request(method, payload)
 
     page._request = delayed  # type: ignore[method-assign]
+    await asyncio.wait_for(page.join("t1"), 2)
     past = asyncio.create_task(page.join("t1", since=40))
     await asyncio.sleep(0.02)
-    await asyncio.wait_for(page.join("t1"), 2)
     await ana.send("t1", "raced")
     await asyncio.sleep(0.05)
     go.set()
@@ -787,9 +795,9 @@ async def test_a_rewind_does_not_emit_again_a_copy_of_an_event_emitted_before_a_
 
     page._request = ordered  # type: ignore[method-assign]
     rewind = asyncio.create_task(page.join("t1", since=0))
-    await asyncio.sleep(0.02)
+    await until(lambda: "t1" in page._holds)
     live = await ana.send("t1", "live")
-    await until(lambda: page._cursors.get("t1") == live.seq)
+    await until(lambda: held(page, "t1", live.seq))
     past = asyncio.create_task(page.join("t1", since=40))
     await asyncio.sleep(0.05)
     go.set()
@@ -848,33 +856,152 @@ async def test_overlapping_joins_since_a_followed_thread_each_replay_their_own_w
     await drain(page)
     assert page._cursors["t1"] == 20
     request = page._request
-    landed = asyncio.Event()
     joining: list[int] = []
     second: list[asyncio.Task[Any]] = []
-    live: list[Message] = []
 
     async def overlap(method: str, payload: dict[str, Any]) -> dict[str, Any]:
         if method == "thread.join":
             joining.append(payload["since"])
-        if joining == [5]:
-            second.append(asyncio.create_task(page.join("t1", since=10)))
-            await until(lambda: joining == [5, 10])
-            live.append(await ana.send("t1", "live"))
-            await until(lambda: page._cursors.get("t1") == live[0].seq)
-            landed.set()
-        elif method == "thread.join":
-            await landed.wait()
+            if payload["since"] == 5:
+                second.append(asyncio.create_task(page.join("t1", since=10)))
+            else:
+                await widen_arrival(server, HELPER.id, ana, "live")
         return await request(method, payload)
 
     page._request = overlap  # type: ignore[method-assign]
     first = await page.join("t1", since=5)
     other = await second[0]
-    assert (first.seq, other.seq) == (21, 21)
+    assert joining == [5, 10]
+    assert (first.seq, other.seq) == (20, 21)
     seqs = sorted(item.seq for item in await drain(page) if isinstance(item, Message))
     assert seqs == sorted([*range(6, 21), *range(11, 21), 21])
-    assert not page._rewinds
     await ana.send("t1", "after")
     assert [item.seq for item in await drain(page) if isinstance(item, Message)] == [22]
+
+
+async def test_a_second_join_of_a_thread_waits_for_the_first_answer(server: Server) -> None:
+    ana = await server.connect(identity=ANA, scope="acme")
+    await ana.create_thread(thread_id="t1")
+    await ana.add_member("t1", HELPER)
+    await ana.send("t1", "first")
+    page = await server.connect(identity=HELPER, scope="acme")
+    request = page._request
+    joins: list[int | None] = []
+    gate = asyncio.Event()
+
+    async def gated(method: str, payload: dict[str, Any]) -> dict[str, Any]:
+        if method == "thread.join":
+            joins.append(payload["since"])
+        reply = await request(method, payload)
+        if payload.get("since") == 0:
+            await gate.wait()
+        return reply
+
+    page._request = gated  # type: ignore[method-assign]
+    first = asyncio.create_task(page.join("t1", since=0))
+    await until(lambda: joins == [0])
+    second = asyncio.create_task(page.join("t1"))
+    await asyncio.sleep(0.05)
+    assert joins == [0]
+    gate.set()
+    await asyncio.wait_for(asyncio.gather(first, second), 2)
+    assert joins == [0, None]
+    await ana.send("t1", "after")
+    assert said(await drain(page)) == ["first", "after"]
+
+
+async def test_a_rewind_on_a_joined_thread_delivers_from_since_in_order_once(
+    server: Server,
+) -> None:
+    ana = await server.connect(identity=ANA, scope="acme")
+    await ana.create_thread(thread_id="t1")
+    await ana.add_member("t1", HELPER)
+    page = await server.connect(identity=HELPER, scope="acme")
+    joined = await page.join("t1")
+    for n in range(2):
+        await ana.send("t1", f"m{n}")
+    assert said(await drain(page)) == ["m0", "m1"]
+    request = page._request
+
+    async def landed(method: str, payload: dict[str, Any]) -> dict[str, Any]:
+        if method == "thread.join":
+            live = await ana.send("t1", "live")
+            await until(lambda: held(page, "t1", live.seq))
+        return await request(method, payload)
+
+    page._request = landed  # type: ignore[method-assign]
+    await asyncio.wait_for(page.join("t1", since=joined.seq), 2)
+    await ana.send("t1", "after")
+    items = await drain(page)
+    assert said(items) == ["m0", "m1", "live", "after"]
+    assert [item.seq for item in items if isinstance(item, Message)] == [
+        joined.seq + n for n in range(1, 5)
+    ]
+
+
+async def test_a_rewind_across_an_own_removal_and_a_later_add_delivers_every_event_from_its_since(
+    server: Server,
+) -> None:
+    bruno = await server.connect(identity=BRUNO, scope="acme")
+    await bruno.create_thread(thread_id="t1")
+    await bruno.add_member("t1", ANA)
+    await bruno.send("t1", "a")
+    await bruno.remove_member("t1", ANA)
+    await bruno.send("t1", "b")
+    await bruno.add_member("t1", ANA)
+    await bruno.send("t1", "c")
+    ana = await server.connect(identity=ANA, scope="acme")
+    await ana.join("t1")
+    await drain(ana)
+    await ana.join("t1", since=0)
+    live = await bruno.send("t1", "live")
+    items = await drain(ana)
+    assert [
+        (type(i).__name__, i.seq)
+        for i in items
+        if isinstance(i, MemberAdded | MemberRemoved | Message)
+    ] == [
+        ("MemberAdded", 1),
+        ("MemberAdded", 2),
+        ("Message", 3),
+        ("MemberRemoved", 4),
+        ("Message", 5),
+        ("MemberAdded", 6),
+        ("Message", 7),
+        ("Message", 8),
+    ]
+    assert ana._cursors["t1"] == live.seq and "t1" in ana._present
+
+
+async def test_a_join_whose_thread_is_made_again_before_its_answer_admits_nothing_of_the_old_one(
+    server: Server,
+) -> None:
+    bruno = await server.connect(identity=BRUNO, scope="acme")
+    await bruno.create_thread(thread_id="t1")
+    await bruno.add_member("t1", HELPER)
+    page = await server.connect(identity=HELPER, scope="acme")
+    await page.join("t1")
+    await drain(page)
+    request = page._request
+
+    async def remade(method: str, payload: dict[str, Any]) -> dict[str, Any]:
+        if method == "thread.join":
+            old = await bruno.send("t1", "old")
+            await until(lambda: held(page, "t1", old.seq))
+            await server.delete_thread("acme", "t1")
+            await bruno.create_thread(thread_id="t1")
+            await bruno.add_member("t1", HELPER)
+            await bruno.send("t1", "new")
+        return await request(method, payload)
+
+    page._request = remade  # type: ignore[method-assign]
+    joined = await asyncio.wait_for(page.join("t1", since=0), 2)
+    items = await drain(page)
+    gone = next(n for n, item in enumerate(items) if isinstance(item, ThreadDeleted))
+    assert said(items[:gone]) == ["old"]
+    after = [item for item in items[gone + 1 :] if isinstance(item, MemberAdded | Message)]
+    assert [item.seq for item in after] == [1, 2, 3] == list(range(1, joined.seq + 1))
+    assert said(after) == ["new"]
 
 
 async def test_a_failed_join_keeps_the_cursor_of_a_thread_the_client_follows(
@@ -899,7 +1026,10 @@ async def test_a_failed_join_keeps_the_cursor_of_a_thread_the_client_follows(
         with pytest.raises(ForbiddenError):
             await page.join("t1", since=since)
         assert page._cursors["t1"] == old.seq
-        page._receive(Push(name="event", payload=old.model_dump(mode="json")))
+        page._receive(
+            Push(name="event", payload=old.model_dump(mode="json")),
+            cast(Connection, page._connection),
+        )
         assert [item for item in await drain(page) if isinstance(item, Message)] == []
     with pytest.raises(ForbiddenError):
         await page.join("t2")
@@ -950,7 +1080,7 @@ async def test_a_follower_that_joins_with_resume_reads_the_thread_from_its_mark_
     joined = await page.join("t1", resume=True)
     assert joined.seq == 5
     assert [item.seq for item in await drain(page) if isinstance(item, Message)] == [4, 5]
-    assert page._cursors["t1"] == 5 and not page._rewinds
+    assert page._cursors["t1"] == 5
     await ana.send("t1", "live")
     assert [item.seq for item in await drain(page) if isinstance(item, Message)] == [6]
 
@@ -1728,3 +1858,700 @@ async def test_a_thread_made_again_while_the_client_was_away_is_resumed_whole_an
     )
     assert said(items) == ["new 0", "new 1", "new 2", "new 3"]
     assert ana._cursors["t1"] == 6
+
+
+async def back_after(client: Client, meanwhile: Callable[[], Awaitable[None]]) -> list[Item]:
+    released = asyncio.Event()
+    dial = client._dial
+
+    async def held() -> Connection:
+        await released.wait()
+        return await dial()
+
+    client._dial = held
+    connection = client._connection
+    assert connection is not None
+    await connection.close()
+    await until(lambda: client.status == "reconnecting")
+    await meanwhile()
+    released.set()
+    await until(lambda: client.status == "open")
+    client._dial = dial
+    return [i for i in await drain(client) if isinstance(i, Joined | MemberAdded | Message)]
+
+
+async def test_a_rejoin_answered_with_another_epoch_delivers_the_new_thread_from_its_start_in_order(
+    server: Server,
+) -> None:
+    ana = await server.connect(identity=ANA, scope="acme")
+    bruno = await server.connect(identity=BRUNO, scope="acme")
+    await bruno.create_thread(thread_id="t1")
+    await bruno.add_member("t1", ANA)
+    await ana.join("t1")
+    await drain(ana)
+
+    async def missed() -> None:
+        await bruno.send("t1", "missed")
+
+    items = await back_after(ana, missed)
+    assert [type(i).__name__ for i in items] == ["Message", "Joined"]
+    assert said(items) == ["missed"]
+
+    async def made_again() -> None:
+        await server.delete_thread("acme", "t1")
+        await bruno.create_thread(thread_id="t1", history="since_added")
+        for n in range(3):
+            await bruno.send("t1", f"before the add {n}")
+        await bruno.add_member("t1", ANA)
+        for n in range(2):
+            await bruno.send("t1", f"new {n}")
+        await widen_arrival(server, ANA.id, bruno, "raced")
+
+    items = await back_after(ana, made_again)
+    assert [type(i).__name__ for i in items] == [
+        "Joined",
+        "MemberAdded",
+        "Message",
+        "Message",
+        "Message",
+    ]
+    assert isinstance(items[0], Joined) and items[0].truncated
+    assert said(items) == ["new 0", "new 1", "raced"]
+    assert [i.seq for i in items if isinstance(i, MemberAdded | Message)] == [5, 6, 7, 8]
+    await bruno.send("t1", "after")
+    assert said(await drain(ana)) == ["after"]
+
+
+@pytest.mark.parametrize("verb", ["join", "follow"])
+async def test_a_thread_made_again_arrives_once_from_its_start_when_its_rejoin_or_refollow_fails_after_the_replay(
+    server: Server, monkeypatch: pytest.MonkeyPatch, verb: str
+) -> None:
+    monkeypatch.setattr(client_module, "RECONNECT", 0.01)
+    ana = await server.connect(identity=ANA, scope="acme")
+    bruno = await server.connect(identity=BRUNO, scope="acme")
+    await bruno.create_thread(thread_id="t1")
+    await bruno.add_member("t1", ANA)
+    await (ana.follow() if verb == "follow" else ana.join("t1"))
+    await bruno.send("t1", "old")
+    await until(lambda: ana._cursors.get("t1") == 3)
+    await drain(ana)
+    request = ana._request
+    failed: list[str] = []
+
+    async def failing(method: str, payload: dict[str, Any]) -> dict[str, Any]:
+        reply = await request(method, payload)
+        if method == f"thread.{verb}" and not failed:
+            failed.append(method)
+            raise StorageError("postgres: storage rejected the reply")
+        return reply
+
+    async def made_again() -> None:
+        await server.delete_thread("acme", "t1")
+        await bruno.create_thread(thread_id="t1")
+        await bruno.add_member("t1", ANA)
+        for n in range(3):
+            await bruno.send("t1", f"new {n}")
+        ana._request = failing  # type: ignore[method-assign]
+
+    items = await back_after(ana, made_again)
+    await until(lambda: not ana._unjoined and not ana._refollow)
+    items += [i for i in await drain(ana) if isinstance(i, Joined | MemberAdded | Message)]
+    assert failed and isinstance(items[0], Joined) and items[0].truncated
+    assert [i.seq for i in items if isinstance(i, MemberAdded | Message)] == [1, 2, 3, 4, 5]
+    assert said(items) == ["new 0", "new 1", "new 2"]
+
+
+def gated(client: Client) -> asyncio.Event:
+    released = asyncio.Event()
+    dial = client._dial
+
+    async def held_back() -> Connection:
+        await released.wait()
+        return await dial()
+
+    client._dial = held_back
+    return released
+
+
+def failing_once_after_the_answer(client: Client, name: str) -> list[str]:
+    request = client._request
+    failed: list[str] = []
+
+    async def failing(method: str, payload: dict[str, Any]) -> dict[str, Any]:
+        reply = await request(method, payload)
+        if method == name and not failed:
+            failed.append(method)
+            raise StorageError("postgres: storage rejected the reply")
+        return reply
+
+    client._request = failing  # type: ignore[method-assign]
+    return failed
+
+
+async def remade_with(server: Server, bruno: Client, who: Identity) -> None:
+    await server.delete_thread("acme", "t1")
+    await bruno.create_thread(thread_id="t1")
+    await bruno.add_member("t1", who)
+    for n in range(3):
+        await bruno.send("t1", f"new {n}")
+
+
+def whole_from_its_start(items: list[Item]) -> None:
+    assert isinstance(items[0], Joined) and items[0].truncated
+    assert [i.seq for i in items if isinstance(i, MemberAdded | Message)] == [1, 2, 3, 4, 5]
+    assert said(items) == ["new 0", "new 1", "new 2"]
+
+
+async def test_a_join_answered_as_its_connection_drops_settles_nothing_on_the_next_one(
+    server: Server, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(client_module, "RECONNECT", 0.01)
+    ana = await server.connect(identity=ANA, scope="acme")
+    bruno = await server.connect(identity=BRUNO, scope="acme")
+    await bruno.create_thread(thread_id="t1")
+    await bruno.add_member("t1", ANA)
+    await bruno.send("t1", "old")
+    await ana.join("t1")
+    await drain(ana)
+    released = gated(ana)
+    theirs = cast(End, cast(End, ana._connection).peer)
+    send = theirs.send_text
+
+    async def closing_after_the_answer(data: str) -> None:
+        await send(data)
+        if '"truncated"' in data:
+            await theirs.close()
+
+    theirs.send_text = closing_after_the_answer  # type: ignore[method-assign]
+    await ana.join("t1")
+    assert ana.status == "reconnecting" and ana._connection is None
+    await remade_with(server, bruno, ANA)
+    failed = failing_once_after_the_answer(ana, "thread.join")
+    released.set()
+    await until(lambda: bool(failed) and ana.status == "open" and not ana._unjoined)
+    whole_from_its_start(
+        [i for i in await drain(ana) if isinstance(i, Joined | MemberAdded | Message)]
+    )
+
+
+async def test_a_joined_push_read_after_its_connection_was_lost_settles_nothing_on_the_next_one(
+    server: Server, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(client_module, "RECONNECT", 0.01)
+    bruno = await server.connect(identity=BRUNO, scope="acme")
+    await bruno.create_thread(thread_id="t1")
+    await bruno.add_member("t1", HELPER)
+    await bruno.send("t1", "old")
+    page = await server.connect(identity=HELPER, scope="acme")
+    await page.follow()
+    await drain(page)
+    released = gated(page)
+    old = cast(End, page._connection)
+    joined = Joined(thread=await bruno.get_thread("t1"), seq=3)
+    await cast(End, old.peer).send_text(
+        encode(Push(name="joined", payload=joined.model_dump(mode="json")))
+    )
+    await old.close()
+    page._lost(old)
+    assert [type(i).__name__ for i in await drain(page)] == ["StatusChanged", "Joined"]
+    await remade_with(server, bruno, HELPER)
+    failed = failing_once_after_the_answer(page, "thread.follow")
+    released.set()
+    await until(lambda: bool(failed) and page.status == "open" and not page._refollow)
+    whole_from_its_start(
+        [i for i in await drain(page) if isinstance(i, Joined | MemberAdded | Message)]
+    )
+
+
+async def test_a_leave_called_behind_two_joins_of_a_thread_goes_out_after_both(
+    server: Server,
+) -> None:
+    ana = await server.connect(identity=ANA, scope="acme")
+    await ana.create_thread(thread_id="t1")
+    request = ana._request
+    wire: list[str] = []
+
+    async def recorded(method: str, payload: dict[str, Any]) -> dict[str, Any]:
+        wire.append(method)
+        return await request(method, payload)
+
+    ana._request = recorded  # type: ignore[method-assign]
+    await asyncio.wait_for(asyncio.gather(ana.join("t1"), ana.join("t1"), ana.leave("t1")), 2)
+    assert wire == ["thread.join", "thread.join", "thread.leave"]
+    assert not ana._cursors and not ana._present and not ana_in(server, "t1")
+    connection = ana._connection
+    assert connection is not None
+    await connection.close()
+    await until(lambda: reopened(ana, connection))
+    assert wire == ["thread.join", "thread.join", "thread.leave"] and not ana_in(server, "t1")
+
+
+def methods(client: Client) -> list[str]:
+    request = client._request
+    sent: list[str] = []
+
+    async def recorded(method: str, payload: dict[str, Any]) -> dict[str, Any]:
+        sent.append(f"{method}:{payload.get('thread_id', '')}")
+        return await request(method, payload)
+
+    client._request = recorded  # type: ignore[method-assign]
+    return sent
+
+
+def in_room(server: Server, who: Identity, thread_id: str) -> tuple[bool, bool]:
+    sessions = [s for s in server._hub.sessions if s.identity.id == who.id]
+    return (
+        any(thread_id in s.joined for s in sessions),
+        any(thread_id in s.present for s in sessions),
+    )
+
+
+@pytest.mark.parametrize(
+    ("joined_first", "calls"),
+    [(False, ["leave", "join"]), (False, ["join", "leave", "join"]), (True, ["leave", "join"])],
+    ids=["leave-join", "join-leave-join", "joined-then-leave-join"],
+)
+async def test_leaves_and_joins_called_together_go_out_in_call_order_and_end_joined(
+    server: Server, joined_first: bool, calls: list[str]
+) -> None:
+    ana = await server.connect(identity=ANA, scope="acme")
+    await ana.create_thread(thread_id="t1")
+    if joined_first:
+        await ana.join("t1")
+    sent = methods(ana)
+    await asyncio.wait_for(asyncio.gather(*(getattr(ana, call)("t1") for call in calls)), 2)
+    assert sent == [f"thread.{call}:t1" for call in calls]
+    assert (
+        "t1" in ana._cursors and "t1" in ana._present and in_room(server, ANA, "t1") == (True, True)
+    )
+
+
+async def test_a_follower_that_leaves_a_thread_and_follows_again_together_follows_it_again(
+    server: Server,
+) -> None:
+    bruno = await server.connect(identity=BRUNO, scope="acme")
+    await bruno.create_thread(thread_id="t1")
+    await bruno.add_member("t1", HELPER)
+    page = await server.connect(identity=HELPER, scope="acme")
+    await page.follow()
+    await drain(page)
+    sent = methods(page)
+    await asyncio.wait_for(asyncio.gather(page.leave("t1"), page.follow()), 2)
+    assert sent == ["thread.leave:t1", "thread.follow:"]
+    assert "t1" in page._cursors and not page._left and in_room(server, HELPER, "t1")[0]
+
+
+@pytest.mark.parametrize(
+    "during", ["thread.follow", "thread.join"], ids=["refollow", "previous-rejoin"]
+)
+async def test_a_present_thread_left_during_the_reconnect_is_not_rejoined(
+    server: Server, during: str
+) -> None:
+    bruno = await server.connect(identity=BRUNO, scope="acme")
+    for thread_id in ("t0", "t1"):
+        await bruno.create_thread(thread_id=thread_id)
+        await bruno.add_member(thread_id, HELPER)
+        await bruno.send(thread_id, f"old {thread_id}")
+    page = await server.connect(identity=HELPER, scope="acme")
+    await page.follow()
+    for thread_id in ("t0", "t1"):
+        await page.join(thread_id)
+    await drain(page)
+    first, second = page._cursors
+    request = page._request
+    sent: list[str] = []
+    leaves: list[asyncio.Task[None]] = []
+
+    async def leaving(method: str, payload: dict[str, Any]) -> dict[str, Any]:
+        sent.append(f"{method}:{payload.get('thread_id', '')}")
+        if method == during and not leaves:
+            leaves.append(asyncio.ensure_future(page.leave(second)))
+        return await request(method, payload)
+
+    page._request = leaving  # type: ignore[method-assign]
+    connection = page._connection
+    assert connection is not None
+    await connection.close()
+    await until(lambda: reopened(page, connection))
+    await asyncio.gather(*leaves)
+    await drain(page)
+    await bruno.send(second, "after the leave")
+    assert said(await drain(page)) == []
+    assert sent == ["thread.follow:", f"thread.join:{first}", f"thread.leave:{second}"]
+    assert second not in page._cursors and second not in page._present
+    assert page._left == {second: 3} and in_room(server, HELPER, second) == (False, False)
+
+
+async def test_an_away_called_behind_two_joins_of_a_thread_goes_out_after_both(
+    server: Server,
+) -> None:
+    ana = await server.connect(identity=ANA, scope="acme")
+    await ana.create_thread(thread_id="t1")
+    sent = methods(ana)
+    await asyncio.wait_for(asyncio.gather(ana.join("t1"), ana.join("t1"), ana.away("t1")), 2)
+    assert sent == ["thread.join:t1", "thread.join:t1", "thread.away:t1"]
+    assert "t1" not in ana._present and in_room(server, ANA, "t1") == (True, False)
+
+
+async def test_a_join_answered_after_another_join_of_the_thread_was_refused_keeps_it_present(
+    server: Server,
+) -> None:
+    ana = await server.connect(identity=ANA, scope="acme")
+    await ana.create_thread(thread_id="t1")
+    await ana.add_member("t1", HELPER)
+    page = await server.connect(identity=HELPER, scope="acme")
+    request = page._request
+    sent: list[dict[str, Any]] = []
+
+    async def refusing_once(method: str, payload: dict[str, Any]) -> dict[str, Any]:
+        reply = await request(method, payload)
+        if method == "thread.join":
+            sent.append(payload)
+            if len(sent) == 1:
+                raise StorageError("postgres: storage rejected the reply")
+        return reply
+
+    page._request = refusing_once  # type: ignore[method-assign]
+    first, second = await asyncio.gather(page.join("t1"), page.join("t1"), return_exceptions=True)
+    assert isinstance(first, StorageError) and isinstance(second, Joined)
+    assert "t1" in page._present
+    connection = page._connection
+    assert connection is not None
+    await connection.close()
+    await until(lambda: reopened(page, connection))
+    assert sent[-1] == {"thread_id": "t1", "since": second.seq, "epoch": second.thread.epoch}
+
+
+@pytest.mark.parametrize(
+    ("since", "remade", "heard"),
+    [
+        (0, False, ["away 0", "away 1", "live"]),
+        (None, False, ["live"]),
+        (None, True, ["live"]),
+    ],
+    ids=["rewind", "plain", "made-again"],
+)
+async def test_a_rejoin_waiting_behind_a_join_of_the_same_thread_resumes_where_that_join_left_it(
+    server: Server, since: int | None, remade: bool, heard: list[str]
+) -> None:
+    ana = await server.connect(identity=ANA, scope="acme")
+    bruno = await server.connect(identity=BRUNO, scope="acme")
+    for thread_id in ("t1", "t2"):
+        await bruno.create_thread(thread_id=thread_id)
+        await bruno.add_member(thread_id, ANA)
+        await ana.join(thread_id)
+    await drain(ana)
+    request = ana._request
+    rejoining, resumed, rejoined = asyncio.Event(), asyncio.Event(), asyncio.Event()
+    released = asyncio.Event()
+    live: list[Message] = []
+
+    async def gated(method: str, payload: dict[str, Any]) -> dict[str, Any]:
+        again = method == "thread.join" and "epoch" in payload
+        if again and payload["thread_id"] == "t1":
+            rejoining.set()
+            await resumed.wait()
+        reply = await request(method, payload)
+        if again and payload["thread_id"] == "t1":
+            rejoined.set()
+        if method == "thread.join" and payload["thread_id"] == "t2" and not again:
+            live.append(await bruno.send("t2", "live"))
+            await released.wait()
+        return reply
+
+    ana._request = gated  # type: ignore[method-assign]
+    connection = ana._connection
+    assert connection is not None
+    await connection.close()
+    await asyncio.wait_for(rejoining.wait(), 2)
+    if remade:
+        await server.delete_thread("acme", "t2")
+        await bruno.create_thread(thread_id="t2")
+        await bruno.add_member("t2", ANA)
+    for n in range(2):
+        await bruno.send("t2", f"away {n}")
+    user = asyncio.create_task(ana.join("t2", since=since))
+    await until(lambda: bool(live) and held(ana, "t2", live[0].seq))
+    resumed.set()
+    await asyncio.wait_for(rejoined.wait(), 2)
+    released.set()
+    await asyncio.wait_for(user, 2)
+    await until(lambda: ana.status == "open")
+    items = await drain(ana, 0.3)
+    assert said([i for i in items if isinstance(i, Message) and i.thread_id == "t2"]) == heard
+
+
+@pytest.mark.parametrize("stale", [False, True], ids=["answered", "stale"])
+async def test_a_join_answered_after_its_thread_was_made_again_delivers_the_new_thread_once_in_order(
+    server: Server, stale: bool
+) -> None:
+    bruno = await server.connect(identity=BRUNO, scope="acme")
+    await bruno.create_thread(thread_id="t1")
+    await bruno.add_member("t1", HELPER)
+    for n in range(6):
+        await bruno.send("t1", f"old {n}")
+    page = await server.connect(identity=HELPER, scope="acme")
+    [before] = await page.follow()
+    await drain(page)
+    arrive = server._hub._arrive
+    armed = [True]
+
+    async def remade(session: Any, thread_id: str) -> None:
+        if session.identity.id == HELPER.id and armed:
+            armed.clear()
+            await server.delete_thread("acme", "t1")
+            await bruno.create_thread(thread_id="t1")
+            await bruno.add_member("t1", HELPER)
+            for n in range(2):
+                await bruno.send("t1", f"new {n}")
+        await arrive(session, thread_id)
+
+    server._hub._arrive = remade  # type: ignore[method-assign]
+    request = page._request
+
+    async def answered(method: str, payload: dict[str, Any]) -> dict[str, Any]:
+        reply = await request(method, payload)
+        return before.model_dump(mode="json") if stale else reply
+
+    page._request = answered  # type: ignore[method-assign]
+    joined = await asyncio.wait_for(page.join("t1"), 2)
+    for n in range(2, 8):
+        await bruno.send("t1", f"new {n}")
+    items = await drain(page, 0.3)
+    gone = next(n for n, item in enumerate(items) if isinstance(item, ThreadDeleted))
+    after = [i for i in items[gone + 1 :] if isinstance(i, Joined | MemberAdded | Message)]
+    assert [(type(i).__name__, i.seq) for i in after] == [
+        ("MemberAdded", 2),
+        ("Joined", 2),
+        *(("Message", seq) for seq in range(3, 11)),
+    ]
+    assert said(after) == [f"new {n}" for n in range(8)]
+    pushed = after[1]
+    assert isinstance(pushed, Joined)
+    if stale:
+        assert joined == before
+    else:
+        assert (joined.thread, joined.seq, joined.truncated) == (pushed.thread, 4, True)
+
+
+def news(items: Sequence[Item], thread_id: str = "t1") -> list[tuple[str, int]]:
+    return [
+        (type(i).__name__, i.seq)
+        for i in items
+        if isinstance(i, MemberAdded | Message) and i.thread_id == thread_id
+    ]
+
+
+async def followed_with_six(server: Server) -> tuple[Client, Client]:
+    bruno = await server.connect(identity=BRUNO, scope="acme")
+    await bruno.create_thread(thread_id="t1")
+    await bruno.add_member("t1", HELPER)
+    for n in range(6):
+        await bruno.send("t1", f"old {n}")
+    page = await server.connect(identity=HELPER, scope="acme")
+    await page.follow()
+    await drain(page)
+    return page, bruno
+
+
+async def test_a_refollow_that_finds_its_thread_made_again_delivers_the_new_one_once_in_order(
+    storage: PostgresStorage, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    server = Server(storage)
+    page, bruno = await followed_with_six(server)
+    listing = storage.list_threads
+    armed: list[bool] = []
+
+    async def listed(*args: Any, **kwargs: Any) -> list[Thread]:
+        found = await listing(*args, **kwargs)
+        if args[1] == HELPER.id and armed:
+            armed.clear()
+            await server.delete_thread("acme", "t1")
+            await bruno.create_thread(thread_id="t1")
+            await bruno.add_member("t1", HELPER)
+        return found
+
+    monkeypatch.setattr(storage, "list_threads", listed)
+    armed.append(True)
+    connection = page._connection
+    assert connection is not None
+    await connection.close()
+    await until(lambda: not armed and reopened(page, connection) and not page._holds)
+    for n in range(3):
+        await bruno.send("t1", f"new {n}")
+    items = await drain(page, 0.3)
+    assert news(items) == [("MemberAdded", 2), *(("Message", seq) for seq in (3, 4, 5))]
+    assert said(items) == ["new 0", "new 1", "new 2"]
+
+
+async def test_a_followed_thread_deleted_while_away_and_made_again_arrives_whole(
+    server: Server,
+) -> None:
+    page, bruno = await followed_with_six(server)
+    request = page._request
+    gate = asyncio.Event()
+
+    async def gated(method: str, payload: dict[str, Any]) -> dict[str, Any]:
+        if method == "thread.follow":
+            await gate.wait()
+        return await request(method, payload)
+
+    page._request = gated  # type: ignore[method-assign]
+    connection = page._connection
+    assert connection is not None
+    await connection.close()
+    await server.delete_thread("acme", "t1")
+    gate.set()
+    await until(lambda: reopened(page, connection) and not page._holds)
+    await drain(page)
+    await bruno.create_thread(thread_id="t1")
+    await bruno.add_member("t1", HELPER)
+    for n in range(3):
+        await bruno.send("t1", f"new {n}")
+    items = await drain(page, 0.3)
+    assert news(items) == [("MemberAdded", 2), *(("Message", seq) for seq in (3, 4, 5))]
+    assert said(items) == ["new 0", "new 1", "new 2"]
+
+
+@pytest.mark.parametrize("before", [0, 3])
+async def test_a_rewind_raced_by_its_thread_made_again_delivers_every_event_from_its_since(
+    server: Server, before: int
+) -> None:
+    page, bruno = await followed_with_six(server)
+    old = page._epochs["t1"]
+    request = page._request
+
+    async def remade(method: str, payload: dict[str, Any]) -> dict[str, Any]:
+        if method == "thread.join":
+            await server.delete_thread("acme", "t1")
+            await bruno.create_thread(thread_id="t1")
+            for n in range(before):
+                await bruno.send("t1", f"before {n}")
+            await bruno.add_member("t1", HELPER)
+            await until(lambda: page._epochs.get("t1") != old)
+        return await request(method, payload)
+
+    page._request = remade  # type: ignore[method-assign]
+    await asyncio.wait_for(page.join("t1", since=0), 2)
+    await bruno.send("t1", "new 0")
+    items = await drain(page, 0.3)
+    add = before + 2
+    assert news(items) == [
+        ("MemberAdded", add),
+        ("MemberAdded", 1),
+        *(("Message", seq) for seq in range(2, add)),
+        ("MemberAdded", add),
+        ("Message", add + 1),
+    ]
+
+
+async def test_a_first_join_since_a_seq_raced_by_its_own_add_delivers_every_event_from_it(
+    server: Server,
+) -> None:
+    bruno = await server.connect(identity=BRUNO, scope="acme")
+    await bruno.create_thread(thread_id="t2")
+    for n in range(3):
+        await bruno.send("t2", f"before {n}")
+    page = await server.connect(identity=HELPER, scope="acme")
+    await page.follow()
+    await drain(page)
+    request = page._request
+
+    async def added(method: str, payload: dict[str, Any]) -> dict[str, Any]:
+        if method == "thread.join":
+            await bruno.add_member("t2", HELPER)
+            await until(lambda: "t2" in page._epochs)
+        return await request(method, payload)
+
+    page._request = added  # type: ignore[method-assign]
+    await asyncio.wait_for(page.join("t2", since=0), 2)
+    items = await drain(page, 0.3)
+    assert news(items, "t2") == [
+        ("MemberAdded", 5),
+        ("MemberAdded", 1),
+        *(("Message", seq) for seq in (2, 3, 4)),
+        ("MemberAdded", 5),
+    ]
+
+
+async def test_a_join_and_a_leave_called_together_leave_no_thread_to_rejoin(
+    server: Server,
+) -> None:
+    ana = await server.connect(identity=ANA, scope="acme")
+    await ana.create_thread(thread_id="t1")
+    await asyncio.wait_for(asyncio.gather(ana.join("t1"), ana.leave("t1")), 2)
+    sent: list[str] = []
+    request = ana._request
+
+    async def record(method: str, payload: dict[str, Any]) -> dict[str, Any]:
+        sent.append(method)
+        return await request(method, payload)
+
+    ana._request = record  # type: ignore[method-assign]
+    connection = ana._connection
+    assert connection is not None
+    await connection.close()
+    await until(lambda: reopened(ana, connection))
+    assert sent == [] and not ana_in(server, "t1")
+
+
+async def test_a_follower_that_joins_and_leaves_a_left_thread_together_keeps_it_left_after_a_drop(
+    server: Server,
+) -> None:
+    bruno = await server.connect(identity=BRUNO, scope="acme")
+    await bruno.create_thread(thread_id="t1")
+    await bruno.add_member("t1", HELPER)
+    await bruno.send("t1", "one")
+    page = await server.connect(identity=HELPER, scope="acme")
+    await page.follow()
+    await drain(page)
+    await page.leave("t1")
+    await asyncio.wait_for(asyncio.gather(page.join("t1"), page.leave("t1")), 2)
+    follows: list[dict[str, Any]] = []
+    request = page._request
+
+    async def record(method: str, payload: dict[str, Any]) -> dict[str, Any]:
+        if method == "thread.follow":
+            follows.append(payload)
+        return await request(method, payload)
+
+    page._request = record  # type: ignore[method-assign]
+    connection = page._connection
+    assert connection is not None
+    await connection.close()
+    await until(lambda: reopened(page, connection))
+    items = await drain(page, 0.3)
+    made = (await bruno.get_thread("t1")).epoch
+    assert [payload["left"] for payload in follows] == [{"t1": {"seq": 3, "epoch": made}}]
+    assert [i for i in items if isinstance(i, Joined)] == []
+    assert not any(s.identity.id == HELPER.id and "t1" in s.joined for s in server._hub.sessions)
+
+
+async def test_a_join_refused_while_its_followed_thread_speaks_still_delivers_what_it_said(
+    storage: PostgresStorage,
+) -> None:
+    refusing = False
+
+    async def authorize(actor: Identity, action: str, thread: Thread) -> bool:
+        return not (refusing and actor.id == HELPER.id)
+
+    server = Server(storage, authorize=authorize)
+    ana = await server.connect(identity=ANA, scope="acme")
+    await ana.create_thread(thread_id="t1")
+    await ana.add_member("t1", HELPER)
+    page = await server.connect(identity=HELPER, scope="acme")
+    await page.follow()
+    await drain(page)
+    request = page._request
+
+    async def landed(method: str, payload: dict[str, Any]) -> dict[str, Any]:
+        if method == "thread.join":
+            live = await ana.send("t1", "live")
+            await until(lambda: held(page, "t1", live.seq))
+        return await request(method, payload)
+
+    page._request = landed  # type: ignore[method-assign]
+    refusing = True
+    with pytest.raises(ForbiddenError):
+        await asyncio.wait_for(page.join("t1", since=0), 2)
+    assert said(await drain(page)) == ["live"]

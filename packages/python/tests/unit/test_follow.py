@@ -930,6 +930,34 @@ async def test_a_follow_since_a_position_in_the_thread_before_it_was_made_again_
     assert texts(await again.quiet()) == ["new 1"]
 
 
+async def test_a_follow_listed_before_its_thread_was_made_again_answers_with_the_room_it_entered(
+    storage: PostgresStorage, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    server = Server(storage)
+    ana = await threads(server, "t1")
+    old = await epoch_of(ana, "t1")
+    listing = storage.list_threads
+    armed = [True]
+
+    async def listed(*args: Any, **kwargs: Any) -> list[Thread]:
+        found = await listing(*args, **kwargs)
+        if args[1] == "helper" and armed:
+            armed.clear()
+            await ana.call("thread.delete", thread_id="t1")
+            await ana.call("thread.create", thread_id="t1")
+            await ana.call("member.add", thread_id="t1", identity=who(HELPER))
+        return found
+
+    monkeypatch.setattr(storage, "list_threads", listed)
+    helper = await Peer.open(server, HELPER)
+    reply = await helper.call("thread.follow")
+    new = await epoch_of(ana, "t1")
+    assert old != new
+    assert [j["thread"]["epoch"] for j in helper.joined] == [new]
+    assert [(j["thread"]["id"], j["thread"]["epoch"]) for j in reply["joined"]] == [("t1", new)]
+    assert reply["joined"][0]["thread"] == helper.joined[0]["thread"]
+
+
 async def test_follow_leaves_out_a_membership_whose_id_no_verb_takes(
     storage: PostgresStorage,
 ) -> None:

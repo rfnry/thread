@@ -52,6 +52,7 @@ class Session:
     id: str = field(default_factory=lambda: uuid.uuid4().hex)
     joined: dict[str, int] = field(default_factory=dict)
     floors: dict[str, int] = field(default_factory=dict)
+    threads: dict[str, Thread] = field(default_factory=dict)
     streams: set[tuple[str, str]] = field(default_factory=set)
     working: set[str] = field(default_factory=set)
     present: set[str] = field(default_factory=set)
@@ -285,9 +286,18 @@ class Hub:
         joined, _ = await self._enter(session, thread, since)
         if not away and not session.dropped:
             await self._arrive(session, thread.id)
-        if thread.id not in session.joined and not session.dropped:
+        if session.dropped:
+            return joined
+        if thread.id not in session.joined:
             raise NotFoundError(f"server: thread {thread.id!r} was not found")
-        return joined
+        return self._answer(session, joined)
+
+    def _answer(self, session: Session, joined: Joined) -> Joined:
+        thread_id = joined.thread.id
+        entered, seq = session.threads[thread_id], session.joined[thread_id]
+        if entered.epoch != joined.thread.epoch:
+            return Joined(thread=entered, seq=seq, truncated=True)
+        return joined.model_copy(update={"seq": seq})
 
     async def _enter(
         self,
@@ -343,6 +353,7 @@ class Hub:
                 return Joined(thread=thread, seq=head), False
             session.joined[thread_id] = replay[0].seq - 1 if replay else head
             session.floors[thread_id] = floor
+            session.threads[thread_id] = thread
             room = self._rooms.setdefault((scope, thread_id), _Room(thread.epoch))
             room.sessions.add(session)
             for event in replay:
@@ -385,10 +396,13 @@ class Hub:
             except ForbiddenError, NotFoundError:
                 continue
             found.append(joined)
-        return [joined for joined in found if joined.thread.id in session.joined]
+        return [
+            self._answer(session, joined) for joined in found if joined.thread.id in session.joined
+        ]
 
     def _part(self, session: Session, thread_id: str, ends: list[tuple[int, Signal]]) -> None:
         session.floors.pop(thread_id, None)
+        session.threads.pop(thread_id, None)
         room = self._rooms.get((session.scope, thread_id))
         if session.joined.pop(thread_id, None) is None or room is None:
             return
@@ -682,6 +696,7 @@ class Hub:
             session.push_signal(payload)
             session.joined.pop(thread_id, None)
             session.floors.pop(thread_id, None)
+            session.threads.pop(thread_id, None)
             session.present.discard(thread_id)
             session.working.discard(thread_id)
             session.streams = {s for s in session.streams if s[0] != thread_id}

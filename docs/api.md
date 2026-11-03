@@ -466,7 +466,9 @@ events after the caller's mark arrive first instead, as `follow(resume=True)` ha
 thread alone is marked there), and the `Joined`'s `thread.marked` is that mark, from which
 `history(after=...)` reads a truncated gap. A thread the connection already receives, by following,
 keeps arriving live, and `since` or `resume` hands its events after that `seq` or the mark up to
-where the connection is, once; joins of it in flight at the same time each get their own. Raises
+where the connection is, once, the ones it already had among them. What arrives for the thread
+before the answer is handed over with it, in `seq` order, each event once, and a second join of the
+same thread is sent only once the first is answered. Raises
 `InputError` when `since` is negative or given with `resume`, `NotFoundError` when the scope holds
 no such thread or it is deleted, or the caller removed from it, before the join is answered, and
 `ForbiddenError` when the caller is not a member or `authorize` refuses `read`.
@@ -480,7 +482,9 @@ async def leave(self, thread_id: str) -> None: ...
 Stops receiving the thread live; the caller's open streams and `Working` there end, and `Left` goes
 out when it was the identity's last connection in it. Leaving a thread not joined does nothing. A
 followed thread left stays left, across dropped sockets, until the caller joins it, follows again,
-is added to it again or the thread is deleted and made again.
+is added to it again or the thread is deleted and made again. A leave called while a join of the
+same thread is in flight is sent once every such join is answered: a reconnect does not join that
+thread again, and a follower keeps it left as above, from where it was when the leave went out.
 
 ### `Client.away`
 
@@ -1255,9 +1259,10 @@ class Joined(BaseModel):
     truncated: bool = False
 ```
 
-What a join returns: the thread, its last `seq` when the join happened, and whether the replay was
-cut short, `since` was past that `seq`, or the thread was made again since the position a re-join
-or re-follow resumed from.
+What a join returns: the thread, the last `seq` the connection had been handed when the join was
+answered, and whether the replay was cut short, `since` was past the thread's last `seq`, or the
+thread was made again since the position a re-join or re-follow resumed from or while the join was
+answered.
 
 ### `StatusChanged`
 
@@ -1911,8 +1916,10 @@ arrive first (`since: 0` for the whole log), then the current state, then live t
 `resume: true`, the events after the caller's mark arrive first instead, as
 `follow({ resume: true })` hands each thread, and the `Joined`'s `thread.marked` is that mark. A
 thread the connection already receives, by following, keeps arriving live, and `since` or `resume`
-hands its events after that `seq` or the mark up to where the connection is, once; joins of it in
-flight at the same time each get their own. Raises `InputError` when `since` is negative or given
+hands its events after that `seq` or the mark up to where the connection is, once, the ones it
+already had among them. What arrives for the thread before the answer is handed over with it, in
+`seq` order, each event once, and a second join of the same thread is sent only once the first is
+answered. Raises `InputError` when `since` is negative or given
 with `resume`, `NotFoundError` when the scope holds no such thread or it is deleted, or the caller
 removed from it, before the join is answered, and `ForbiddenError` when the caller is not a member
 or `authorize` refuses `read`.
@@ -1925,7 +1932,10 @@ async leave(threadId: string): Promise<void>
 
 Stops receiving the thread live; the caller's open streams and `Working` there end. Leaving a thread
 not joined does nothing. A followed thread left stays left, across dropped sockets, until the caller
-joins it, follows again, is added to it again or the thread is deleted and made again.
+joins it, follows again, is added to it again or the thread is deleted and made again. A leave
+called while a join of the same thread is in flight is sent once every such join is answered: a
+reconnect does not join that thread again, and a follower keeps it left as above, from where it was
+when the leave went out.
 
 ### `Client.away`
 
@@ -2697,9 +2707,10 @@ A thread's member: who, since when, and who added them.
 type Joined = { thread: Thread; seq: number; truncated: boolean }
 ```
 
-What a join returns, and what a listener receives after a re-join: the thread, its last `seq` when
-the join happened, and whether the replay was cut short, `since` was past that `seq`, or the thread
-was made again since the position a re-join or re-follow resumed from.
+What a join returns, and what a listener receives after a re-join: the thread, the last `seq` the
+connection had been handed when the join was answered, and whether the replay was cut short, `since`
+was past the thread's last `seq`, or the thread was made again since the position a re-join or
+re-follow resumed from or while the join was answered.
 
 ### `Status`
 
