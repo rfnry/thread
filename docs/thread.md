@@ -266,8 +266,10 @@ past the thread's last `seq` — it was deleted and made again under the same id
 What arrives for a thread before its join is answered is handed over with the answer, in `seq` order
 and each event once, and a second join of the same thread waits for that answer; a join that fails
 still hands over what a thread this connection already receives said meanwhile. A thread deleted
-meanwhile hands over what it said before its `ThreadDeleted`, and one made again meanwhile answers
-the join as the new thread, with `truncated=True`.
+meanwhile hands over what it said before its `ThreadDeleted`. One made again before the server read
+the join is joined as the new thread like any other; one made again while the server was handling
+the join is answered as the new thread with `truncated=True` when the connection
+follows and was handed it, and refused with `NotFoundError` when it does not follow.
 
 A participant that follows never needs this: a thread it is added to arrives on its own
 ([Following and catching up](#following-and-catching-up)).

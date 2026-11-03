@@ -30,7 +30,7 @@ import type {
 } from './types.js'
 
 type Payload = Record<string, unknown>
-type Hold = { events: Event[]; done: Promise<void>; finish: () => void }
+type Hold = { events: Event[]; done: Promise<void>; finish: () => void; since: number | null }
 export type Protocols = string | string[]
 export type ConnectOptions = { url: string; protocols?: Protocols | (() => Promise<Protocols>) }
 export type Listener = (item: Item) => void
@@ -392,7 +392,7 @@ export class Client {
       const done = new Promise<void>((resolve) => {
         finish = resolve
       })
-      const hold = { events: [], done, finish }
+      const hold: Hold = { events: [], done, finish, since: null }
       holds.set(id, hold)
       this.holds.set(id, hold)
     }
@@ -410,11 +410,12 @@ export class Client {
 
   private flush(threadId: string): void {
     const hold = this.holds.get(threadId)
-    if (hold) this.drain(threadId, hold.events.splice(0), this.cursors.get(threadId) ?? 0)
+    const floor = this.cursors.get(threadId) ?? 0
+    if (hold) this.drain(threadId, hold.events.splice(0), Math.min(floor, hold.since ?? floor))
   }
 
-  private drain(threadId: string, events: Event[], floor: number): void {
-    let readded = 0
+  private drain(threadId: string, events: Event[], floor: number, settled = 0): void {
+    let readded = settled
     for (const e of events) if (this.mine(e, 'member_added')) readded = Math.max(readded, e.seq)
     let top = floor
     for (const event of [...events].sort((a, b) => a.seq - b.seq)) {
@@ -431,7 +432,7 @@ export class Client {
     events: Event[],
     held: number | undefined,
     since: number | null,
-    announce: boolean
+    announce: boolean | null
   ): void {
     const threadId = joined.thread.id
     const epoch = joined.thread.epoch
@@ -442,15 +443,16 @@ export class Client {
       return
     }
     const again = now !== undefined && epoch > now
-    const start = held === now || !announce ? since : null
+    const start = held === now || announce === false ? since : null
     const floor =
       again || cursor === undefined ? 0 : start === null ? cursor : Math.min(start, cursor)
     this.epochs.set(threadId, epoch)
     this.cursors.set(threadId, Math.max(joined.seq, floor))
     this.settled.add(threadId)
-    if (announce && again) this.emit(joined)
-    this.drain(threadId, events, floor)
-    if (announce && !again) this.emit(joined)
+    const said = announce ?? (again || joined.truncated)
+    if (said && again) this.emit(joined)
+    this.drain(threadId, events, floor, joined.seq)
+    if (said && !again) this.emit(joined)
   }
 
   private emit(item: Item): void {
@@ -532,7 +534,7 @@ export class Client {
     if (this.socket !== socket) return
     for (const threadId of [...this.cursors.keys()]) {
       if (followed && !this.held.has(threadId)) continue
-      if (!(await this.rejoinOne(threadId))) return
+      if (!(await this.rejoinOne(threadId, followed))) return
     }
     if (socket && (this.refollow || this.unjoined.size > 0)) void this.retry(socket)
   }
@@ -551,22 +553,15 @@ export class Client {
     return true
   }
 
-  private rejoinOne(threadId: string): Promise<boolean> {
+  private rejoinOne(threadId: string, quiet = false): Promise<boolean> {
     return this.holding([threadId], async (holds) => {
       const cursor = this.cursors.get(threadId)
       if (cursor !== undefined) {
         try {
-          const events = holds.get(threadId)?.events ?? []
+          const hold = holds.get(threadId)
           const away = !this.held.has(threadId)
-          await this.joinFrom(
-            threadId,
-            events,
-            cursor,
-            false,
-            away,
-            true,
-            this.epochs.get(threadId)
-          )
+          const told = quiet ? null : true
+          await this.joinFrom(threadId, hold, cursor, false, away, told, this.epochs.get(threadId))
         } catch (error) {
           if (!gone(error)) {
             if (!this.tolerated(error)) return false
@@ -602,7 +597,7 @@ export class Client {
           if (!this.held.has(threadId)) this.unjoined.delete(threadId)
       if (this.socket !== socket) return
       for (const threadId of [...this.unjoined].sort())
-        if (!(await this.rejoinOne(threadId))) return
+        if (!(await this.rejoinOne(threadId, this.following && !this.refollow))) return
     }
   }
 
@@ -685,20 +680,21 @@ export class Client {
 
   private async joinFrom(
     threadId: string,
-    events: Event[],
+    hold: Hold | undefined,
     since: number | null,
     resume = false,
     away = false,
-    announce = false,
+    announce: boolean | null = false,
     epoch?: number
   ): Promise<Joined> {
+    if (hold && announce === false) hold.since = resume ? 0 : since
     const payload: Payload = { thread_id: threadId, since }
     if (resume) payload.resume = true
     if (away) payload.away = true
     if (epoch !== undefined) payload.epoch = epoch
     const held = this.epochs.get(threadId)
     const joined = (await this.request('thread.join', payload)) as unknown as Joined
-    this.conclude(joined, events, held, resume ? 0 : since, announce)
+    this.conclude(joined, hold?.events ?? [], held, resume ? 0 : since, announce)
     return joined
   }
 
@@ -772,12 +768,7 @@ export class Client {
     this.left.delete(threadId)
     const leaves = this.leaves.get(threadId)
     const joined = await this.holding([threadId], (holds) =>
-      this.joinFrom(
-        threadId,
-        holds.get(threadId)?.events ?? [],
-        options.since ?? null,
-        options.resume ?? false
-      )
+      this.joinFrom(threadId, holds.get(threadId), options.since ?? null, options.resume ?? false)
     )
     if (this.leaves.get(threadId) === leaves) this.held.add(threadId)
     if (!this.holds.has(threadId)) this.leaves.delete(threadId)

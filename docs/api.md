@@ -470,8 +470,8 @@ where the connection is, once, the ones it already had among them. What arrives 
 before the answer is handed over with it, in `seq` order, each event once, and a second join of the
 same thread is sent only once the first is answered. Raises
 `InputError` when `since` is negative or given with `resume`, `NotFoundError` when the scope holds
-no such thread or it is deleted, or the caller removed from it, before the join is answered, and
-`ForbiddenError` when the caller is not a member or `authorize` refuses `read`.
+no such thread, or it is deleted or the caller removed from it while the server handles the join,
+and `ForbiddenError` when the caller is not a member or `authorize` refuses `read`.
 
 ### `Client.leave`
 
@@ -1921,9 +1921,9 @@ hands its events after that `seq` or the mark up to where the connection is, onc
 already had among them. What arrives for the thread before the answer is handed over with it, in
 `seq` order, each event once, and a second join of the same thread is sent only once the first is
 answered. Raises `InputError` when `since` is negative or given
-with `resume`, `NotFoundError` when the scope holds no such thread or it is deleted, or the caller
-removed from it, before the join is answered, and `ForbiddenError` when the caller is not a member
-or `authorize` refuses `read`.
+with `resume`, `NotFoundError` when the scope holds no such thread, or it is deleted or the caller
+removed from it while the server handles the join, and `ForbiddenError` when the caller is not a
+member or `authorize` refuses `read`.
 
 ### `Client.leave`
 

@@ -26,6 +26,7 @@ from rfnry_thread.models import (
     Cancel,
     Custom,
     Edit,
+    Event,
     Identity,
     Image,
     Invited,
@@ -2191,6 +2192,237 @@ async def test_an_away_called_behind_two_joins_of_a_thread_goes_out_after_both(
     await asyncio.wait_for(asyncio.gather(ana.join("t1"), ana.join("t1"), ana.away("t1")), 2)
     assert sent == ["thread.join:t1", "thread.join:t1", "thread.away:t1"]
     assert "t1" not in ana._present and in_room(server, ANA, "t1") == (True, False)
+
+
+@pytest.mark.parametrize("remade", [False, True], ids=["kept", "made-again"])
+async def test_a_reconnect_of_a_follower_present_in_a_thread_announces_one_joined_for_it(
+    server: Server, remade: bool
+) -> None:
+    bruno = await server.connect(identity=BRUNO, scope="acme")
+    await bruno.create_thread(thread_id="t1")
+    await bruno.add_member("t1", HELPER)
+    page = await server.connect(identity=HELPER, scope="acme")
+    await page.follow()
+    await page.join("t1")
+    await drain(page)
+    old = page._epochs["t1"]
+
+    async def meanwhile() -> None:
+        if remade:
+            await remade_with(server, bruno, HELPER)
+
+    items = await back_after(page, meanwhile)
+    joined = [i for i in items if isinstance(i, Joined) and i.thread.id == "t1"]
+    assert [(j.thread.epoch > old, j.truncated) for j in joined] == [(remade, remade)]
+    assert "t1" in page._present and in_room(server, HELPER, "t1") == (True, True)
+
+
+async def test_a_plain_join_answered_past_its_own_removal_and_re_add_keeps_the_thread(
+    server: Server,
+) -> None:
+    bruno = await server.connect(identity=BRUNO, scope="acme")
+    await bruno.create_thread(thread_id="t1")
+    await bruno.add_member("t1", ANA)
+    await bruno.send("t1", "one")
+    ana = await server.connect(identity=ANA, scope="acme")
+    await ana.join("t1")
+    await drain(ana)
+    request = ana._request
+
+    async def cut(method: str, payload: dict[str, Any]) -> dict[str, Any]:
+        if method == "thread.join":
+            await bruno.remove_member("t1", ANA)
+            await until(lambda: any(isinstance(e, MemberRemoved) for e in ana._holds["t1"].events))
+            await bruno.add_member("t1", ANA)
+        return await request(method, payload)
+
+    ana._request = cut  # type: ignore[method-assign]
+    joined = await ana.join("t1")
+    ana._request = request  # type: ignore[method-assign]
+    live = await bruno.send("t1", "live")
+    items = await drain(ana)
+    assert [(type(i).__name__, i.seq) for i in items if isinstance(i, MemberRemoved | Message)] == [
+        ("MemberRemoved", 4),
+        ("Message", 6),
+    ]
+    assert joined.seq == 5 and ana._cursors["t1"] == live.seq and "t1" in ana._present
+    sent = methods(ana)
+    connection = ana._connection
+    assert connection is not None
+    await connection.close()
+    await until(lambda: reopened(ana, connection))
+    assert sent == ["thread.join:t1"] and in_room(server, ANA, "t1") == (True, True)
+
+
+async def test_a_rewind_crossed_by_its_own_removal_and_re_add_delivers_from_its_since(
+    server: Server,
+) -> None:
+    bruno = await server.connect(identity=BRUNO, scope="acme")
+    await bruno.create_thread(thread_id="t1")
+    await bruno.add_member("t1", HELPER)
+    for n in range(3):
+        await bruno.send("t1", f"m{n}")
+    page = await server.connect(identity=HELPER, scope="acme")
+    await page.follow()
+    await page.join("t1")
+    await drain(page)
+    arrive = server._hub._arrive
+    cut: list[str] = []
+
+    async def cutting(session: Any, thread_id: str) -> None:
+        if session.identity.id == HELPER.id and not cut:
+            cut.append(thread_id)
+            await bruno.remove_member("t1", HELPER)
+            await bruno.add_member("t1", HELPER)
+            await asyncio.sleep(0.2)
+        await arrive(session, thread_id)
+
+    server._hub._arrive = cutting  # type: ignore[method-assign]
+    joined = await page.join("t1", since=0)
+    await bruno.send("t1", "live")
+    items = await drain(page)
+    assert joined.seq == 7
+    assert [
+        (type(i).__name__, i.seq)
+        for i in items
+        if isinstance(i, Joined | MemberAdded | MemberRemoved | Message)
+    ] == [
+        ("MemberAdded", 1),
+        ("MemberAdded", 2),
+        ("Message", 3),
+        ("Message", 4),
+        ("Message", 5),
+        ("MemberRemoved", 6),
+        ("MemberAdded", 7),
+        ("Joined", 7),
+        ("Message", 8),
+    ]
+
+
+def told(items: list[Item]) -> list[tuple[Any, ...]]:
+    out: list[tuple[Any, ...]] = []
+    for item in items:
+        if isinstance(item, Joined):
+            out.append(("Joined", item.thread.epoch, item.seq, item.truncated))
+        elif isinstance(item, MemberAdded | MemberRemoved | Message):
+            out.append((type(item).__name__, item.seq))
+        elif isinstance(item, ThreadDeleted):
+            out.append(("ThreadDeleted",))
+    return out
+
+
+async def made_again_with_history(server: Server, bruno: Client, who: Identity) -> None:
+    await server.delete_thread("acme", "t1")
+    await bruno.create_thread(thread_id="t1")
+    for n in range(3):
+        await bruno.send("t1", f"pre {n}")
+    await bruno.add_member("t1", who)
+
+
+async def test_a_quiet_rejoin_crossing_a_remake_that_re_adds_the_follower_resumes_from_the_push(
+    server: Server,
+) -> None:
+    bruno = await server.connect(identity=BRUNO, scope="acme")
+    await bruno.create_thread(thread_id="t1")
+    await bruno.add_member("t1", HELPER)
+    page = await server.connect(identity=HELPER, scope="acme")
+    await page.follow()
+    await page.join("t1")
+    await drain(page)
+    old = page._epochs["t1"]
+    request = page._request
+    fired: list[str] = []
+
+    async def crossing(method: str, payload: dict[str, Any]) -> dict[str, Any]:
+        if method == "thread.join" and not fired:
+            fired.append(method)
+            await made_again_with_history(server, bruno, HELPER)
+            await until(lambda: page._epochs.get("t1") != old)
+        return await request(method, payload)
+
+    page._request = crossing  # type: ignore[method-assign]
+    connection = page._connection
+    assert connection is not None
+    await connection.close()
+    await until(lambda: reopened(page, connection) and bool(fired) and not page._holds)
+    page._request = request  # type: ignore[method-assign]
+    await bruno.send("t1", "live")
+    new = page._epochs["t1"]
+    assert told(await drain(page)) == [
+        ("Joined", old, 2, False),
+        ("ThreadDeleted",),
+        ("MemberAdded", 5),
+        ("Joined", new, 5, False),
+        ("Joined", new, 5, True),
+        ("Message", 6),
+    ]
+
+
+async def test_a_rejoin_crossing_a_remake_and_then_a_deletion_hands_nothing_over_twice(
+    server: Server,
+) -> None:
+    bruno = await server.connect(identity=BRUNO, scope="acme")
+    await bruno.create_thread(thread_id="t1")
+    await bruno.add_member("t1", HELPER)
+    page = await server.connect(identity=HELPER, scope="acme")
+    await page.join("t1")
+    await drain(page)
+    old = page._epochs["t1"]
+    request = page._request
+    join = server._verbs.join
+    fired: list[int] = []
+
+    async def crossing(method: str, payload: dict[str, Any]) -> dict[str, Any]:
+        if method == "thread.join" and not fired:
+            fired.append(1)
+            await page.follow()
+            await made_again_with_history(server, bruno, HELPER)
+            await until(lambda: page._epochs.get("t1") != old)
+        return await request(method, payload)
+
+    async def deleting(session: Any, thread_id: str, *args: Any) -> Any:
+        joined = await join(session, thread_id, *args)
+        if session.identity.id == HELPER.id and fired == [1]:
+            fired.append(2)
+            await server.delete_thread("acme", "t1")
+        return joined
+
+    page._request = crossing  # type: ignore[method-assign]
+    server._verbs.join = deleting  # type: ignore[method-assign, assignment]
+    connection = page._connection
+    assert connection is not None
+    await connection.close()
+    await until(lambda: reopened(page, connection) and len(fired) == 2 and not page._holds)
+    page._request = request  # type: ignore[method-assign]
+    server._verbs.join = join  # type: ignore[method-assign]
+    new = page._epochs["t1"]
+    assert told(await drain(page)) == [
+        ("Joined", old, 2, False),
+        ("ThreadDeleted",),
+        ("MemberAdded", 5),
+        ("Joined", new, 5, False),
+        ("ThreadDeleted",),
+        ("Joined", new, 5, True),
+    ]
+
+
+async def test_a_drain_floored_above_an_own_removal_keeps_the_thread_despite_an_older_own_add(
+    server: Server,
+) -> None:
+    ana = await server.connect(identity=ANA, scope="acme")
+    ana._cursors["t1"] = 0
+    events: list[Event] = [
+        added("t1", ANA).model_copy(update={"seq": 2}),
+        removed("t1", ANA).model_copy(update={"seq": 4}),
+        message(5, "after"),
+    ]
+    ana._drain("t1", events, 0, 6)
+    assert ana._cursors["t1"] == 5
+    assert [type(i).__name__ for i in await drain(ana)] == [
+        "MemberAdded",
+        "MemberRemoved",
+        "Message",
+    ]
 
 
 async def test_a_join_answered_after_another_join_of_the_thread_was_refused_keeps_it_present(

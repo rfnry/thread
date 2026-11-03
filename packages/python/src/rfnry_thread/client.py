@@ -208,6 +208,7 @@ class Stream:
 class _Hold:
     events: list[Event] = field(default_factory=list)
     done: asyncio.Event = field(default_factory=asyncio.Event)
+    since: int | None = None
 
 
 class Client:
@@ -401,11 +402,12 @@ class Client:
 
     def _flush(self, thread_id: str) -> None:
         if (hold := self._holds.get(thread_id)) is not None:
-            self._drain(thread_id, hold.events, self._cursors.get(thread_id, 0))
+            top = self._cursors.get(thread_id, 0)
+            self._drain(thread_id, hold.events, min(top, top if hold.since is None else hold.since))
             hold.events.clear()
 
-    def _drain(self, thread_id: str, events: list[Event], floor: int) -> None:
-        readded = max((e.seq for e in events if self._mine(e, MemberAdded)), default=0)
+    def _drain(self, thread_id: str, events: list[Event], floor: int, readded: int = 0) -> None:
+        readded = max([readded, *(e.seq for e in events if self._mine(e, MemberAdded))])
         for event in sorted(events, key=lambda held: held.seq):
             if event.seq <= floor:
                 continue
@@ -421,7 +423,7 @@ class Client:
         events: list[Event],
         held: int | None,
         since: int | None,
-        announce: bool,
+        announce: bool | None,
     ) -> None:
         thread_id, epoch = joined.thread.id, joined.thread.epoch
         cursor, now = self._cursors.get(thread_id), self._epochs.get(thread_id)
@@ -429,14 +431,15 @@ class Client:
             self._drain(thread_id, events, cursor or 0)
             return
         again = now is not None and epoch > now
-        start = since if held == now or not announce else None
+        start = since if held == now or announce is False else None
         floor = 0 if again or cursor is None else cursor if start is None else min(start, cursor)
         self._epochs[thread_id] = epoch
         self._cursors[thread_id] = max(joined.seq, floor)
-        if announce and again:
+        said = (again or joined.truncated) if announce is None else announce
+        if said and again:
             self._inbox.put_nowait(joined)
-        self._drain(thread_id, events, floor)
-        if announce and not again:
+        self._drain(thread_id, events, floor, joined.seq)
+        if said and not again:
             self._inbox.put_nowait(joined)
 
     def _change(self, status: Status) -> None:
@@ -493,7 +496,7 @@ class Client:
         for thread_id in list(self._cursors):
             if followed and thread_id not in self._present:
                 continue
-            if not await self._rejoin_one(thread_id):
+            if not await self._rejoin_one(thread_id, followed):
                 return
         if self._refollow or self._unjoined:
             self._retrier = asyncio.get_running_loop().create_task(self._retry(connection))
@@ -510,17 +513,17 @@ class Client:
         self._refollow = False
         return True
 
-    async def _rejoin_one(self, thread_id: str) -> bool:
+    async def _rejoin_one(self, thread_id: str, quiet: bool = False) -> bool:
         async with self._holding([thread_id]) as holds:
             cursor = self._cursors.get(thread_id)
             if cursor is not None:
                 try:
                     await self._join(
-                        holds[thread_id].events,
+                        holds[thread_id],
                         thread_id,
                         cursor,
                         away=thread_id not in self._present,
-                        announce=True,
+                        announce=None if quiet else True,
                         epoch=self._epochs.get(thread_id),
                     )
                 except ForbiddenError, NotFoundError:
@@ -555,7 +558,7 @@ class Client:
             if self._connection is not connection:
                 return
             for thread_id in sorted(self._unjoined):
-                if not await self._rejoin_one(thread_id):
+                if not await self._rejoin_one(thread_id, self._following and not self._refollow):
                     return
 
     async def _end(self, error: ThreadException) -> None:
@@ -661,14 +664,16 @@ class Client:
 
     async def _join(
         self,
-        events: list[Event],
+        hold: _Hold,
         thread_id: str,
         since: int | None,
         resume: bool = False,
         away: bool = False,
-        announce: bool = False,
+        announce: bool | None = False,
         epoch: int | None = None,
     ) -> Joined:
+        if announce is False:
+            hold.since = 0 if resume else since
         payload: dict[str, Any] = {"thread_id": thread_id, "since": since}
         if resume:
             payload["resume"] = True
@@ -678,7 +683,7 @@ class Client:
             payload["epoch"] = epoch
         held, connection = self._epochs.get(thread_id), self._connection
         joined = Joined.model_validate(await self._request("thread.join", payload))
-        self._settle(joined, events, held, 0 if resume else since, announce)
+        self._settle(joined, hold.events, held, 0 if resume else since, announce)
         self._settled[thread_id] = connection
         return joined
 
@@ -739,7 +744,7 @@ class Client:
     async def join(self, thread_id: str, since: int | None = None, resume: bool = False) -> Joined:
         self._left.pop(thread_id, None)
         async with self._holding([thread_id]) as holds:
-            joined = await self._join(holds[thread_id].events, thread_id, since, resume)
+            joined = await self._join(holds[thread_id], thread_id, since, resume)
         self._present.add(thread_id)
         self._unjoined.discard(thread_id)
         return joined

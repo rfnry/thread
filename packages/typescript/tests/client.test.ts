@@ -1205,6 +1205,174 @@ describe('client', () => {
     await expect(Promise.race([second, waited])).resolves.toBe('answered')
   })
 
+  it.each([false, true])(
+    'announces one Joined for a present followed thread on a reconnect, made again while away: %s',
+    async (remade) => {
+      server.handlers.set('thread.follow', () => ({
+        joined: [{ thread: epoch(1), seq: 3, truncated: false }],
+      }))
+      server.seq = 3
+      const client = await connect({ url: 'ws://fake' })
+      const items: Item[] = []
+      client.subscribe((item) => items.push(item), { includeOwn: true })
+      await client.follow()
+      await client.join('t1')
+      items.length = 0
+      if (remade) {
+        server.handlers.set('thread.follow', () => ({
+          joined: [{ thread: epoch(2), seq: 2, truncated: true }],
+        }))
+        server.handlers.set('thread.join', () => ({ thread: epoch(2), seq: 2, truncated: false }))
+      }
+      server.drop()
+      await vi.waitFor(() => expect(server.hellos).toHaveLength(2))
+      await vi.waitFor(() => expect(client.status).toBe('open'))
+      expect(
+        items.flatMap((item) => ('truncated' in item ? [[item.thread.epoch, item.truncated]] : []))
+      ).toEqual([[remade ? 2 : 1, remade]])
+    }
+  )
+
+  const member = (seq: number, kind: 'member_added' | 'member_removed') => ({
+    kind,
+    id: `m${seq}`,
+    thread_id: 't1',
+    seq,
+    author: helper,
+    created_at: '2026-01-01T12:00:00Z',
+    client_id: `c${seq}`,
+    identity: server.identity,
+  })
+
+  it('keeps a thread whose plain join is answered past its own removal and re-add', async () => {
+    server.seq = 3
+    const client = await connect({ url: 'ws://fake' })
+    const items: Item[] = []
+    client.subscribe((item) => items.push(item), { includeOwn: true })
+    await client.join('t1')
+    server.handlers.set('thread.join', () => {
+      server.push('event', member(4, 'member_removed'))
+      return { thread: epoch(1), seq: 5, truncated: false }
+    })
+    await client.join('t1')
+    server.push('event', message(6, 'live'))
+    expect(authored(items)).toEqual([4, 6])
+    const state = client as unknown as { cursors: Map<string, number>; held: Set<string> }
+    expect([state.cursors.get('t1'), [...state.held]]).toEqual([6, ['t1']])
+  })
+
+  it('delivers a rewind crossed by its own removal and re-add from its since', async () => {
+    server.handlers.set('thread.follow', () => ({
+      joined: [{ thread: epoch(1), seq: 5, truncated: false }],
+    }))
+    server.seq = 5
+    const client = await connect({ url: 'ws://fake' })
+    const items: Item[] = []
+    client.subscribe((item) => items.push(item), { includeOwn: true })
+    await client.follow()
+    await client.join('t1')
+    items.length = 0
+    server.handlers.set('thread.join', () => {
+      for (const seq of [1, 2, 3, 4, 5]) server.push('event', message(seq, 'replay'))
+      server.push('event', member(6, 'member_removed'))
+      server.push('event', member(7, 'member_added'))
+      server.push('joined', { thread: epoch(1), seq: 7, truncated: false })
+      return { thread: epoch(1), seq: 7, truncated: false }
+    })
+    await client.join('t1', { since: 0 })
+    server.push('event', message(8, 'live'))
+    expect(items.map(label)).toEqual([1, 2, 3, 4, 5, 6, 7, 'joined', 8])
+  })
+
+  it('keeps a thread when a drain floored above its own removal also holds an older own add', async () => {
+    const client = await connect({ url: 'ws://fake' })
+    const items: Item[] = []
+    client.subscribe((item) => items.push(item), { includeOwn: true })
+    const inner = client as unknown as {
+      cursors: Map<string, number>
+      drain: (threadId: string, events: unknown[], floor: number, settled: number) => void
+    }
+    inner.cursors.set('t1', 0)
+    const events = [member(2, 'member_added'), member(4, 'member_removed'), message(5, 'after')]
+    inner.drain('t1', events, 0, 6)
+    expect([inner.cursors.get('t1'), items.map(label)]).toEqual([5, [2, 4, 5]])
+  })
+
+  const told = (item: Item) =>
+    'truncated' in item
+      ? `J${item.thread.epoch}/${item.seq}${item.truncated ? 't' : ''}`
+      : 'kind' in item && item.kind === 'thread.deleted'
+        ? 'deleted'
+        : label(item)
+
+  const remadeDuring = (deletedAgain: boolean) => {
+    let fired = false
+    server.handlers.set('thread.join', () => {
+      if (fired) return { thread: epoch(2), seq: 5, truncated: false }
+      fired = true
+      server.push('signal', { kind: 'thread.deleted', thread_id: 't1', sender: helper })
+      server.push('event', member(5, 'member_added'))
+      server.push('joined', { thread: epoch(2), seq: 5, truncated: false })
+      for (const seq of [2, 3, 4]) server.push('event', message(seq, 'pre'))
+      server.push('event', member(5, 'member_added'))
+      if (deletedAgain)
+        server.push('signal', { kind: 'thread.deleted', thread_id: 't1', sender: helper })
+      return { thread: epoch(2), seq: 5, truncated: true }
+    })
+  }
+
+  it('resumes a quiet re-join crossing a remake that re-adds the follower from the push', async () => {
+    server.handlers.set('thread.follow', () => ({
+      joined: [{ thread: epoch(1), seq: 2, truncated: false }],
+    }))
+    server.seq = 2
+    const client = await connect({ url: 'ws://fake' })
+    const items: Item[] = []
+    client.subscribe((item) => items.push(item), { includeOwn: true })
+    await client.follow()
+    await client.join('t1')
+    items.length = 0
+    remadeDuring(false)
+    server.drop()
+    await vi.waitFor(() => expect(server.hellos).toHaveLength(2))
+    await vi.waitFor(() => expect(client.status).toBe('open'))
+    server.push('event', message(6, 'live'))
+    expect(items.map(told)).toEqual([
+      'reconnecting',
+      'J1/2',
+      'deleted',
+      5,
+      'J2/5',
+      'J2/5t',
+      'open',
+      6,
+    ])
+  })
+
+  it('hands nothing over twice when a re-join crosses a remake and then a deletion', async () => {
+    server.seq = 2
+    const client = await connect({ url: 'ws://fake' })
+    const items: Item[] = []
+    client.subscribe((item) => items.push(item), { includeOwn: true })
+    await client.join('t1')
+    items.length = 0
+    remadeDuring(true)
+    server.drop()
+    await vi.waitFor(() => expect(server.hellos).toHaveLength(2))
+    await vi.waitFor(() => expect(client.status).toBe('open'))
+    server.push('event', message(6, 'live'))
+    expect(items.map(told)).toEqual([
+      'reconnecting',
+      'deleted',
+      5,
+      'J2/5',
+      'deleted',
+      'J2/5t',
+      'open',
+      6,
+    ])
+  })
+
   it('delivers what a followed thread says while a join of it is refused', async () => {
     server.handlers.set('thread.follow', () => ({
       joined: [{ thread: epoch(1), seq: 3, truncated: false }],
