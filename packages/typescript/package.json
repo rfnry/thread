@@ -17,8 +17,8 @@
     "check": "biome check .",
     "check:fix": "biome check --write .",
     "typecheck": "tsc --noEmit",
-    "test": "vitest run --exclude 'tests/e2e/**'",
-    "test:e2e": "vitest run tests/e2e"
+    "test": "vitest run --exclude 'tests/integration/**'",
+    "test:integration": "vitest run --config vitest.integration.config.ts"
   },
   "devDependencies": {
     "@biomejs/biome": "^2.5.2",
