@@ -1,18 +1,30 @@
 import asyncio
 import os
+import signal
+import sys
+import uuid
+from functools import partial
 from http import HTTPStatus
-from pathlib import Path
+from typing import Any
 
-import pytest
+import asyncpg
 from websockets.asyncio.server import ServerConnection, serve
 from websockets.http11 import Request, Response
 from websockets.typing import Subprotocol
 
-from rfnry_thread import Custom, Identity, Invited, Message, PostgresStorage, Server, Text
+from rfnry_thread import (
+    Custom,
+    Identity,
+    Invited,
+    Message,
+    PostgresStorage,
+    Server,
+    Text,
+    migrations,
+)
 
-pytestmark = pytest.mark.live
-
-TYPESCRIPT = Path(__file__).parents[3] / "typescript"
+URL = os.environ.get("RFNRY_TEST_POSTGRES_URL", "")
+SCHEMA = f"thread_client_{uuid.uuid4().hex[:12]}"
 
 
 def who(request: Request | None) -> Identity | None:
@@ -75,7 +87,7 @@ async def assistant(server: Server, open_sockets: list[Socket]) -> None:
             await me.idle(item.thread_id)
 
 
-async def test_the_typescript_client_against_a_live_server(storage: PostgresStorage) -> None:
+async def listen(storage: PostgresStorage, port: int) -> None:
     server = Server(storage)
     open_sockets: list[Socket] = []
 
@@ -87,18 +99,44 @@ async def test_the_typescript_client_against_a_live_server(storage: PostgresStor
             return
         await server.serve(Socket(socket, open_sockets), identity=identity, scope="acme")
 
+    stopped = asyncio.Event()
+    asyncio.get_running_loop().add_signal_handler(signal.SIGTERM, stopped.set)
     async with serve(
-        handler, "127.0.0.1", 0, subprotocols=[Subprotocol("thread")], process_request=upgrade
+        handler, "127.0.0.1", port, subprotocols=[Subprotocol("thread")], process_request=upgrade
     ) as listening:
-        port = next(iter(listening.sockets)).getsockname()[1]
         helper = asyncio.create_task(assistant(server, open_sockets))
-        process = await asyncio.create_subprocess_exec(
-            "npm",
-            "run",
-            "test:e2e",
-            cwd=TYPESCRIPT,
-            env={**os.environ, "THREAD_URL": f"ws://127.0.0.1:{port}"},
-        )
-        code = await asyncio.wait_for(process.wait(), 120)
+        print(f"listening {next(iter(listening.sockets)).getsockname()[1]}", flush=True)
+        await stopped.wait()
         helper.cancel()
-    assert code == 0
+        await asyncio.gather(helper, return_exceptions=True)
+
+
+async def admin(statement: str) -> None:
+    conn = await asyncpg.connect(URL, timeout=5)
+    try:
+        await conn.execute(statement)
+    finally:
+        await conn.close()
+
+
+async def main(port: int) -> None:
+    await admin(f'CREATE SCHEMA "{SCHEMA}"')
+    try:
+        pool: Any = await asyncpg.create_pool(
+            URL, min_size=1, max_size=4, timeout=5, server_settings={"search_path": SCHEMA}
+        )
+        try:
+            async with pool.acquire() as conn:
+                await migrations.apply(conn, migrations.plan_create)
+                await migrations.apply(conn, partial(migrations.plan_search, on=True))
+            await listen(PostgresStorage(pool), port)
+        finally:
+            await asyncio.wait_for(pool.close(), 5)
+    finally:
+        await admin(f'DROP SCHEMA "{SCHEMA}" CASCADE')
+
+
+if __name__ == "__main__":
+    if not URL:
+        sys.exit("tests: the TypeScript client's server needs RFNRY_TEST_POSTGRES_URL")
+    asyncio.run(main(int(sys.argv[1])))

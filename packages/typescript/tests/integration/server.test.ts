@@ -1,15 +1,53 @@
-import { describe, expect, it } from 'vitest'
+import { type ChildProcess, spawn } from 'node:child_process'
+import { join } from 'node:path'
+import { afterAll, beforeAll, describe, expect, it } from 'vitest'
 import { connect, ForbiddenError, InputError, resolve } from '../../src/index.js'
 import type { Item } from '../../src/types.js'
 
-const url = process.env.THREAD_URL ?? ''
-if (!url) throw new Error('e2e: the live tier needs THREAD_URL, the server the Python tier starts')
+const PYTHON = join(import.meta.dirname, '../../../python')
+let server: ChildProcess | null = null
+let url = ''
+
+beforeAll(async () => {
+  const child = spawn('uv', ['run', 'python', 'tests/integration/serve_for_client.py', '0'], {
+    cwd: PYTHON,
+  })
+  server = child
+  const output: string[] = []
+  const port = await new Promise<string>((resolve, reject) => {
+    child.stdout?.on('data', (chunk) => {
+      output.push(String(chunk))
+      const found = output.join('').match(/listening (\d+)/)
+      if (found?.[1]) resolve(found[1])
+    })
+    child.stderr?.on('data', (chunk) => output.push(String(chunk)))
+    child.once('error', (error) =>
+      reject(
+        new Error(
+          `tests: the integration tier needs uv to run the Python server (${error.message})`
+        )
+      )
+    )
+    child.once('exit', (code) =>
+      reject(new Error(`tests: the Python server exited with ${code}: ${output.join('')}`))
+    )
+  })
+  url = `ws://127.0.0.1:${port}`
+})
+
+afterAll(async () => {
+  if (!server || server.exitCode !== null) return
+  const exited = new Promise((resolve) => server?.once('exit', resolve))
+  server.kill()
+  await exited
+})
+
 const helper = { role: 'assistant' as const, id: 'bot-helper', name: 'Helper' }
 
 async function until(check: () => boolean, ms = 5000): Promise<void> {
   const started = Date.now()
   while (!check()) {
-    if (Date.now() - started > ms) throw new Error('e2e: timed out')
+    if (Date.now() - started > ms) throw new Error('tests: timed out')
     await new Promise((resolve) => setTimeout(resolve, 20))
   }
 }
@@ -19,7 +57,7 @@ describe('a live server', () => {
     const client = await connect({ url, protocols: async () => ['thread', 'ana'] })
     const items: Item[] = []
     client.subscribe((item) => items.push(item))
-    const thread = await client.createThread({ threadId: 'e2e-turn' })
+    const thread = await client.createThread({ threadId: 'client-turn' })
     await client.addMember(thread.id, helper)
     await client.join(thread.id, { since: 0 })
     const question = await client.send(thread.id, 'My invoice was charged twice.', {
@@ -47,7 +85,7 @@ describe('a live server', () => {
     const client = await connect({ url, protocols: ['thread', 'ana'] })
     const items: Item[] = []
     client.subscribe((item) => items.push(item), { includeOwn: true })
-    const thread = await client.createThread({ threadId: 'e2e-resume' })
+    const thread = await client.createThread({ threadId: 'client-resume' })
     await client.addMember(thread.id, helper)
     await client.join(thread.id)
     await client.custom(thread.id, 'drop', {})
@@ -70,10 +108,10 @@ describe('a live server', () => {
     const client = await connect({ url, protocols: async () => ['thread', 'ana'] })
     const items: Item[] = []
     client.subscribe((item) => items.push(item), { includeOwn: true })
-    const thread = await client.createThread({ threadId: 'e2e-follow' })
+    const thread = await client.createThread({ threadId: 'client-follow' })
     await client.addMember(thread.id, helper)
     const joined = await client.follow({ resume: true })
-    expect(joined.map((one) => one.thread.id)).toContain('e2e-follow')
+    expect(joined.map((one) => one.thread.id)).toContain('client-follow')
     await client.custom(thread.id, 'drop', {})
     await until(() => client.status === 'open' && items.some((item) => 'status' in item))
     const sent = await client.send(thread.id, 'after the drop')
@@ -89,7 +127,7 @@ describe('a live server', () => {
 
   it('joins with resume and hears what was said while it was away', async () => {
     const ana = await connect({ url, protocols: ['thread', 'ana'] })
-    const thread = await ana.createThread({ threadId: 'e2e-join-resume' })
+    const thread = await ana.createThread({ threadId: 'client-join-resume' })
     await ana.addMember(thread.id, { role: 'user', id: 'bruno', name: 'Bruno' })
     const first = await connect({ url, protocols: ['thread', 'bruno'] })
     await first.join(thread.id, { resume: true })
@@ -119,7 +157,7 @@ describe('a live server', () => {
     })
     const items: Item[] = []
     client.subscribe((item) => items.push(item))
-    const thread = await client.createThread({ threadId: 'e2e-refused' })
+    const thread = await client.createThread({ threadId: 'client-refused' })
     await client.addMember(thread.id, helper)
     await client.join(thread.id)
     await until(() =>
@@ -149,9 +187,9 @@ describe('a live server', () => {
     const bruno = await connect({ url, protocols: ['thread', 'bruno'] })
     const items: Item[] = []
     ana.subscribe((item) => items.push(item))
-    const left = await bruno.createThread({ threadId: 'e2e-left' })
+    const left = await bruno.createThread({ threadId: 'client-left' })
     await bruno.addMember(left.id, ana.identity)
-    const dropper = await ana.createThread({ threadId: 'e2e-left-drop' })
+    const dropper = await ana.createThread({ threadId: 'client-left-drop' })
     await ana.addMember(dropper.id, helper)
     await ana.follow()
     await ana.leave(left.id)
@@ -180,10 +218,10 @@ describe('a live server', () => {
   it('finds its threads by their words, and a message inside one as it reads now', async () => {
     const carol = await connect({ url, protocols: ['thread', 'carol'] })
     const pumps = await carol.createThread({
-      threadId: 'e2e-search-pumps',
+      threadId: 'client-search-pumps',
       metadata: { title: 'Pump gaskets' },
     })
-    await carol.createThread({ threadId: 'e2e-search-other', metadata: { title: 'Other' } })
+    await carol.createThread({ threadId: 'client-search-other', metadata: { title: 'Other' } })
     const sent = await carol.send(pumps.id, 'the gasket leaks')
     await carol.edit(pumps.id, sent.id, 'the gasket leaks oil')
     const found = await carol.listThreads({ query: 'GASKET', order: 'activity' })
@@ -194,7 +232,7 @@ describe('a live server', () => {
     })
     const titled = await carol.listThreads({ query: 'other' })
     expect(titled.map((thread) => [thread.id, thread.match])).toEqual([
-      ['e2e-search-other', undefined],
+      ['client-search-other', undefined],
     ])
     const filtered = await carol.listThreads({ metadata: { title: 'Pump gaskets' } })
     expect(filtered.map((thread) => thread.id)).toEqual([pumps.id])
