@@ -121,7 +121,7 @@ Threads live in Postgres. Start one, with thread's schema prepared by the comman
 installs:
 
 ```bash
-docker run -d --name thread-postgres -e POSTGRES_PASSWORD=thread -p 5432:5432 postgres:16
+docker run -d --name thread-postgres -e POSTGRES_PASSWORD=thread -p 5432:5432 postgres:18
 rfnry-thread create --url postgresql://postgres:thread@localhost:5432/postgres
 ```
 
